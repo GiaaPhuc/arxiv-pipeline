@@ -1,7 +1,7 @@
 # STATUS — Milestone 1 (arXiv crawler)
 
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án. Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T7 17/10/2026, 14:40**
+> Cập nhật lần cuối: **T7 17/10/2026, 15:30**
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -77,7 +77,7 @@
 | R1 | Chưa đủ 20 dải; nếu ~100.000 bài thì một máy arXiv ~7 ngày, năm máy ~1,5 ngày. Lịch 10 ngày chỉ kịp nếu crawl bật tối 21/10 | Cao | Cộng tổng tối 17/10 (T0.7); pilot sáng 21/10 rồi bấm crawl cùng ngày | A |
 | R2 | Chưa gán tên vai A–E; đường găng đi qua A | TB | Gán ở kickoff | Leader |
 | R3 | Chưa có API key S2 | TB | D xin trong T0.4; key chỉ ở biến môi trường / Colab Secrets | D |
-| R4 | CI chưa chạy thật trên GitHub | Thấp | Push và xem Actions | Leader |
+| R4 | CI lần push `Requirements/` đỏ: ruff format sửa code mẫu trong file markdown đề | Thấp | Loại `Requirements/` và `Plans/` khỏi ruff; push lại và xem Actions | Leader |
 | R5 | Phiên bản thư viện chưa ghim (đang dùng khoảng phiên bản) | Thấp | Ghim sau pilot Colab | A |
 | R6 | Đề yêu cầu repo mã **chỉ** có mã + `requirements.txt` + `README.md`; `STATUS.md` và `AGENTS.md` là file ngoài danh sách | TB | Ở T5.3 (đóng băng) quyết định: xóa hai file này khỏi repo nộp hoặc hỏi giảng viên | Leader |
 
@@ -89,6 +89,7 @@ Dòng mới nhất ở trên cùng.
 
 | Ngày giờ | Thay đổi |
 | --- | --- |
+| 17/10 15:30 | CI đỏ vì ruff format đụng code mẫu trong `Requirements/milestone1-data-crawling-vi.md`. Loại `Requirements/` và `Plans/` khỏi ruff trong `pyproject.toml` |
 | 17/10 14:40 | Nén lịch Milestone 1 còn 10 ngày trong playbook §2 và kế hoạch kỹ thuật: nộp mục tiêu chiều 26/10, crawl tối 21/10, hạn 5/11 là đệm. Làm mỏng spike, pilot, metrics, sách |
 | 17/10 14:00 | Chuyển file trạng thái vào repo thành `STATUS.md` (nguồn duy nhất), thêm phần "Đọc nhanh"; thêm `AGENTS.md` hướng dẫn agent đọc/cập nhật file này. Thêm rủi ro R6 |
 | 17/10 13:55 | Tạo file trạng thái (bản đầu, ở thư mục `Plans/`). Xác nhận repo mã còn ở `Initial commit`; `pytest` 17 pass / 26 skip |
