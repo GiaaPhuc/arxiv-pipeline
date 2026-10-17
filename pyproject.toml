@@ -1,0 +1,14 @@
+# Tool configuration only (lint + test). Dependencies live in src/requirements*.txt.
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["src/tests"]
+addopts = "-ra"

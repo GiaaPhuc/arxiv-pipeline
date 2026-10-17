@@ -1,0 +1,22 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.1  # keep equal to ruff in src/requirements-dev.txt
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+  - repo: local
+    hooks:
+      - id: no-data-files
+        name: block data / secrets
+        language: fail
+        entry: Data files and secrets must never be committed (see README)
+        files: (^data/|\.parquet$|\.sqlite$|\.tar\.gz$|\.gz$|(^|/)\.env$)
