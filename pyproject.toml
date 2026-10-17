@@ -5,7 +5,7 @@ line-length = 100
 target-version = "py310"
 src = ["src"]
 # Bản dịch đề và kế hoạch có code mẫu; ruff format không được sửa các file đó.
-extend-exclude = ["Requirements", "Plans"]
+extend-exclude = ["project requirements", "Plans"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
