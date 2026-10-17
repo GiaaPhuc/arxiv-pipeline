@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest>=8
+responses>=0.25
+ruff==0.17.1  # keep equal to rev in .pre-commit-config.yaml
+pre-commit>=3.7
