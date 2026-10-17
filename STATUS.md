@@ -1,13 +1,37 @@
 # STATUS — Milestone 1 (arXiv crawler)
 
-> File sống, **nguồn sự thật duy nhất** về trạng thái dự án. Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T7 17/10/2026, 16:50**
+> File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
+> Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
+> Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
+> Cập nhật lần cuối: **T7 17/10/2026, 18:56**
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
 ---
 
 ## 0. Đọc nhanh (agent / người mới chỉ cần đọc phần này)
+
+### Đề và phạm vi
+
+- Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. Hiện **chỉ làm Milestone 1** (thu thập). Milestone 2 (parse LaTeX thành cây, chuẩn hóa, `\bibitem` → BibTeX, bỏ trùng) và Milestone 3 (đối sánh BibTeX với bảng `references`, MRR@5, poster A2 dọc, dataset Hugging Face) **chưa bắt đầu** — không triển khai.
+- Nộp Milestone 1 qua Moodle: link repo mã công khai + link Jupyter Book (repo sách riêng, GitHub Pages). **Không nộp dữ liệu** ở mốc này. Viết bằng tiếng Việt. Không nộp trễ.
+- Khi nộp, repo mã chỉ được chứa mã (`.py` / `.ipynb`), `requirements.txt` và `README.md`. `STATUS.md`, `AGENTS.md`, `plans/`, `project requirements/` đang ở trong repo để làm việc — xử lý lúc đóng băng (R6, T5.3).
+
+### Milestone 1 — đề vs hiện trạng
+
+| Hạng mục đề | Đề yêu cầu (rút gọn) | Hiện trạng |
+| --- | --- | --- |
+| Phạm vi crawl | Dải arXiv ID được giao; **mọi phiên bản** của từng bài. Không thu hoạch cả kho. OAI-PMH và Kaggle chỉ là hộp công cụ | ⬜ Chưa có file 20 dải (T0.7). Đã chốt: API `id_list`, không dùng OAI/Kaggle |
+| Nguồn và lịch sự | Chỉ `export.arxiv.org`, chờ ≥ 3 giây, một kết nối. Semantic Scholar `paper/arXiv:{id}`, ≥ 1 yêu cầu/giây; khóa API để khỏi bị điều tiết | ⬜ `http.py` còn stub. Chưa có khóa S2 (R3) |
+| Gói nguồn | Tải từng phiên bản qua `/src/{id}vN`. Chỉ giữ `.tex` và `.bib` bằng cách **trích**, không sửa nội dung. Giữ lệnh hình trong TeX. Bản không có TeX = bản ghi rỗng, không bỏ bài | ⬜ `source.py` stub |
+| Siêu dữ liệu | Mỗi phiên bản: tiêu đề, tác giả, ngày nộp, ngày sửa, venue khi có. Mỗi tham khảo S2: tiêu đề, tác giả, ngày, arXiv ID nếu có, S2 ID. Giữ **mọi** tham khảo ở máy | ⬜ `discovery.py`, `s2.py` stub. Hợp đồng nháp ở `src/crawler/models.py` (T0.1, chờ duyệt) |
+| Hai bảng (nộp Hugging Face ở Milestone 3) | `papers`: arxiv_id, title, authors, submission_date, revised_dates, venue. `references`: chỉ tham khảo **có arXiv ID** — arxiv_id, ref_arxiv_id, ref_title, ref_authors, ref_submission_date, ref_s2_id | ⬜ `export.py` stub. Cột đã ghi trong `models.py` |
+| Kho làm việc | Giữ cục bộ làm đầu vào Milestone 2 và 3. Gợi ý đề: một thư mục mỗi bài | ⬜ `corpus.py` stub. Nhóm chọn thêm SQLite manifest để chạy tiếp được |
+| Báo cáo | Jupyter Book: cách thu thập, thư viện, số bài thành công, tỷ lệ thành công, kích thước trung bình trước/sau khi bỏ ảnh, số tham khảo trung bình, tỷ lệ thành công siêu dữ liệu tham khảo. Thời gian wall và RAM trên Colab chỉ CPU. Hình và bảng sinh lúc biên dịch sách | ⬜ Repo sách chưa tạo (T1.4, vai E) |
+| Mã nguồn | Sạch, chạy được, có chú thích; trích dẫn nếu dùng tài liệu ngoài | 🟡 Có khung và test. Chưa có logic crawl |
+| Chấm (5 mục) | Báo cáo, mã, khám phá và tải đủ phiên bản, dữ liệu thu được, hiệu năng so với nhóm khác | ⬜ Chưa có số liệu |
+
+### Việc đang làm (17/10)
 
 - **Giai đoạn:** Phase 0 (khởi động), lịch đã nén còn **10 ngày**. Nộp mục tiêu **chiều 26/10**. Hạn Moodle giả định **5/11** chỉ là đệm. Crawl đủ bắt đầu **tối 21/10**. Đóng băng sáng 26/10.
 - **Mốc kế tiếp:** tối 17/10 — gán A–E, duyệt `src/crawler/models.py` trên chat, đủ 20 dải, spike tối đa 2 giờ. Ngày 18 là code (`http`, `ids`, fixture), không còn ngày viết tài liệu.
@@ -89,6 +113,8 @@ Dòng mới nhất ở trên cùng.
 
 | Ngày giờ | Thay đổi |
 | --- | --- |
+| 17/10 18:56 | Mục 0 thêm bảng đề Milestone 1 so với hiện trạng, để agent không đọc lại `project requirements/` mỗi lần được hỏi |
+| 17/10 18:50 | Thêm phiếu phân công Phase 0 sau họp (`Leader/phase0-phan-cong-vi.md`). Tên A–E còn trống |
 | 17/10 16:50 | Xác nhận `main` trùng `origin/main` (khung đã đẩy, không commit thêm). T0.6 còn mời người, bảo vệ nhánh, xác nhận Actions. Briefing kickoff nằm ngoài repo, thư mục `Leader/` |
 | 17/10 15:30 | CI đỏ vì ruff format đụng code mẫu trong `Requirements/milestone1-data-crawling-vi.md`. Loại `Requirements/` và `Plans/` khỏi ruff trong `pyproject.toml` |
 | 17/10 14:40 | Nén lịch Milestone 1 còn 10 ngày trong playbook §2 và kế hoạch kỹ thuật: nộp mục tiêu chiều 26/10, crawl tối 21/10, hạn 5/11 là đệm. Làm mỏng spike, pilot, metrics, sách |
