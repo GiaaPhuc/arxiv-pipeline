@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **CN 18/10/2026, 12:40**
+> Cập nhật lần cuối: **CN 18/10/2026, 12:50**
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -133,6 +133,7 @@ Dòng mới nhất ở trên cùng.
 
 | Ngày giờ | Thay đổi |
 | --- | --- |
+| 18/10 12:50 | Cập nhật `plans/milestone1-implementation-plan-vi.md` theo Phase 0: 5 dải / 25.000 ID, lô 50, sách v1, pilot 30–50, mỗi người một dải, §11 đã chốt |
 | 18/10 12:40 | Phase 0: khóa `models.py`; chốt T0.2/T0.4/T0.5 theo đề; spike `/src/` (tar.gz, PDF trong dải, 404); thêm `src/id_ranges.csv` (25.000 ID) và `CONTRIBUTING.md`. `pytest` 17 pass / 26 skip. Phiếu Phase 1 nằm ngoài repo |
 | 18/10 | Dời kickoff sang T4 21/10. Hạn Moodle 5/11 là hạn cứng. Nộp mục tiêu chiều 4/11, đóng băng sáng 4/11, crawl đủ tối 25/10. Cập nhật playbook, briefing, phiếu Phase 0 và đoạn lịch ở kế hoạch kỹ thuật |
 | 17/10 18:56 | Mục 0 thêm bảng đề Milestone 1 so với hiện trạng, để agent không đọc lại `project requirements/` mỗi lần được hỏi |
