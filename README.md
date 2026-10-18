@@ -68,6 +68,8 @@ Every module's docstring states its owner, reviewer, task code and "done when" c
 
 ## Working agreement
 
+Full rules: [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 - One task = one owner. Branch name: `m1/<role>-<short-description>` (e.g. `m1/c-source-extract`).
   Never push directly to `main`; open a PR, one reviewer who did **not** write the module.
 - Commit with your own account.
