@@ -1,7 +1,8 @@
-"""Data contract shared by every module (DRAFT for T0.1 — all 5 members must sign off).
+"""Data contract shared by every module.
 
-Change this file only through a PR that every module owner has seen: it is the
-interface between modules. Bump ``SCHEMA_VERSION`` on any on-disk format change.
+Locked 18/10/2026 (T0.1) from the Milestone 1 brief. The 21/10 meeting is told
+the result; it does not reopen the schema. Change this file only through a PR
+that every module owner has seen. Bump ``SCHEMA_VERSION`` on any on-disk change.
 
 On-disk layout (never committed)::
 
