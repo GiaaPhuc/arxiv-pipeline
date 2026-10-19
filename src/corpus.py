@@ -1,6 +1,6 @@
 """The ONLY read API over the crawled corpus, used by Milestones 2 and 3.
 
-Owner: D (with E) | Reviewer: E | Task: T3.2
+Owner: D | Reviewer: E | Task: T3.2
 Milestone 2/3 code must go through this module and never build paths itself.
 """
 

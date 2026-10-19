@@ -1,4 +1,4 @@
-"""T1.3 (owner B, reviewer D). Replace the skips with real tests."""
+"""T1.3 (owner B, reviewer A). Replace the skips with real tests."""
 
 import pytest
 

@@ -1,6 +1,6 @@
 """Export ``papers`` / ``references`` tables and small stats files (no network).
 
-Owner: D (with E) | Reviewer: E | Task: T3.2, T4.4
+Owner: D | Reviewer: E | Task: T3.2, T4.4
 Schemas are fixed by the assignment:
   papers:      arxiv_id (str, not null), title, authors (list[str]),
                submission_date (ISO str), revised_dates (list[str]), venue (str, nullable)

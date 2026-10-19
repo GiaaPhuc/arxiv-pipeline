@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T2 19/10/2026, 15:26**
+> Cập nhật lần cuối: **T2 19/10/2026, 16:25**
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -34,14 +34,14 @@
 ### Việc đang làm (19/10)
 
 - **Giai đoạn:** Phase 0 leader đã làm (18/10). Họp **T4 21/10** nói lại mục tiêu Milestone 1, phần leader đã làm, và trạng thái repo, rồi giao Phase 1. Không còn phiếu Phase 0. Phase 1 = code và pilot, hạn **trưa 25/10**. Phase 2 = crawl, sách, nộp, giao sau go/no-go trưa 25/10, đóng băng **sáng 4/11**, nộp **chiều 4/11**. Hạn Moodle **5/11** là hạn cứng. Crawl đủ bắt đầu **tối 25/10**. Kịch bản họp: `Leader/briefing-kickoff-21-10-vi.md`. Phiếu việc: `Leader/phase1-phan-cong-vi.md` (cả hai ngoài repo).
-- **Mốc trong Phase 1** (không giao lại): hết 22/10 có `http.py`, `manifest.py`, `ids.py`, fixture, trang Pages giả; hết 23/10 có `discovery`, `source`, `s2`; hết 24/10 có pipeline resume; sáng 25/10 pilot 30–50 ID.
+- **Mốc trong Phase 1** (không giao lại): hết 22/10 có `http.py`, `manifest.py`, `ids.py`, fixture, trang Pages giả; hết 23/10 có `discovery`, `source`; sáng 24/10 có `s2`; hết 24/10 có pipeline resume; sáng 25/10 pilot 30–50 ID.
 - **Đã có:** khung repo, `config.py`, `models.py` (hợp đồng đã khóa), `src/id_ranges.csv` (5 dải, 25.000 ID), `CONTRIBUTING.md`, CLI, test khung, ruff/pytest/pre-commit/CI.
 - **Chưa có logic:** `http`, `manifest`, `ids`, `discovery`, `source`, `s2`, `metrics`, `pipeline`, `export`, `corpus`, `validate_corpus` (đều ném `NotImplementedError("T…")`).
 - **Test:** `pytest` 18/10 12:40 → **17 passed, 26 skipped**. `ruff check` và `ruff format --check` sạch.
 - **Bị chặn / còn bấm tay:** A là leader (19/10). Chưa gán tên B–E và chưa gán dải (R2). Chưa có API key S2 (R3). Chưa mời thành viên, chưa bảo vệ `main`, chưa xác nhận Actions trên GitHub (máy này không có `gh`).
-- **Việc kế tiếp:** (1) họp 21/10 giao cả Phase 1 theo phiếu; (2) code từ `http`/`ids`/fixture đến pilot, cùng một hạn trưa 25/10; (3) D xin key trong Phase 1, trước tối 25/10.
-- **Vai → module:** A (leader) `http` `manifest` `pipeline` `metrics` · B `ids` `discovery` · C `source` + fixture · D `s2` `export` `corpus` · E `validate_corpus` + báo cáo (repo sách riêng).
-- **Ai đợi ai trong Phase 1:** B, C, D, E làm bằng test giả, không đợi `http.py`. D (`export`, `corpus`) và E (`validate_corpus`) mỗi người một thư mục mẫu, không đợi crawl và không đợi nhau. A đợi PR `discovery` / `source` / `s2` xanh rồi mới ghép `pipeline` (hết 24/10). Pilot sáng 25/10 đợi pipeline chạy lại được. D đợi key của chính D cho 5 bài S2 thật.
+- **Việc kế tiếp:** (1) họp 21/10 giao cả Phase 1 theo phiếu; (2) code từ `http`/`ids`/fixture đến pilot, cùng một hạn trưa 25/10; (3) B xin key S2 của B trong Phase 1, D gửi link trang đăng ký, trước tối 25/10.
+- **Vai → module:** A (leader) `http` `manifest` `pipeline` `metrics` · B `ids` `discovery` `s2` · C `source` + fixture · D `export` `corpus` + notebook số liệu · E `validate_corpus` + sách (repo riêng). A, B, C viết crawler. D và E vẫn mỗi người một dải và một commit.
+- **Ai đợi ai trong Phase 1:** B và C làm bằng test giả, không đợi `http.py`. B làm `s2` sau `discovery` của chính B. D (`export`, `corpus`) và E (`validate_corpus`) mỗi người một thư mục mẫu, không đợi crawl và không đợi nhau. A đợi PR `discovery` / `source` / `s2` xanh rồi mới ghép `pipeline` (hết 24/10; `s2` hạn sáng 24/10). Pilot sáng 25/10 đợi pipeline chạy lại được. Năm bài S2 thật đợi key của B.
 
 ---
 
@@ -61,7 +61,8 @@
 | 18/10 | **T0.7.** File thực tế có **5 dải**, không phải 20. Mỗi dải 5.000 ID, tổng **25.000**. Mỗi dải nằm trong một tháng, không chồng: tháng 8 `01045–06044`, `06045–11044`, `11045–16044`; tháng 7 `07839–12838`; tháng 6 `07938–12937`. Mỗi người một dải, điền tên ở họp 21/10 |
 | 19/10 | Giao việc còn hai phase sau Phase 0. Phase 1: code + pilot, hạn trưa 25/10. Phase 2: crawl + sách + nộp, đóng băng sáng 4/11. Mã T1–T5 giữ nguyên. Ngày 22, 23, 24 và 1/11 là mốc trong phase |
 | 19/10 | Họp 21/10 nói lại Phase 0 (leader đã làm), không giao spike. Phiếu Phase 1: B/C/D/E không đợi `http.py`; A đợi ba PR rồi mới ghép pipeline; pilot đợi pipeline. Bỏ phiếu `Leader/phase0-phan-cong-vi.md` |
-| 19/10 | Vai A là leader. Họp 21/10 gán B–E, năm dải, và người dự phòng Moodle (một người trong B–E) |
+| 19/10 | Vai A là leader. Họp 21/10 gán B–E, năm dải, và người dự phòng Moodle (một người trong B–E, ưu tiên E) |
+| 19/10 | Ba người viết crawler. A: `http`, `manifest`, `pipeline`, `metrics`. B: `ids`, `discovery`, `s2`. C: fixture, `source`. D: `export`, `corpus`, notebook số liệu, gửi link trang xin key. E: sách và `validate_corpus`. D và E vẫn mỗi người một dải crawl và một commit. Test giả `s2` hạn sáng 24/10. Trễ thì A pair với B trong ngày 24/10 |
 
 **Spike `/src/` ngày 18/10** (User-Agent có link repo, không commit gói):
 
@@ -88,7 +89,7 @@
 | T0.1 | Hợp đồng dữ liệu | Leader | ✅ | `models.py` khóa 18/10. Không đổi schema |
 | T0.2 | Spike arXiv API | Leader | ✅ | Quyết định theo đề, chưa gọi API. Lô 50. Kiểm tra 10 ID thật là việc T2.1 |
 | T0.3 | Spike `/src/` | Leader | ✅ | Bảng ở mục 1. PDF nằm trong dải được giao |
-| T0.4 | Spike S2 + xin API key | Leader / D | 🟡 | Bốn câu đã chốt. Key chưa có (R3). D xin trong Phase 1, trước tối 25/10 |
+| T0.4 | Spike S2 + xin API key | Leader / B | 🟡 | Bốn câu đã chốt. Key chưa có (R3). B xin trong Phase 1; D gửi link trang đăng ký |
 | T0.5 | Câu còn mở với giảng viên | Leader | ✅ | Chưa hỏi. Phương án tạm thành quy ước, không chặn code |
 | T0.6 | Repo, lint, quy ước PR | Leader | 🟡 | `CONTRIBUTING.md` đã có. Còn bấm trên GitHub: mời Write, bảo vệ `main`, xác nhận Actions. Repo sách là T1.4 |
 | T0.7 | File dải + tổng số ID | Leader | ✅ | `src/id_ranges.csv`: 5×5.000 = 25.000. Không bịa thêm 15 dải |
@@ -97,7 +98,7 @@
 
 Một phiếu: nền tảng, module, tích hợp, pilot. Phiếu: `Leader/phase1-phan-cong-vi.md`. Tên A–E điền trong họp 21/10. Cột mốc là thứ tự, không phải lần giao mới.
 
-B, C, D test bằng HTTP giả, không đợi `http.py`. D và E mỗi người một thư mục mẫu cho T3.2, không đợi nhau. A đợi ba PR `discovery` / `source` / `s2` rồi mới làm T3.1. Pilot (T3.3) đợi T3.1. Năm bài S2 thật đợi key của D.
+B và C test bằng HTTP giả, không đợi `http.py`. B làm `s2` sau `discovery`. D và E mỗi người một thư mục mẫu cho T3.2, không đợi nhau. A đợi ba PR `discovery` / `source` / `s2` rồi mới làm T3.1. `s2` hạn sáng 24/10. Pilot (T3.3) đợi T3.1. Năm bài S2 thật đợi key của B.
 
 | Mã | Việc | Owner | Mốc | TT |
 | --- | --- | --- | --- | --- |
@@ -108,9 +109,9 @@ B, C, D test bằng HTTP giả, không đợi `http.py`. D và E mỗi người 
 | T1.5 | Fixture tổng hợp (`tests/conftest.py`) | C | hết 22/10 | ⬜ |
 | T2.1 | `discovery.py` (test giả; 10 ID thật ghi trên PR, không đợi `http.py`) | B | hết 23/10 | ⬜ stub |
 | T2.2 | `source.py` (fixture + client giả, không đợi `http.py`) | C | hết 23/10 | ⬜ stub |
-| T2.3 | `s2.py` test giả hết 23/10; 5 bài thật đợi key của D, trước trưa 25/10 | D | hết 23/10 | ⬜ stub |
+| T2.3 | `s2.py` test giả sáng 24/10; 5 bài thật đợi key của B, trước trưa 25/10 | B | sáng 24/10 | ⬜ stub |
 | T2.4 | Đo mỏng trong pipeline (`metrics.py`) | A | hết 24/10 | ⬜ stub |
-| T2.5 | Notebook thống kê trên số giả / pilot | E | trưa 25/10 | ⬜ |
+| T2.5 | Notebook thống kê trên số giả / pilot. E nhúng vào sách | D | trưa 25/10 | ⬜ |
 | T3.1 | `pipeline.py` (đợi PR discovery, source, s2 xanh) | A | hết 24/10 | ⬜ stub |
 | T3.2 | `export.py` + `corpus.py` (D) và `validate_corpus.py` (E), mỗi người một thư mục mẫu | D, E | hết 24/10 | ⬜ stub |
 | T3.3 | Pilot 30–50 ID trên Colab (đợi pipeline resume) | A + cả nhóm | trưa 25/10 | ⬜ |
@@ -136,8 +137,8 @@ B, C, D test bằng HTTP giả, không đợi `http.py`. D và E mỗi người 
 | # | Mô tả | Mức | Hành động | Owner |
 | --- | --- | --- | --- | --- |
 | R1 | 25.000 ID, 5 dải bằng nhau. Chưa biết số phiên bản trung bình. Một máy, nếu khoảng 2 phiên bản, phần chờ arXiv cỡ 42 giờ cộng thời gian tải. Năm máy, mỗi người một dải, kịp nếu crawl bật tối 25/10 và Colab không bị ngắt | TB | Pilot sáng 25/10 ra số giờ thật rồi mới bấm crawl cùng ngày. Không dồn 25.000 ID vào một Colab | A |
-| R2 | A là leader (19/10). Chưa gán tên B–E và chưa gán 5 dải. Đường găng đi qua A | TB | Gán B–E và dải ở họp 21/10. Người dự phòng Moodle là một người trong B–E | Leader |
-| R3 | Chưa có API key S2. Năm máy dùng chung một key sẽ vượt 1 yêu cầu/giây | TB | Mỗi người một key miễn phí trước tối 25/10. D xin trước và chỉ gửi trang đăng ký, không gửi giá trị key | D |
+| R2 | A là leader (19/10). Chưa gán tên B–E và chưa gán 5 dải. Đường găng code đi qua A và qua B (`discovery` rồi `s2`) | TB | Gán B–E và dải ở họp 21/10. Người dự phòng Moodle ưu tiên E. `s2` trễ sáng 24/10 thì A pair với B trong ngày | Leader |
+| R3 | Chưa có API key S2. Năm máy dùng chung một key sẽ vượt 1 yêu cầu/giây | TB | Mỗi người một key miễn phí trước tối 25/10. B xin key của B trước (5 bài thật). D chỉ gửi trang đăng ký, không gửi giá trị key | B, D |
 | R4 | Actions trên GitHub chưa được xác nhận xanh từ máy này (`gh` không có) | Thấp | Leader mở tab Actions trước khi ai tạo nhánh | Leader |
 | R5 | Phiên bản thư viện chưa ghim (đang dùng khoảng phiên bản) | Thấp | Ghim sau pilot Colab | A |
 | R6 | Đề chỉ cho phép mã + `requirements.txt` + `README.md` trong repo nộp. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md` là file làm việc | TB | Gỡ ở T5.3, hoặc hỏi giảng viên trước khi nộp | Leader |

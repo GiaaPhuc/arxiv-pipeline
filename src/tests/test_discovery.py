@@ -1,4 +1,4 @@
-"""T2.1 (owner B, reviewer D). Replace the skips with real tests (mock API with `responses`)."""
+"""T2.1 (owner B, reviewer A). Replace the skips with real tests (mock API with `responses`)."""
 
 import pytest
 

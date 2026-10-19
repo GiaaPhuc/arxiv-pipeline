@@ -1,6 +1,6 @@
 """Discovery via the arXiv API (``id_list``, batched): metadata + number of versions.
 
-Owner: B | Reviewer: D | Task: T2.1 (spike: T0.2)
+Owner: B | Reviewer: A | Task: T2.1 (spike: T0.2)
 Use only ``arxiv.Client().results(arxiv.Search(id_list=[...]))`` (arxiv.py 4.x).
 Share the arXiv limiter with source downloads (same host).
 Done when: for 10 sample ids, N versions and dates match the arXiv web pages.

@@ -1,6 +1,6 @@
 """Orchestration: two workers (arXiv host, S2 host), resume, atomic writes.
 
-Owner: A (B/C/D support their parts) | Reviewer: C | Task: T3.1
+Owner: A (B/C support their parts) | Reviewer: C | Task: T3.1
 Depends on: T2.1-T2.4.
 Done when: end-to-end on 10-20 real ids; one failing pair never stops the batch;
 re-running skips ``ok`` pairs. The two workers never call each other's host and

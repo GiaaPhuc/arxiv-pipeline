@@ -1,6 +1,6 @@
 """Semantic Scholar Graph API: references of a paper (one call per paper).
 
-Owner: D | Reviewer: E | Task: T2.3 (spike + API key: T0.4)
+Owner: B | Reviewer: A | Task: T2.3 (spike + API key: T0.4)
 Plan D6: call once per base id, store the raw response at paper level, then write
 ``references.json`` into every version dir with ``s2_scope: "paper"``.
 Fields: paperId, title, authors, year/publicationDate, externalIds (incl. ArXiv).

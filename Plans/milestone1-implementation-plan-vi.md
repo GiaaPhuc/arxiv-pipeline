@@ -20,7 +20,7 @@
 | D4  | **Trích xuất an toàn, giữ nguyên cấu trúc thư mục** của gói nguồn, chỉ giữ `.tex`/`.bib`; nhận diện loại file bằng **magic bytes**, không tin phần mở rộng.            | M2 cần `\input{sections/intro}` còn phân giải được; gói nguồn có thể là tar.gz, file .gz đơn, PDF, docx…                      |
 | D5  | **"Lưu thô trước, suy diễn sau"**: lưu nguyên JSON phản hồi arXiv/S2 (nén gz) + bản chuẩn hóa; bảng `papers`/`references` sinh ra từ dữ liệu cục bộ bằng script riêng. | M2/M3 đổi yêu cầu thì không phải crawl lại; kiểm chứng được số liệu báo cáo.                                                  |
 
-**Đã chốt 18/10** (chi tiết §11): dải ID là bốn cột trong `src/id_ranges.csv` (5 dải, 25.000 ID); ID không tồn tại là `not_found`; S2 một lần mỗi bài; tỷ lệ tham khảo báo cả ba cách ở §8. Còn mở, không chặn code: tên A–E, API key S2, bảo vệ nhánh `main`.
+**Đã chốt 18/10** (chi tiết §11): dải ID là bốn cột trong `src/id_ranges.csv` (5 dải, 25.000 ID); ID không tồn tại là `not_found`; S2 một lần mỗi bài; tỷ lệ tham khảo báo cả ba cách ở §8. **Đã chốt 19/10** (§5): A, B, C viết crawler; D giữ bảng và notebook; E giữ sách. Còn mở, không chặn code: tên B–E, API key S2, bảo vệ nhánh `main`.
 
 ---
 
@@ -213,7 +213,15 @@ data/
 
 ## 5. Phân công và thứ tự triển khai (5 thành viên)
 
-**Vai trò** (họp 21/10 điền tên B–E): **A** leader — hạ tầng và tích hợp · **B** Khám phá · **C** Tải và trích xuất · **D** Semantic Scholar và xuất bảng · **E** Báo cáo và kiểm chứng.
+**Vai trò** (chốt 19/10; họp 21/10 điền tên B–E). **A, B, C viết crawler. D giữ số liệu. E giữ sách.** D và E vẫn mỗi người một commit và một dải crawl, và viết sao cho nói được cả luồng thu thập.
+
+- **A** leader — `http`, `manifest`, `pipeline`, `metrics`.
+- **B** — `ids`, `discovery`, `s2`. Hai client JSON cùng một người.
+- **C** — fixture và `source`.
+- **D** — `export`, `corpus`, notebook thống kê. D gửi link trang xin key, không gửi giá trị key.
+- **E** — Jupyter Book và `validate_corpus`.
+
+`s2.py` thuộc B. Test giả của `s2` hạn sáng 24/10, sau `discovery` (hết 23/10). Năm bài thật vẫn trước trưa 25/10. B xin key của B. `s2` trễ quá sáng 24/10 thì A ghép `discovery` và `source` rồi pair với B trong ngày 24/10. Không chuyển `s2` sang D.
 
 ### Phase 0 — đã chốt 18/10
 
@@ -224,7 +232,7 @@ Hợp đồng là `src/crawler/models.py`, không viết tài liệu hợp đồ
 | T0.1 | Hợp đồng dữ liệu: schema, trạng thái, bố cục thư mục                                                                                 | Khóa `models.py`. Không đổi trường                                                                     |
 | T0.2 | Hành vi `id_list`, cỡ lô, ID không tồn tại                                                                                           | Lô 50; ngày theo D5. Chưa gọi API; 10 ID thật là T2.1                                                  |
 | T0.3 | Loại gói `/src/`                                                                                                                     | Đã gặp tar.gz, PDF trong dải, 404. Gzip đơn và zip chưa gặp. Chi tiết ở `STATUS.md`                   |
-| T0.4 | S2: phiên bản, ID cũ, phân trang, ngày, API key                                                                                      | Một lần mỗi bài; phân trang bắt buộc. **Key chưa có**                                                  |
+| T0.4 | S2: phiên bản, ID cũ, phân trang, ngày, API key                                                                                      | Một lần mỗi bài; phân trang bắt buộc. **Key chưa có.** B xin trong Phase 1; D gửi link trang đăng ký   |
 | T0.5 | Các câu §11                                                                                                                          | Dùng phương án ở §11. Chưa hỏi giảng viên, không chặn code                                             |
 | T0.6 | Repo, lint, quy ước PR                                                                                                               | Khung đã ở `main`. Thêm `CONTRIBUTING.md`. Còn mời người, bảo vệ `main`, xác nhận Actions. Sách là T1.4 |
 | T0.7 | File dải ID                                                                                                                          | `src/id_ranges.csv`: 5 dải × 5.000 = 25.000 ID. Mỗi người một dải, điền tên ở họp                      |
@@ -235,7 +243,7 @@ Hai lần giao việc còn lại. Mã task (T1.1, T2.1, …) giữ nguyên trong
 
 Một phiếu cho cả nền tảng, module nghiệp vụ, tích hợp và pilot. Hạn phase là **trưa 25/10** (go/no-go). Ai xong mốc của mình sớm thì làm tiếp task sau trong cùng phase.
 
-B, C, D, E làm module của mình bằng test giả. `discovery`, `source` và `s2` không đợi `http.py`. D xuất bảng và E kiểm tra trên thư mục mẫu mỗi người tự tạo, không đợi crawl và không đợi nhau. Hai chỗ phải đợi: A ghép `pipeline.py` sau khi PR `discovery`, `source`, `s2` xanh; pilot sáng 25/10 đợi pipeline chạy lại được. Phiếu chi tiết nằm ngoài repo, `Leader/phase1-phan-cong-vi.md`.
+B và C làm module bằng test giả, không đợi `http.py`. B làm `s2` sau `discovery` của chính B, cũng bằng test giả. D xuất bảng và E kiểm tra kho trên thư mục mẫu mỗi người tự tạo, không đợi crawl và không đợi nhau. Hai chỗ phải đợi: A ghép `pipeline.py` sau khi PR `discovery` (B), `source` (C) và `s2` (B) xanh; pilot sáng 25/10 đợi pipeline chạy lại được. Phiếu chi tiết nằm ngoài repo, `Leader/phase1-phan-cong-vi.md`.
 
 | Mã   | Việc                                                                                                                  | PT                | Mốc        | Xong khi                                                       |
 | ---- | --------------------------------------------------------------------------------------------------------------------- | ----------------- | ---------- | -------------------------------------------------------------- |
@@ -246,10 +254,10 @@ B, C, D, E làm module của mình bằng test giả. `discovery`, `source` và 
 | T1.5 | Bộ **fixture tổng hợp** (tar.gz có tex+png+bib, `.gz` đơn, PDF, zip, gzip hỏng, tar có `../`, tên trùng, đuôi in hoa) | C                 | hết 22/10  | Dùng được trong test của mọi module                            |
 | T2.1 | `discovery.py`: gọi theo lô, lấy metadata, N phiên bản, ngày từng phiên bản, `venue`                                  | B                 | hết 23/10  | Với 10 ID mẫu: đúng N và ngày so với trang arXiv               |
 | T2.2 | `source.py`: tải stream → nhận diện → trích xuất an toàn → số đo kích thước/sha256 → bản ghi rỗng cho phiên bản không có TeX | C          | hết 23/10  | Toàn bộ fixture qua test; không bao giờ ghi file ngoài thư mục đích |
-| T2.3 | `s2.py`: lấy references, phân trang, 429/backoff, ánh xạ trường, giữ ID gốc kiểu cũ                                   | D                 | hết 23/10  | Test với phản hồi giả lập + 5 bài thật                         |
+| T2.3 | `s2.py`: lấy references, phân trang, 429/backoff, ánh xạ trường, giữ ID gốc kiểu cũ                                   | B                 | sáng 24/10 | Test giả sáng 24/10; 5 bài thật trước trưa 25/10               |
 | T2.4 | `metrics.py`: bộ lấy mẫu RAM (RSS tổng gồm tiến trình con), thời gian theo giai đoạn, kích thước đĩa                  | A                 | hết 24/10  | Số đo ghi vào manifest/log, đối chiếu thử với `/usr/bin/time -v` |
-| T2.5 | Notebook thống kê **dựng sẵn trên dữ liệu pilot/giả** (mọi số liệu đề yêu cầu, §8)                                    | E                 | trưa 25/10 | Build sách ra đủ biểu đồ/bảng từ file thống kê mẫu             |
-| T3.1 | `pipeline.py`: 2 worker, hàng đợi, resume, xử lý lỗi từng cặp mà không dừng cả lô                                     | A (+B,C,D hỗ trợ) | hết 24/10  | Chạy end-to-end 10–20 ID thật                                  |
+| T2.5 | Notebook thống kê **dựng sẵn trên dữ liệu pilot/giả** (mọi số liệu đề yêu cầu, §8)                                    | D                 | trưa 25/10 | Notebook ra đủ số §8 từ file mẫu, ghi “số mẫu”. E nhúng vào sách |
+| T3.1 | `pipeline.py`: 2 worker, hàng đợi, resume, xử lý lỗi từng cặp mà không dừng cả lô                                     | A (+B, C hỗ trợ)  | hết 24/10  | Chạy end-to-end 10–20 ID thật                                  |
 | T3.2 | `export.py` + `corpus.py` + `validate_corpus.py`                                                                      | D + E             | hết 24/10  | Bảng `papers`/`references` đúng schema; validate PASS          |
 | T3.3 | **Pilot 30–50 ID trên Colab**: đo thời gian/RAM/đĩa, nhân ra giờ mỗi máy, soát lỗi lạ                                 | A + cả nhóm       | trưa 25/10 | Có số giờ/RAM/đĩa trước khi bấm crawl tối 25/10                |
 | T3.4 | Review chéo mã (mỗi module do người **khác** review), dọn lint                                                        | Cả nhóm           | trưa 25/10 | Không còn cảnh báo lint; README thử chạy lại từ máy sạch       |
@@ -261,15 +269,15 @@ Một phiếu cho crawl đủ, chạy lại lỗi, số liệu, sách và nộp.
 | Mã   | Việc                                                                                            | PT                | Mốc        | Xong khi                                             |
 | ---- | ----------------------------------------------------------------------------------------------- | ----------------- | ---------- | ---------------------------------------------------- |
 | T4.1 | Mỗi người crawl **một dải** (5.000 ID) trên Colab CPU của mình; A ghép manifest; sao lưu định kỳ ra Drive | Mỗi người; A ghép | 29/10      | Bản ghép: mọi cặp đã khám phá có trạng thái cuối     |
-| T4.2 | Chạy lại các cặp `failed` trên dải của mình; B/C/D chỉ cách sửa theo loại lỗi (arXiv / gói / S2) | Mỗi người         | 1/11       | Danh sách thất bại còn lại kèm lý do, không retry vô hạn |
+| T4.2 | Chạy lại các cặp `failed` trên dải của mình; B chỉ lỗi arXiv và S2, C chỉ lỗi gói | Mỗi người         | 1/11       | Danh sách thất bại còn lại kèm lý do, không retry vô hạn |
 | T4.3 | `validate_corpus.py` toàn bộ + kiểm tra mẫu thủ công ≥ 20 phiên bản với trang arXiv             | E                 | 1/11       | Báo cáo kiểm chứng                                   |
 | T4.4 | Xuất bảng thống kê → commit vào `stats/` của repo sách                                          | D                 | 1/11       | File thống kê khớp manifest                          |
-| T5.1 | Hoàn thiện báo cáo Jupyter Book (mô tả cách thu thập, công cụ, thống kê, hiệu năng, hạn chế). Viết nháp trong lúc crawl | E (+ mỗi người viết phần module mình) | 3/11 | Pages build sạch; hình/bảng sinh lúc build |
+| T5.1 | Hoàn thiện báo cáo Jupyter Book (mô tả cách thu thập, công cụ, thống kê, hiệu năng, hạn chế). Viết nháp trong lúc crawl. D và E viết sao cho nói được cả luồng | E ghép; D viết số; A/B/C một đoạn module | 3/11 | Pages build sạch; hình/bảng sinh lúc build |
 | T5.2 | Hoàn thiện `README.md`; thử chạy lại hướng dẫn từ đầu trên Colab mới                            | A                 | 3/11       | Người khác làm theo được trên Colab mới              |
 | T5.3 | Đóng băng: checklist §10; không dữ liệu/khóa; gỡ file làm việc nếu đề không cho giữ             | Cả nhóm           | sáng 4/11  | Checklist §10 đọc xong                               |
 | T5.4 | Dán 2 liên kết (repo mã + Jupyter Book) lên Moodle                                              | A                 | chiều 4/11 | Cả nhóm thấy bài nộp. Trượt thì nộp lại trong ngày 5/11 |
 
-**Đường găng:** họp 21/10 giao **cả Phase 1** (điền tên và dải) → mốc 22/10 `http.py` + `ids.py` + fixture → mốc 23/10 ba module nghiệp vụ → mốc 24/10 pipeline → trưa 25/10 pilot 30–50 ID rồi giao **Phase 2**, **tối 25/10 chạy đầy đủ** → 1/11 số liệu → đóng băng sáng 4/11, nộp chiều 4/11 (hạn cứng 5/11). Crawl là đoạn dài nhất và không nén được dưới giới hạn 3 giây.
+**Đường găng:** họp 21/10 giao **cả Phase 1** (điền tên và dải) → mốc 22/10 `http.py` + `ids.py` + fixture → mốc 23/10 `discovery` và `source` → sáng 24/10 `s2` (B) rồi pipeline trong ngày 24/10 → trưa 25/10 pilot 30–50 ID rồi giao **Phase 2**, **tối 25/10 chạy đầy đủ** → 1/11 số liệu → đóng băng sáng 4/11, nộp chiều 4/11 (hạn cứng 5/11). Crawl là đoạn dài nhất và không nén được dưới giới hạn 3 giây. Đường găng code đi qua A và qua B.
 
 **Ước lượng, chưa đo tường** (thay bằng số pilot): P = 25.000, lô = 50. arXiv ≈ 3 s × (P/50 + P·V̄), một kết nối, chưa cộng thời gian tải. V̄ = 2 thì một máy khoảng 42 giờ chờ. Năm máy, mỗi người 5.000 ID, khoảng một phần năm. S2 với một key riêng: 5.000 yêu cầu × 1 s ≈ 1,4 giờ mỗi người, chạy chồng với arXiv trên cùng máy. Không chia một key cho năm máy.
 
@@ -294,6 +302,7 @@ Một phiếu cho crawl đủ, chạy lại lỗi, số liệu, sách và nộp.
 | Lỡ **commit dữ liệu/khóa API** vào repo                                                         | `.gitignore`, `pre-commit` chặn file lớn/khóa, kiểm tra ở T5.3.                                                                     |
 | Hình/bảng trong sách là **ảnh tĩnh**                                                            | Mọi hình vẽ từ notebook khi build; kiểm tra bằng build sạch trong CI.                                                               |
 | Nộp trễ (không được chấp nhận)                                                                  | Đóng băng sáng 4/11, nộp mục tiêu chiều 4/11, hạn cứng 5/11. Người dán Moodle có người dự phòng, không phải A.                                                   |
+| B ôm `discovery` lẫn `s2`; `s2` xong sáng 24/10                                                 | Trễ thì A pair với B trong ngày 24/10. Không chuyển `s2` sang D.                                                                    |
 
 ---
 

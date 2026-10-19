@@ -1,6 +1,6 @@
 """arXiv id handling: normalise, expand assigned ranges, map id <-> directory name.
 
-Owner: B | Reviewer: D | Task: T1.3
+Owner: B | Reviewer: A | Task: T1.3
 Done when tests cover new ids, old ids (``hep-th/9901001``) and ids with ``vN``;
 ``IdRange("2024-08", 11045, "2024-08", 16044)`` expands to exactly 5,000 ids
 ``2408.11045`` .. ``2408.16044`` (both ends inclusive). A range spanning several
