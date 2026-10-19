@@ -1,6 +1,6 @@
 # Kế hoạch triển khai Milestone 1 — Thu thập dữ liệu arXiv
 
-> Nhóm 5 thành viên · Môn Nhập môn Khoa học Dữ liệu · Trạng thái: **Phase 0 đã chốt 18/10; họp 21/10 giao Phase 1; hạn Moodle cứng 5/11**
+> Nhóm 5 thành viên · Môn Nhập môn Khoa học Dữ liệu · Trạng thái: **Phase 0 đã chốt 18/10; họp 21/10 giao Phase 1 (code + pilot, hạn trưa 25/10); Phase 2 là crawl và nộp (đóng băng sáng 4/11); hạn Moodle cứng 5/11**
 > Căn cứ: `arxiv-project-statement-vi.md`, `milestone1-data-crawling-vi.md`. Trạng thái sống: `STATUS.md`.
 > **Lịch chạy việc** nằm ở playbook leader (ngoài repo): nộp mục tiêu **chiều 4/11**, crawl bắt đầu **tối 25/10**, hạn Moodle **5/11** là hạn cứng. Thiết kế D1–D5 giữ nguyên. Đã chốt thêm ngày 18/10: hợp đồng `models.py`, lô 50 ID, 5 dải / 25.000 ID, sách Jupyter Book v1. Việc vẫn làm mỏng: pilot 30–50 ID, đo hiệu năng nằm trong pipeline, sách viết trong lúc crawl.
 
@@ -213,7 +213,7 @@ data/
 
 ## 5. Phân công và thứ tự triển khai (5 thành viên)
 
-**Vai trò** (điền tên họp 21/10): **A** Hạ tầng & tích hợp · **B** Khám phá · **C** Tải & trích xuất · **D** Semantic Scholar & xuất bảng · **E** Báo cáo & kiểm chứng.
+**Vai trò** (họp 21/10 điền tên B–E): **A** leader — hạ tầng và tích hợp · **B** Khám phá · **C** Tải và trích xuất · **D** Semantic Scholar và xuất bảng · **E** Báo cáo và kiểm chứng.
 
 ### Phase 0 — đã chốt 18/10
 
@@ -229,54 +229,47 @@ Hợp đồng là `src/crawler/models.py`, không viết tài liệu hợp đồ
 | T0.6 | Repo, lint, quy ước PR                                                                                                               | Khung đã ở `main`. Thêm `CONTRIBUTING.md`. Còn mời người, bảo vệ `main`, xác nhận Actions. Sách là T1.4 |
 | T0.7 | File dải ID                                                                                                                          | `src/id_ranges.csv`: 5 dải × 5.000 = 25.000 ID. Mỗi người một dải, điền tên ở họp                      |
 
-### Phase 1 — Nền tảng (hạn hết 22/10)
+Hai lần giao việc còn lại. Mã task (T1.1, T2.1, …) giữ nguyên trong docstring. Ngày ghi trong cột **Mốc** là thứ tự bên trong phase, không phải một phiếu giao mới.
 
-| Mã   | Việc                                                                                                                  | PT  | Xong khi                                                       |
-| ---- | --------------------------------------------------------------------------------------------------------------------- | --- | -------------------------------------------------------------- |
-| T1.1 | `http.py`: Session, UA, RateLimiter theo host, retry/backoff, ghi nhật ký mọi yêu cầu                                 | A   | Test với đồng hồ giả chứng minh khoảng cách ≥ 3 s              |
-| T1.2 | `manifest.py` + `config.py` + ghi nguyên tử                                                                           | A   | Test: ngắt giữa chừng → chạy lại không tải trùng, không để rác |
-| T1.3 | `ids.py`: chuẩn hóa ID, mở rộng dải (4 số trước 2015, 5 số từ 2015), ánh xạ thư mục, đọc `id_ranges.csv`            | B   | Dải mẫu ra 5.000 ID `2408.11045`…`2408.16044`; `1045` tháng 8 ra `2408.01045` |
-| T1.4 | Khung Jupyter Book v1 + CI build/deploy Pages (nội dung giả)                                                          | E   | Trang Pages công khai build thành công                         |
-| T1.5 | Bộ **fixture tổng hợp** (tar.gz có tex+png+bib, `.gz` đơn, PDF, zip, gzip hỏng, tar có `../`, tên trùng, đuôi in hoa) | C   | Dùng được trong test của mọi module                            |
+### Phase 1 — Code và pilot (giao họp 21/10, hạn trưa 25/10)
 
-### Phase 2 — Module nghiệp vụ (hạn hết 23/10; đo hiệu năng hạn 24/10)
+Một phiếu cho cả nền tảng, module nghiệp vụ, tích hợp và pilot. Hạn phase là **trưa 25/10** (go/no-go). Ai xong mốc của mình sớm thì làm tiếp task sau trong cùng phase.
 
-| Mã   | Việc                                                                                                                         | PT  | Xong khi                                                            |
-| ---- | ---------------------------------------------------------------------------------------------------------------------------- | --- | ------------------------------------------------------------------- |
-| T2.1 | `discovery.py`: gọi theo lô, lấy metadata, N phiên bản, ngày từng phiên bản, `venue`                                         | B   | Với 10 ID mẫu: đúng N và ngày so với trang arXiv                    |
-| T2.2 | `source.py`: tải stream → nhận diện → trích xuất an toàn → số đo kích thước/sha256 → bản ghi rỗng cho phiên bản không có TeX | C   | Toàn bộ fixture qua test; không bao giờ ghi file ngoài thư mục đích |
-| T2.3 | `s2.py`: lấy references, phân trang, 429/backoff, ánh xạ trường, giữ ID gốc kiểu cũ                                          | D   | Test với phản hồi giả lập + 5 bài thật                              |
-| T2.4 | `metrics.py`: bộ lấy mẫu RAM (RSS tổng gồm tiến trình con), thời gian theo giai đoạn, kích thước đĩa                         | A   | Số đo ghi vào manifest/log, đối chiếu thử với `/usr/bin/time -v`    |
-| T2.5 | Notebook thống kê **dựng sẵn trên dữ liệu pilot/giả** (mọi số liệu đề yêu cầu, §8)                                           | E   | Build sách ra đủ biểu đồ/bảng từ file thống kê mẫu                  |
+B, C, D, E làm module của mình bằng test giả. `discovery`, `source` và `s2` không đợi `http.py`. D xuất bảng và E kiểm tra trên thư mục mẫu mỗi người tự tạo, không đợi crawl và không đợi nhau. Hai chỗ phải đợi: A ghép `pipeline.py` sau khi PR `discovery`, `source`, `s2` xanh; pilot sáng 25/10 đợi pipeline chạy lại được. Phiếu chi tiết nằm ngoài repo, `Leader/phase1-phan-cong-vi.md`.
 
-### Phase 3 — Tích hợp và pilot (hạn trưa 25/10)
+| Mã   | Việc                                                                                                                  | PT                | Mốc        | Xong khi                                                       |
+| ---- | --------------------------------------------------------------------------------------------------------------------- | ----------------- | ---------- | -------------------------------------------------------------- |
+| T1.1 | `http.py`: Session, UA, RateLimiter theo host, retry/backoff, ghi nhật ký mọi yêu cầu                                 | A                 | hết 22/10  | Test với đồng hồ giả chứng minh khoảng cách ≥ 3 s              |
+| T1.2 | `manifest.py` + `config.py` + ghi nguyên tử                                                                           | A                 | hết 22/10  | Test: ngắt giữa chừng → chạy lại không tải trùng, không để rác |
+| T1.3 | `ids.py`: chuẩn hóa ID, mở rộng dải (4 số trước 2015, 5 số từ 2015), ánh xạ thư mục, đọc `id_ranges.csv`              | B                 | hết 22/10  | Dải mẫu ra 5.000 ID `2408.11045`…`2408.16044`; `1045` tháng 8 ra `2408.01045` |
+| T1.4 | Khung Jupyter Book v1 + CI build/deploy Pages (nội dung giả)                                                          | E                 | hết 22/10  | Trang Pages công khai build thành công                         |
+| T1.5 | Bộ **fixture tổng hợp** (tar.gz có tex+png+bib, `.gz` đơn, PDF, zip, gzip hỏng, tar có `../`, tên trùng, đuôi in hoa) | C                 | hết 22/10  | Dùng được trong test của mọi module                            |
+| T2.1 | `discovery.py`: gọi theo lô, lấy metadata, N phiên bản, ngày từng phiên bản, `venue`                                  | B                 | hết 23/10  | Với 10 ID mẫu: đúng N và ngày so với trang arXiv               |
+| T2.2 | `source.py`: tải stream → nhận diện → trích xuất an toàn → số đo kích thước/sha256 → bản ghi rỗng cho phiên bản không có TeX | C          | hết 23/10  | Toàn bộ fixture qua test; không bao giờ ghi file ngoài thư mục đích |
+| T2.3 | `s2.py`: lấy references, phân trang, 429/backoff, ánh xạ trường, giữ ID gốc kiểu cũ                                   | D                 | hết 23/10  | Test với phản hồi giả lập + 5 bài thật                         |
+| T2.4 | `metrics.py`: bộ lấy mẫu RAM (RSS tổng gồm tiến trình con), thời gian theo giai đoạn, kích thước đĩa                  | A                 | hết 24/10  | Số đo ghi vào manifest/log, đối chiếu thử với `/usr/bin/time -v` |
+| T2.5 | Notebook thống kê **dựng sẵn trên dữ liệu pilot/giả** (mọi số liệu đề yêu cầu, §8)                                    | E                 | trưa 25/10 | Build sách ra đủ biểu đồ/bảng từ file thống kê mẫu             |
+| T3.1 | `pipeline.py`: 2 worker, hàng đợi, resume, xử lý lỗi từng cặp mà không dừng cả lô                                     | A (+B,C,D hỗ trợ) | hết 24/10  | Chạy end-to-end 10–20 ID thật                                  |
+| T3.2 | `export.py` + `corpus.py` + `validate_corpus.py`                                                                      | D + E             | hết 24/10  | Bảng `papers`/`references` đúng schema; validate PASS          |
+| T3.3 | **Pilot 30–50 ID trên Colab**: đo thời gian/RAM/đĩa, nhân ra giờ mỗi máy, soát lỗi lạ                                 | A + cả nhóm       | trưa 25/10 | Có số giờ/RAM/đĩa trước khi bấm crawl tối 25/10                |
+| T3.4 | Review chéo mã (mỗi module do người **khác** review), dọn lint                                                        | Cả nhóm           | trưa 25/10 | Không còn cảnh báo lint; README thử chạy lại từ máy sạch       |
 
-| Mã   | Việc                                                                                                | PT                | Xong khi                                                 |
-| ---- | --------------------------------------------------------------------------------------------------- | ----------------- | -------------------------------------------------------- |
-| T3.1 | `pipeline.py`: 2 worker, hàng đợi, resume, xử lý lỗi từng cặp mà không dừng cả lô                   | A (+B,C,D hỗ trợ) | Chạy end-to-end 10–20 ID thật                            |
-| T3.2 | `export.py` + `corpus.py` + `validate_corpus.py`                                                    | D + E             | Bảng `papers`/`references` đúng schema; validate PASS    |
-| T3.3 | **Pilot 30–50 ID trên Colab**: đo thời gian/RAM/đĩa, nhân ra giờ mỗi máy, soát lỗi lạ           | A + cả nhóm       | Có số giờ/RAM/đĩa trước khi bấm crawl tối 25/10          |
-| T3.4 | Review chéo mã (mỗi module do người **khác** review), dọn lint                                      | Cả nhóm           | Không còn cảnh báo lint; README thử chạy lại từ máy sạch |
+### Phase 2 — Crawl, sách và nộp (giao sau go/no-go trưa 25/10; đóng băng sáng 4/11; nộp chiều 4/11)
 
-### Phase 4 — Chạy đầy đủ và đo (tối 25/10 đến 1/11)
+Một phiếu cho crawl đủ, chạy lại lỗi, số liệu, sách và nộp. Hạn phase là **sáng 4/11** (đóng băng). Hạn Moodle cứng vẫn là **5/11**.
 
-| Mã   | Việc                                                                                            | PT    | Xong khi                                             |
-| ---- | ----------------------------------------------------------------------------------------------- | ----- | ---------------------------------------------------- |
-| T4.1 | Mỗi người crawl **một dải** (5.000 ID) trên Colab CPU của mình; A ghép manifest; sao lưu định kỳ ra Drive | Mỗi người; A ghép | Bản ghép: mọi cặp đã khám phá có trạng thái cuối     |
-| T4.2 | Chạy lại các cặp `failed` trên dải của mình; B/C/D chỉ cách sửa theo loại lỗi (arXiv / gói / S2)                    | Mỗi người         | Danh sách thất bại còn lại kèm lý do, không retry vô hạn |
-| T4.3 | `validate_corpus.py` toàn bộ + kiểm tra mẫu thủ công ≥ 20 phiên bản với trang arXiv             | E     | Báo cáo kiểm chứng                                   |
-| T4.4 | Xuất bảng thống kê → commit vào `stats/` của repo sách                                          | D     | File thống kê khớp manifest                          |
+| Mã   | Việc                                                                                            | PT                | Mốc        | Xong khi                                             |
+| ---- | ----------------------------------------------------------------------------------------------- | ----------------- | ---------- | ---------------------------------------------------- |
+| T4.1 | Mỗi người crawl **một dải** (5.000 ID) trên Colab CPU của mình; A ghép manifest; sao lưu định kỳ ra Drive | Mỗi người; A ghép | 29/10      | Bản ghép: mọi cặp đã khám phá có trạng thái cuối     |
+| T4.2 | Chạy lại các cặp `failed` trên dải của mình; B/C/D chỉ cách sửa theo loại lỗi (arXiv / gói / S2) | Mỗi người         | 1/11       | Danh sách thất bại còn lại kèm lý do, không retry vô hạn |
+| T4.3 | `validate_corpus.py` toàn bộ + kiểm tra mẫu thủ công ≥ 20 phiên bản với trang arXiv             | E                 | 1/11       | Báo cáo kiểm chứng                                   |
+| T4.4 | Xuất bảng thống kê → commit vào `stats/` của repo sách                                          | D                 | 1/11       | File thống kê khớp manifest                          |
+| T5.1 | Hoàn thiện báo cáo Jupyter Book (mô tả cách thu thập, công cụ, thống kê, hiệu năng, hạn chế). Viết nháp trong lúc crawl | E (+ mỗi người viết phần module mình) | 3/11 | Pages build sạch; hình/bảng sinh lúc build |
+| T5.2 | Hoàn thiện `README.md`; thử chạy lại hướng dẫn từ đầu trên Colab mới                            | A                 | 3/11       | Người khác làm theo được trên Colab mới              |
+| T5.3 | Đóng băng: checklist §10; không dữ liệu/khóa; gỡ file làm việc nếu đề không cho giữ             | Cả nhóm           | sáng 4/11  | Checklist §10 đọc xong                               |
+| T5.4 | Dán 2 liên kết (repo mã + Jupyter Book) lên Moodle                                              | A                 | chiều 4/11 | Cả nhóm thấy bài nộp. Trượt thì nộp lại trong ngày 5/11 |
 
-### Phase 5 — Hoàn thiện và nộp (2–4/11; nộp chiều 4/11; hạn cứng 5/11)
-
-| Mã   | Việc                                                                                         | PT                                    |
-| ---- | -------------------------------------------------------------------------------------------- | ------------------------------------- |
-| T5.1 | Hoàn thiện báo cáo Jupyter Book (mô tả cách thu thập, công cụ, thống kê, hiệu năng, hạn chế) | E (+ mỗi người viết phần module mình) |
-| T5.2 | Hoàn thiện `README.md`; thử chạy lại hướng dẫn từ đầu trên Colab mới                         | A                                     |
-| T5.3 | Đóng băng sáng 4/11: checklist §10; không dữ liệu/khóa; gỡ file làm việc nếu đề không cho giữ | Cả nhóm                               |
-| T5.4 | Dán 2 liên kết (repo mã + Jupyter Book) lên Moodle, **trước hạn**                            | A                                     |
-
-**Đường găng:** họp 21/10 điền tên và dải → hết 22/10 `http.py` + `ids.py` + fixture → 23/10 ba module nghiệp vụ → 24/10 pipeline → trưa 25/10 pilot 30–50 ID rồi **tối 25/10 chạy đầy đủ** → 1/11 số liệu → nộp chiều 4/11 (hạn cứng 5/11). Crawl là đoạn dài nhất và không nén được dưới giới hạn 3 giây.
+**Đường găng:** họp 21/10 giao **cả Phase 1** (điền tên và dải) → mốc 22/10 `http.py` + `ids.py` + fixture → mốc 23/10 ba module nghiệp vụ → mốc 24/10 pipeline → trưa 25/10 pilot 30–50 ID rồi giao **Phase 2**, **tối 25/10 chạy đầy đủ** → 1/11 số liệu → đóng băng sáng 4/11, nộp chiều 4/11 (hạn cứng 5/11). Crawl là đoạn dài nhất và không nén được dưới giới hạn 3 giây.
 
 **Ước lượng, chưa đo tường** (thay bằng số pilot): P = 25.000, lô = 50. arXiv ≈ 3 s × (P/50 + P·V̄), một kết nối, chưa cộng thời gian tải. V̄ = 2 thì một máy khoảng 42 giờ chờ. Năm máy, mỗi người 5.000 ID, khoảng một phần năm. S2 với một key riêng: 5.000 yêu cầu × 1 s ≈ 1,4 giờ mỗi người, chạy chồng với arXiv trên cùng máy. Không chia một key cho năm máy.
 
@@ -432,6 +425,6 @@ Các câu dưới đây từng để mở. Code đi theo bảng này. Hỏi gi�
 | 5 | Bản ghi rỗng | Thư mục không có TeX + `meta.json` có trạng thái |
 | 6 | Sách, key, đóng băng | Jupyter Book v1. Mỗi Colab một API key. Đóng băng sáng 4/11. Nộp mục tiêu chiều 4/11. Hạn Moodle cứng 5/11 |
 
-**Còn mở, không chặn Phase 1:** gán tên A–E và người nhận từng dải (họp 21/10); xin API key S2 trước 23/10; mời thành viên, bảo vệ `main`, xác nhận Actions.
+**Còn mở, không chặn Phase 1:** gán tên B–E và người nhận từng dải (họp 21/10; A đã là leader); xin API key S2 trước tối 25/10; mời thành viên, bảo vệ `main`, xác nhận Actions.
 
-Bước tiếp theo là **Phase 1**, hạn hết 22/10: `http.py`, `manifest.py`, `ids.py`, fixture, trang Pages giả.
+Bước tiếp theo là **Phase 1**, giao một lần ở họp 21/10, hạn **trưa 25/10**: từ `http.py` đến pilot 30–50 ID. **Phase 2** (crawl, sách, nộp) giao sau go/no-go cùng ngày, hạn đóng băng sáng 4/11.

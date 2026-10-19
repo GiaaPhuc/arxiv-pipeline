@@ -20,7 +20,10 @@ After finishing any piece of work in this repo, update `STATUS.md` in the same c
 - update the Milestone 1 requirement table in section 0 when a requirement moves (stub →
   partial → done), plus the "Việc đang làm" bullets and the affected rows in section 2
   (verify numbers by running `pytest` / `git status` instead of guessing);
-- add a new row at the TOP of the changelog (section 4);
+- add a new row at the TOP of section 4 only when the work changes a fact the Milestone 1
+  report must state: how data is collected, which tools are used, a measured number, or a
+  limitation met while collecting. Do not log meetings, role assignments, internal schedules,
+  or edits to working files;
 - adjust decisions (1) and risks (3) if they changed.
 
 Write in Vietnamese, short and factual. Never mark a task ✅ unless its "done when" condition is met.
