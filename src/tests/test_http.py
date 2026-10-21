@@ -38,7 +38,7 @@ def test_arxiv_requests_are_at_least_3s_apart_from_previous_end_fake_clock():
     assert sleeps == [3.0]
 
 
-def test_429_honours_retry_after_and_backs_off():
+def test_429_is_returned_without_client_retry():
     config = Config(contact="test@example.com", max_retries=3)
     limiter = RateLimiter(0.0)
     client = HostClient("https://export.arxiv.org", limiter, config)
@@ -50,13 +50,32 @@ def test_429_honours_retry_after_and_backs_off():
     ok = MagicMock(spec=requests.Response)
     ok.status_code = 200
 
-    client._session.get = MagicMock(side_effect=[too_many, ok])  # noqa: SLF001
+    session_get = MagicMock(side_effect=[too_many, ok])  # noqa: SLF001
+    client._session.get = session_get
 
     with patch("crawler.http.time.sleep") as sleep_mock:
         response = client.get("/api/query?id_list=1")
 
-    assert response.status_code == 200
-    sleep_mock.assert_called_once_with(2.5)
+    assert response.status_code == 429
+    assert session_get.call_count == 1
+    sleep_mock.assert_not_called()
+
+
+def test_403_is_returned_without_client_retry():
+    config = Config(contact="test@example.com", max_retries=3)
+    limiter = RateLimiter(0.0)
+    client = HostClient("https://export.arxiv.org", limiter, config)
+
+    forbidden = MagicMock(spec=requests.Response)
+    forbidden.status_code = 403
+
+    client._session.get = MagicMock(return_value=forbidden)  # noqa: SLF001
+
+    with patch("crawler.http.time.sleep") as sleep_mock:
+        response = client.get("/api/query?id_list=1")
+
+    assert response.status_code == 403
+    sleep_mock.assert_not_called()
 
 
 def test_api_key_never_appears_in_logs(caplog):
