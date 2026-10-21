@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T2 19/10/2026, 16:25**
+> Cập nhật lần cuối: **T4 21/10/2026, 21:58 (Asia/Saigon)**
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -23,19 +23,19 @@
 | --- | --- | --- |
 | Phạm vi crawl | Dải arXiv ID được giao; **mọi phiên bản** của từng bài. Không thu hoạch cả kho. OAI-PMH và Kaggle chỉ là hộp công cụ | 🟡 `src/id_ranges.csv`: 5 dải (tháng 6, 7, 8/2024), **25.000** ID, cả hai đầu. Chưa crawl |
 | Nguồn và lịch sự | Chỉ `export.arxiv.org`, chờ ≥ 3 giây, một kết nối. Semantic Scholar `paper/arXiv:{id}`, ≥ 1 yêu cầu/giây; khóa API để khỏi bị điều tiết | 🟡 Quy ước đã chốt. `http.py` còn stub. Chưa có khóa S2 (R3) |
-| Gói nguồn | Tải từng phiên bản qua `/src/{id}vN`. Chỉ giữ `.tex` và `.bib` bằng cách **trích**, không sửa nội dung. Giữ lệnh hình trong TeX. Bản không có TeX = bản ghi rỗng, không bỏ bài | 🟡 Đã gặp tar.gz (có `.tex` + `.eps`), PDF và 404 trên `export.arxiv.org`. `source.py` vẫn stub |
+| Gói nguồn | Tải từng phiên bản qua `/src/{id}vN`. Chỉ giữ `.tex` và `.bib` bằng cách **trích**, không sửa nội dung. Giữ lệnh hình trong TeX. Bản không có TeX = bản ghi rỗng, không bỏ bài | 🟡 T1.5 đã có tám nhóm fixture bắt buộc và sáu mẫu phụ, 14 kiểm tra pass. `source.py` vẫn stub; chưa kiểm chứng trích xuất |
 | Siêu dữ liệu | Mỗi phiên bản: tiêu đề, tác giả, ngày nộp, ngày sửa, venue khi có. Mỗi tham khảo S2: tiêu đề, tác giả, ngày, arXiv ID nếu có, S2 ID. Giữ **mọi** tham khảo ở máy | 🟡 Hợp đồng khóa ở `src/crawler/models.py` (T0.1). `discovery.py`, `s2.py` stub |
 | Hai bảng (nộp Hugging Face ở Milestone 3) | `papers`: arxiv_id, title, authors, submission_date, revised_dates, venue. `references`: chỉ tham khảo **có arXiv ID** — arxiv_id, ref_arxiv_id, ref_title, ref_authors, ref_submission_date, ref_s2_id | ⬜ `export.py` stub. Cột đã ghi trong `models.py`. `arxiv_id` bài trích dẫn lấy từ thư mục bài lúc xuất, không nằm trên từng `Reference` |
 | Kho làm việc | Giữ cục bộ làm đầu vào Milestone 2 và 3. Gợi ý đề: một thư mục mỗi bài | ⬜ `corpus.py` stub. Bố cục `data/papers/...` đã khóa. Thêm SQLite manifest |
 | Báo cáo | Jupyter Book: cách thu thập, thư viện, số bài thành công, tỷ lệ thành công, kích thước trung bình trước/sau khi bỏ ảnh, số tham khảo trung bình, tỷ lệ thành công siêu dữ liệu tham khảo. Thời gian wall và RAM trên Colab chỉ CPU. Hình và bảng sinh lúc biên dịch sách | ⬜ Repo sách chưa tạo (T1.4, vai E). Chốt dùng Jupyter Book v1 |
-| Mã nguồn | Sạch, chạy được, có chú thích; trích dẫn nếu dùng tài liệu ngoài | 🟡 Có khung và test. Chưa có logic crawl. Quy ước làm việc: `CONTRIBUTING.md` |
+| Mã nguồn | Sạch, chạy được, có chú thích; trích dẫn nếu dùng tài liệu ngoài | 🟡 Có khung và fixture tổng hợp đã kiểm tra (T1.5); 31 passed, 26 skipped. Chưa có logic crawl. Quy ước làm việc: `CONTRIBUTING.md` |
 | Chấm (5 mục) | Báo cáo, mã, khám phá và tải đủ phiên bản, dữ liệu thu được, hiệu năng so với nhóm khác | ⬜ Chưa có số liệu |
 
 ### Việc đang làm (19/10)
 
 - **Giai đoạn:** Phase 0 leader đã làm (18/10). Họp **T4 21/10** nói lại mục tiêu Milestone 1, phần leader đã làm, và trạng thái repo, rồi giao Phase 1. Không còn phiếu Phase 0. Phase 1 = code và pilot, hạn **trưa 25/10**. Phase 2 = crawl, sách, nộp, giao sau go/no-go trưa 25/10, đóng băng **sáng 4/11**, nộp **chiều 4/11**. Hạn Moodle **5/11** là hạn cứng. Crawl đủ bắt đầu **tối 25/10**. Kịch bản họp: `Leader/briefing-kickoff-21-10-vi.md`. Phiếu việc: `Leader/phase1-phan-cong-vi.md` (cả hai ngoài repo).
 - **Mốc trong Phase 1** (không giao lại): hết 22/10 có `http.py`, `manifest.py`, `ids.py`, fixture, trang Pages giả; hết 23/10 có `discovery`, `source`; sáng 24/10 có `s2`; hết 24/10 có pipeline resume; sáng 25/10 pilot 30–50 ID.
-- **Đã có:** khung repo, `config.py`, `models.py` (hợp đồng đã khóa), `src/id_ranges.csv` (5 dải, 25.000 ID), `CONTRIBUTING.md`, CLI, test khung, ruff/pytest/pre-commit/CI.
+- **Đã có:** khung repo, `config.py`, `models.py` (hợp đồng đã khóa), `src/id_ranges.csv` (5 dải, 25.000 ID), `CONTRIBUTING.md`, CLI, fixture T1.5, test khung và 14 kiểm tra fixture, ruff/pytest/pre-commit/CI.
 - **Chưa có logic:** `http`, `manifest`, `ids`, `discovery`, `source`, `s2`, `metrics`, `pipeline`, `export`, `corpus`, `validate_corpus` (đều ném `NotImplementedError("T…")`).
 - **Test:** `pytest` 18/10 12:40 → **17 passed, 26 skipped**. `ruff check` và `ruff format --check` sạch.
 - **Bị chặn / còn bấm tay:** A là leader (19/10). Chưa gán tên B–E và chưa gán dải (R2). Chưa có API key S2 (R3). Chưa mời thành viên, chưa bảo vệ `main`, chưa xác nhận Actions trên GitHub (máy này không có `gh`).
@@ -106,7 +106,7 @@ B và C test bằng HTTP giả, không đợi `http.py`. B làm `s2` sau `discov
 | T1.2 | `manifest.py` + ghi nguyên tử (`config.py` đã xong) | A | hết 22/10 | ⬜ stub |
 | T1.3 | `ids.py` | B | hết 22/10 | ⬜ stub |
 | T1.4 | Khung Jupyter Book v1 + Pages | E | hết 22/10 | ⬜ |
-| T1.5 | Fixture tổng hợp (`tests/conftest.py`) | C | hết 22/10 | ⬜ |
+| T1.5 | Fixture tổng hợp (`tests/conftest.py`) | C (Quỳnh) | hết 22/10 | ✅ Tám nhóm bắt buộc + sáu mẫu phụ trong `tmp_path`; 14 kiểm tra pass |
 | T2.1 | `discovery.py` (test giả; 10 ID thật ghi trên PR, không đợi `http.py`) | B | hết 23/10 | ⬜ stub |
 | T2.2 | `source.py` (fixture + client giả, không đợi `http.py`) | C | hết 23/10 | ⬜ stub |
 | T2.3 | `s2.py` test giả sáng 24/10; 5 bài thật đợi key của B, trước trưa 25/10 | B | sáng 24/10 | ⬜ stub |
