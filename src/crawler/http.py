@@ -2,7 +2,8 @@
 
 Owner: A | Reviewer: C | Task: T1.1
 Done when: fake-clock test proves consecutive arXiv requests are >= 3 s apart
-(measured from the END of the previous request), 429 honours ``Retry-After``,
+(measured from the END of the previous request), 403/429 are returned to the caller
+(without client retry; see CONTRIBUTING.md), transient 5xx may retry with backoff,
 and every request is logged (never log the S2 key).
 
 arXiv API and /src/ share ONE limiter (same host, export.arxiv.org, one connection).
@@ -21,6 +22,9 @@ import requests
 from .config import ARXIV_API_HOST, S2_API_HOST, Config
 
 logger = logging.getLogger(__name__)
+
+# Rate-limit / block responses: stop the run; caller notifies the team (CONTRIBUTING.md).
+_STOP_STATUSES = frozenset({403, 429})
 
 
 class RateLimiter:
@@ -78,15 +82,12 @@ class HostClient:
         else:
             logger.info("%s %s -> %s", method, url, status)
 
-    def _sleep_for_retry(self, response: requests.Response, attempt: int) -> None:
-        if response.status_code == 429:
-            raw = response.headers.get("Retry-After", "1")
-            try:
-                delay = float(raw)
-            except ValueError:
-                delay = 1.0
-        else:
-            delay = min(2**attempt, 60.0)
+    @staticmethod
+    def _is_transient_server_error(status: int) -> bool:
+        return 500 <= status < 600
+
+    def _sleep_for_retry(self, attempt: int) -> None:
+        delay = min(2**attempt, 60.0)
         time.sleep(delay)
 
     def get(self, path: str, **kwargs) -> requests.Response:
@@ -98,8 +99,14 @@ class HostClient:
                 self._log_request("GET", url)
                 response = self._session.get(url, **kwargs)
                 self._log_request("GET", url, response.status_code)
-                if response.status_code == 429 and attempt < self._config.max_retries:
-                    self._sleep_for_retry(response, attempt)
+                if response.status_code in _STOP_STATUSES:
+                    return response
+                if (
+                    self._is_transient_server_error(response.status_code)
+                    and attempt < self._config.max_retries
+                ):
+                    response.close()
+                    self._sleep_for_retry(attempt)
                     continue
                 return response
             finally:
@@ -117,8 +124,13 @@ class HostClient:
                 self._log_request("GET", url)
                 with self._session.get(url, stream=True, **kwargs) as response:
                     self._log_request("GET", url, response.status_code)
-                    if response.status_code == 429 and attempt < self._config.max_retries:
-                        self._sleep_for_retry(response, attempt)
+                    if response.status_code in _STOP_STATUSES:
+                        response.raise_for_status()
+                    if (
+                        self._is_transient_server_error(response.status_code)
+                        and attempt < self._config.max_retries
+                    ):
+                        self._sleep_for_retry(attempt)
                         continue
                     response.raise_for_status()
                     for chunk in response.iter_content(chunk_size=65536):

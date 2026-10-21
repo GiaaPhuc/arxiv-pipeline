@@ -5,7 +5,8 @@ Plan D6: call once per base id, store the raw response at paper level, then writ
 ``references.json`` into every version dir with ``s2_scope: "paper"``.
 Fields: paperId, title, authors, year/publicationDate, externalIds (incl. ArXiv).
 Handle pagination (``.../references`` with offset/limit) if the embedded list is
-truncated, 429 with exponential backoff + ``Retry-After``, and keep old-style ids
+truncated, propagate 403/429 to the caller (no retry; stop run per CONTRIBUTING.md),
+and keep old-style ids
 (``hep-th/9901001``) verbatim. Keep ALL references; filtering to those with an
 arXiv id happens only in export.py. The API key is read from the environment.
 """

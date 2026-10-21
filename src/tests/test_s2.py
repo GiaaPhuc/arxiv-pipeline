@@ -9,7 +9,7 @@ def test_pagination_when_references_are_truncated():
     """..."""
 
 
-def test_429_backoff_and_paper_not_indexed_is_valid_state():
+def test_429_propagates_and_paper_not_indexed_is_valid_state():
     """..."""
 
 
