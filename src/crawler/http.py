@@ -10,12 +10,17 @@ arXiv API and /src/ share ONE limiter (same host, export.arxiv.org, one connecti
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
+from typing import BinaryIO
+from urllib.parse import urljoin
 
 import requests
 
-from .config import Config
+from .config import ARXIV_API_HOST, S2_API_HOST, Config
+
+logger = logging.getLogger(__name__)
 
 
 class RateLimiter:
@@ -30,34 +35,107 @@ class RateLimiter:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        raise NotImplementedError("T1.1")
+        self._min_interval = min_interval
+        self._clock = clock
+        self._sleep = sleep
+        self._last_done_at: float | None = None
 
     def wait(self) -> None:
         """Sleep until the next request is allowed."""
-        raise NotImplementedError("T1.1")
+        if self._last_done_at is None:
+            return
+        elapsed = self._clock() - self._last_done_at
+        remaining = self._min_interval - elapsed
+        if remaining > 0:
+            self._sleep(remaining)
 
     def done(self) -> None:
         """Mark the end of a request (interval is counted from here)."""
-        raise NotImplementedError("T1.1")
+        self._last_done_at = self._clock()
 
 
 class HostClient:
     """Session bound to one host, with limiter, retry/backoff and request logging."""
 
     def __init__(self, base_url: str, limiter: RateLimiter, config: Config) -> None:
-        raise NotImplementedError("T1.1")
+        self._base_url = base_url.rstrip("/") + "/"
+        self.limiter = limiter
+        self._config = config
+        self._session = requests.Session()
+        self._session.headers["User-Agent"] = config.user_agent
+        self._is_s2 = S2_API_HOST in base_url
+        if self._is_s2 and config.s2_api_key:
+            self._session.headers["x-api-key"] = config.s2_api_key
+
+    def _full_url(self, path: str) -> str:
+        if path.startswith("http://") or path.startswith("https://"):
+            return path
+        return urljoin(self._base_url, path.lstrip("/"))
+
+    def _log_request(self, method: str, url: str, status: int | None = None) -> None:
+        if status is None:
+            logger.info("%s %s", method, url)
+        else:
+            logger.info("%s %s -> %s", method, url, status)
+
+    def _sleep_for_retry(self, response: requests.Response, attempt: int) -> None:
+        if response.status_code == 429:
+            raw = response.headers.get("Retry-After", "1")
+            try:
+                delay = float(raw)
+            except ValueError:
+                delay = 1.0
+        else:
+            delay = min(2**attempt, 60.0)
+        time.sleep(delay)
 
     def get(self, path: str, **kwargs) -> requests.Response:
-        raise NotImplementedError("T1.1")
+        url = self._full_url(path)
+        response: requests.Response | None = None
+        for attempt in range(self._config.max_retries + 1):
+            self.limiter.wait()
+            try:
+                self._log_request("GET", url)
+                response = self._session.get(url, **kwargs)
+                self._log_request("GET", url, response.status_code)
+                if response.status_code == 429 and attempt < self._config.max_retries:
+                    self._sleep_for_retry(response, attempt)
+                    continue
+                return response
+            finally:
+                self.limiter.done()
+        assert response is not None
+        return response
 
-    def stream_to_file(self, path: str, dest, **kwargs) -> int:
+    def stream_to_file(self, path: str, dest: BinaryIO, **kwargs) -> int:
         """Stream a response to ``dest`` (never hold the archive in RAM); return bytes written."""
-        raise NotImplementedError("T1.1")
+        url = self._full_url(path)
+        for attempt in range(self._config.max_retries + 1):
+            self.limiter.wait()
+            written = 0
+            try:
+                self._log_request("GET", url)
+                with self._session.get(url, stream=True, **kwargs) as response:
+                    self._log_request("GET", url, response.status_code)
+                    if response.status_code == 429 and attempt < self._config.max_retries:
+                        self._sleep_for_retry(response, attempt)
+                        continue
+                    response.raise_for_status()
+                    for chunk in response.iter_content(chunk_size=65536):
+                        if chunk:
+                            dest.write(chunk)
+                            written += len(chunk)
+                return written
+            finally:
+                self.limiter.done()
+        return written
 
 
 def make_arxiv_client(config: Config) -> HostClient:
-    raise NotImplementedError("T1.1")
+    limiter = RateLimiter(config.arxiv_min_interval)
+    return HostClient(f"https://{ARXIV_API_HOST}", limiter, config)
 
 
 def make_s2_client(config: Config) -> HostClient:
-    raise NotImplementedError("T1.1")
+    limiter = RateLimiter(config.s2_min_interval)
+    return HostClient(f"https://{S2_API_HOST}", limiter, config)
