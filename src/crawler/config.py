@@ -34,10 +34,22 @@ class Config:
 
     @classmethod
     def from_env(cls, **overrides) -> Config:
+        env_file = Path(".env")
+        local_vars: dict[str, str] = {}
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    local_vars[k.strip()] = v.strip()
+
+        data_dir_raw = (
+            os.environ.get("CRAWLER_DATA_DIR") or local_vars.get("CRAWLER_DATA_DIR") or "data"
+        )
         values = {
-            "data_dir": Path(os.environ.get("CRAWLER_DATA_DIR", "data")),
-            "contact": os.environ.get("CRAWLER_CONTACT", ""),
-            "s2_api_key": os.environ.get("S2_API_KEY") or None,
+            "data_dir": Path(data_dir_raw),
+            "contact": os.environ.get("CRAWLER_CONTACT") or local_vars.get("CRAWLER_CONTACT") or "",
+            "s2_api_key": os.environ.get("S2_API_KEY") or local_vars.get("S2_API_KEY") or None,
         }
         values.update(overrides)
         return cls(**values)
