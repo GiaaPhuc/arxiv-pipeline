@@ -224,3 +224,6 @@ data/
 *.tar.gz
 *.parquet
 *.sqlite
+
+# Local Cursor agent skills (not part of the submission)
+.cursor/skills/

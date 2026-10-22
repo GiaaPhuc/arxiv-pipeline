@@ -19,6 +19,7 @@
 | D3  | **Hai worker song song theo host** (arXiv/export và S2), mỗi host có bộ giới hạn tốc độ riêng, tuân thủ ≥ 3 s/yêu cầu (arXiv) và 1 req/s (S2, nên dùng API key).       | Hai host độc lập → tăng hiệu năng mà không vi phạm quy tắc. Không "đua" bằng cách vượt giới hạn (bị chặn IP là hỏng cả nhóm). |
 | D4  | **Trích xuất an toàn, giữ nguyên cấu trúc thư mục** của gói nguồn, chỉ giữ `.tex`/`.bib`; nhận diện loại file bằng **magic bytes**, không tin phần mở rộng.            | M2 cần `\input{sections/intro}` còn phân giải được; gói nguồn có thể là tar.gz, file .gz đơn, PDF, docx…                      |
 | D5  | **"Lưu thô trước, suy diễn sau"**: lưu nguyên JSON phản hồi arXiv/S2 (nén gz) + bản chuẩn hóa; bảng `papers`/`references` sinh ra từ dữ liệu cục bộ bằng script riêng. | M2/M3 đổi yêu cầu thì không phải crawl lại; kiểm chứng được số liệu báo cáo.                                                  |
+| D8  | **Một corpus crawl chung** cho nhóm (và cho cả ba milestone): gom **toàn bộ** ID trong `src/id_ranges.csv` (**25.000**), **một máy crawler** chạy một luồng (manifest resume). Mỗi người vẫn **một dải 5.000 ID** để theo dõi, chạy lại lỗi và **trích dữ liệu riêng lúc nộp Hugging Face (M3)** — không crawl riêng từng dải trên năm Colab. | Khuyến nghị giảng viên: tiết kiệm tài nguyên; tránh crawl trùng; M1/M2 dùng chung kho làm việc.                               |
 
 **Đã chốt 18/10** (chi tiết §11): dải ID là bốn cột trong `src/id_ranges.csv` (5 dải, 25.000 ID); ID không tồn tại là `not_found`; S2 một lần mỗi bài; tỷ lệ tham khảo báo cả ba cách ở §8. **Đã chốt 19/10** (§5): A, B, C viết crawler; D giữ bảng và notebook; E giữ sách. Còn mở, không chặn code: tên B–E, API key S2, bảo vệ nhánh `main`.
 
@@ -95,7 +96,7 @@ Bước 3→4 và bước 5 chạy cùng lúc. Bước 7 chạy một lần, sau
 
 - Mỗi host một `RateLimiter` + `Session` riêng. arXiv chờ ≥ 3 s tính từ lúc **kết thúc** yêu cầu trước. Đây là quy ước làm việc từ 18/10, không đo từ lúc bắt đầu.
 - Một kết nối tại một thời điểm cho arXiv (API và `/src/` cùng dùng một limiter — chúng cùng thuộc `export.arxiv.org`).
-- S2: **mỗi Colab một API key miễn phí** (đọc từ biến môi trường, **không commit**). Năm máy dùng chung một key sẽ vượt 1 yêu cầu/giây. Xử lý `429` bằng backoff mũ + tôn trọng `Retry-After`. Chưa có key lúc 18/10; không có key thì giới hạn thực tế ≈ 100 yêu cầu/5 phút.
+- S2: **một API key trên máy đang crawl đủ 25.000 ID** (đọc từ biến môi trường, **không commit**; thường là key của B). Mỗi người vẫn có thể xin key riêng cho pilot/dev trên Colab cá nhân. Xử lý `429` bằng backoff mũ + tôn trọng `Retry-After`. Chưa có key lúc 18/10; không có key thì giới hạn thực tế ≈ 100 yêu cầu/5 phút.
 - Dùng **thread** (tác vụ I/O, chỉ 2 worker) thay vì asyncio — đơn giản, dễ debug, đủ cho bài toán bị chặn bởi giới hạn tốc độ.
 - Tối ưu hợp lệ: gom nhiều ID vào một lần gọi `id_list` khi khám phá; chồng lấn hai host; bỏ qua cặp đã `ok` trong manifest; không giữ cả gói trong RAM (stream xuống đĩa tạm).
 
@@ -117,6 +118,21 @@ Bước 3→4 và bước 5 chạy cùng lúc. Bước 7 chạy một lần, sau
 - Khi xuất bảng `references`, `arxiv_id` của bài trích dẫn lấy từ thư mục bài. Một cặp trích dẫn chỉ một dòng, không nhân theo số phiên bản.
 
 **D7 — Quy ước đặt tên.** `2310.12345` → thư mục `2310-12345`; ID kiểu cũ `hep-th/9901001` → `hep-th-9901001`. **ID gốc luôn được lưu nguyên văn** trong metadata (không suy ngược từ tên thư mục).
+
+**D8 — Vận hành crawl (M1 → M3).** Khuyến nghị giảng viên: trong suốt đồ án **có thể chạy chung**, không bắt mỗi thành viên crawl riêng dải ID của mình.
+
+1. **Gom ID:** `ids.load_ranges("src/id_ranges.csv")` mở rộng **cả 5 dải** → một hàng đợi **25.000** ID (không chồng). File CSV vẫn giữ 5 dòng để gán trách nhiệm và lọc sau này.
+2. **Một máy crawl đủ:** Sau go/no-go, **một** môi trường ổn định (ưu tiên máy local / VM có đủ đĩa; Colab nếu session đủ dài) chạy:
+
+   `python src/run_crawl.py --ranges src/id_ranges.csv --data-dir data`
+
+   Pipeline resumable: ngắt giữa chừng thì chạy lại **cùng lệnh** trên **cùng** `data/` (hoặc copy `data/` + manifest đã sao lưu). Không khởi chạy song song hai máy cùng manifest.
+3. **Vai khi crawl:** **A** vận hành máy chính, sao lưu định kỳ `data/` (và `manifest.sqlite`) ra Drive dùng chung. **B–E** không bật crawl full trên Colab riêng; theo dõi tiến độ, viết sách/README, và **T4.2** chạy lại `failed` **trong dải được giao** (có thể trên máy chính hoặc pilot nhỏ `--limit`).
+4. **Báo cáo M1:** Thống kê và hiệu năng trên **toàn bộ 25.000 ID** (một lần đo end-to-end). Sách có thể thêm bảng phụ theo từng dải nếu cần so sánh nội bộ.
+5. **M2/M3:** Parse và đối sánh trên **cùng** thư mục `data/` — không crawl lại trừ khi bổ sung ID mới (nếu đề mở rộng phạm vi).
+6. **Hugging Face (cuối M3):** Xuất/upload **subset** theo dải từng thành viên (lọc `papers`/`references` và thư mục `data/papers/` theo danh sách ID trong dải đó). Corpus đầy đủ vẫn giữ nội bộ cho nhóm.
+
+**Dự phòng (chỉ khi máy chính không kịp):** Chia **phần còn lại** của hàng đợi (theo manifest `pending`/`failed`) cho tối đa một máy phụ, vẫn **một manifest** do A ghép — không quay lại mô hình “5 Colab × 5.000 ID” mặc định.
 
 ---
 
@@ -213,7 +229,7 @@ data/
 
 ## 5. Phân công và thứ tự triển khai (5 thành viên)
 
-**Vai trò** (chốt 19/10; họp 21/10 điền tên B–E). **A, B, C viết crawler. D giữ số liệu. E giữ sách.** D và E vẫn mỗi người một commit và một dải crawl, và viết sao cho nói được cả luồng thu thập.
+**Vai trò** (chốt 19/10; họp 21/10 điền tên B–E). **A, B, C viết crawler. D giữ số liệu. E giữ sách.** Mỗi người **một dải 5.000 ID** (trách nhiệm theo dõi, chạy lại lỗi, trích subset M3) — **không** crawl riêng dải đó trên Colab cá nhân ở Phase 2 (D8). D và E vẫn mỗi người một commit và viết sao cho nói được cả luồng thu thập.
 
 - **A** leader — `http`, `manifest`, `pipeline`, `metrics`.
 - **B** — `ids`, `discovery`, `s2`. Hai client JSON cùng một người.
@@ -235,7 +251,7 @@ Hợp đồng là `src/crawler/models.py`, không viết tài liệu hợp đồ
 | T0.4 | S2: phiên bản, ID cũ, phân trang, ngày, API key                                                                                      | Một lần mỗi bài; phân trang bắt buộc. **Key chưa có.** B xin trong Phase 1; D gửi link trang đăng ký   |
 | T0.5 | Các câu §11                                                                                                                          | Dùng phương án ở §11. Chưa hỏi giảng viên, không chặn code                                             |
 | T0.6 | Repo, lint, quy ước PR                                                                                                               | Khung đã ở `main`. Thêm `CONTRIBUTING.md`. Còn mời người, bảo vệ `main`, xác nhận Actions. Sách là T1.4 |
-| T0.7 | File dải ID                                                                                                                          | `src/id_ranges.csv`: 5 dải × 5.000 = 25.000 ID. Mỗi người một dải, điền tên ở họp                      |
+| T0.7 | File dải ID                                                                                                                          | `src/id_ranges.csv`: 5 dải × 5.000 = 25.000 ID. Mỗi người một dải (gán trách nhiệm), crawl **một lần** trên một máy với **cả file** (D8) |
 
 Hai lần giao việc còn lại. Mã task (T1.1, T2.1, …) giữ nguyên trong docstring. Ngày ghi trong cột **Mốc** là thứ tự bên trong phase, không phải một phiếu giao mới.
 
@@ -259,7 +275,7 @@ B và C làm module bằng test giả, không đợi `http.py`. B làm `s2` sau 
 | T2.5 | Notebook thống kê **dựng sẵn trên dữ liệu pilot/giả** (mọi số liệu đề yêu cầu, §8)                                    | D                 | trưa 25/10 | Notebook ra đủ số §8 từ file mẫu, ghi “số mẫu”. E nhúng vào sách |
 | T3.1 | `pipeline.py`: 2 worker, hàng đợi, resume, xử lý lỗi từng cặp mà không dừng cả lô                                     | A (+B, C hỗ trợ)  | hết 24/10  | Chạy end-to-end 10–20 ID thật                                  |
 | T3.2 | `export.py` + `corpus.py` + `validate_corpus.py`                                                                      | D + E             | hết 24/10  | Bảng `papers`/`references` đúng schema; validate PASS          |
-| T3.3 | **Pilot 30–50 ID trên Colab**: đo thời gian/RAM/đĩa, nhân ra giờ mỗi máy, soát lỗi lạ                                 | A + cả nhóm       | trưa 25/10 | Có số giờ/RAM/đĩa trước khi bấm crawl tối 25/10                |
+| T3.3 | **Pilot 30–50 ID trên Colab**: đo thời gian/RAM/đĩa, **nhân ra giờ crawl đủ 25.000 ID trên một máy**, soát lỗi lạ   | A + cả nhóm       | trưa 25/10 | Có ước lượng giờ/RAM/đĩa cho **một** máy trước khi bật crawl tối 25/10 |
 | T3.4 | Review chéo mã (mỗi module do người **khác** review), dọn lint                                                        | Cả nhóm           | trưa 25/10 | Không còn cảnh báo lint; README thử chạy lại từ máy sạch       |
 
 ### Phase 2 — Crawl, sách và nộp (giao sau go/no-go trưa 25/10; đóng băng sáng 4/11; nộp chiều 4/11)
@@ -268,8 +284,8 @@ Một phiếu cho crawl đủ, chạy lại lỗi, số liệu, sách và nộp.
 
 | Mã   | Việc                                                                                            | PT                | Mốc        | Xong khi                                             |
 | ---- | ----------------------------------------------------------------------------------------------- | ----------------- | ---------- | ---------------------------------------------------- |
-| T4.1 | Mỗi người crawl **một dải** (5.000 ID) trên Colab CPU của mình; A ghép manifest; sao lưu định kỳ ra Drive | Mỗi người; A ghép | 29/10      | Bản ghép: mọi cặp đã khám phá có trạng thái cuối     |
-| T4.2 | Chạy lại các cặp `failed` trên dải của mình; B chỉ lỗi arXiv và S2, C chỉ lỗi gói | Mỗi người         | 1/11       | Danh sách thất bại còn lại kèm lý do, không retry vô hạn |
+| T4.1 | **Một máy** crawl **25.000 ID** (`--ranges src/id_ranges.csv`); A vận hành; sao lưu `data/` + manifest ra Drive dùng chung; B–E theo dõi + viết sách | A (vận hành); cả nhóm (sao lưu/theo dõi) | 29/10 | Mọi cặp (bài, phiên bản) đã khám phá có trạng thái cuối trên corpus chung |
+| T4.2 | Chạy lại các cặp `failed` — **owner theo dải** (B: arXiv/S2 trong dải B; C: gói nguồn; …); chạy trên máy chính hoặc pilot có `--limit` | Owner từng dải + A | 1/11 | Danh sách thất bại còn lại kèm lý do, không retry vô hạn |
 | T4.3 | `validate_corpus.py` toàn bộ + kiểm tra mẫu thủ công ≥ 20 phiên bản với trang arXiv             | E                 | 1/11       | Báo cáo kiểm chứng                                   |
 | T4.4 | Xuất bảng thống kê → commit vào `stats/` của repo sách                                          | D                 | 1/11       | File thống kê khớp manifest                          |
 | T5.1 | Hoàn thiện báo cáo Jupyter Book (mô tả cách thu thập, công cụ, thống kê, hiệu năng, hạn chế). Viết nháp trong lúc crawl. D và E viết sao cho nói được cả luồng | E ghép; D viết số; A/B/C một đoạn module | 3/11 | Pages build sạch; hình/bảng sinh lúc build |
@@ -277,9 +293,9 @@ Một phiếu cho crawl đủ, chạy lại lỗi, số liệu, sách và nộp.
 | T5.3 | Đóng băng: checklist §10; không dữ liệu/khóa; gỡ file làm việc nếu đề không cho giữ             | Cả nhóm           | sáng 4/11  | Checklist §10 đọc xong                               |
 | T5.4 | Dán 2 liên kết (repo mã + Jupyter Book) lên Moodle                                              | A                 | chiều 4/11 | Cả nhóm thấy bài nộp. Trượt thì nộp lại trong ngày 5/11 |
 
-**Đường găng:** họp 21/10 giao **cả Phase 1** (điền tên và dải) → mốc 22/10 `http.py` + `ids.py` + fixture → mốc 23/10 `discovery` và `source` → sáng 24/10 `s2` (B) rồi pipeline trong ngày 24/10 → trưa 25/10 pilot 30–50 ID rồi giao **Phase 2**, **tối 25/10 chạy đầy đủ** → 1/11 số liệu → đóng băng sáng 4/11, nộp chiều 4/11 (hạn cứng 5/11). Crawl là đoạn dài nhất và không nén được dưới giới hạn 3 giây. Đường găng code đi qua A và qua B.
+**Đường găng:** họp 21/10 giao **cả Phase 1** (điền tên và dải) → mốc 22/10 `http.py` + `ids.py` + fixture → mốc 23/10 `discovery` và `source` → sáng 24/10 `s2` (B) rồi pipeline trong ngày 24/10 → trưa 25/10 pilot 30–50 ID rồi giao **Phase 2**, **tối 25/10 bật crawl đủ trên một máy** → 1/11 số liệu → đóng băng sáng 4/11, nộp chiều 4/11 (hạn cứng 5/11). Crawl là đoạn dài nhất và không nén được dưới giới hạn 3 giây. Đường găng code đi qua A và qua B.
 
-**Ước lượng, chưa đo tường** (thay bằng số pilot): P = 25.000, lô = 50. arXiv ≈ 3 s × (P/50 + P·V̄), một kết nối, chưa cộng thời gian tải. V̄ = 2 thì một máy khoảng 42 giờ chờ. Năm máy, mỗi người 5.000 ID, khoảng một phần năm. S2 với một key riêng: 5.000 yêu cầu × 1 s ≈ 1,4 giờ mỗi người, chạy chồng với arXiv trên cùng máy. Không chia một key cho năm máy.
+**Ước lượng, chưa đo tường** (thay bằng số pilot): P = 25.000, lô = 50. arXiv ≈ 3 s × (P/50 + P·V̄), một kết nối, chưa cộng thời gian tải. V̄ = 2 thì **một máy** khoảng **42 giờ chờ** (+ tải/trích xuất) — đây là kịch bản mặc định (D8). S2 trên cùng máy: ~25.000 yêu cầu × 1 s ≈ **7 giờ** (chồng với arXiv qua hai worker). Pilot sáng 25/10 quyết định máy chính (local vs Colab) và lịch sao lưu.
 
 ---
 
@@ -297,7 +313,7 @@ Một phiếu cho crawl đủ, chạy lại lỗi, số liệu, sách và nộp.
 | S2 **chưa lập chỉ mục** bài mới (trễ 1–7 ngày), thiếu dữ liệu, tham khảo thiếu arXiv ID         | Ghi nhận như trạng thái hợp lệ, không retry vô hạn; đối chiếu `.bib` ở M2; báo cáo tỷ lệ.                                           |
 | S2 **429** / giới hạn 100 req/5 phút khi không có key                                           | Mỗi Colab một key (chưa xin lúc 18/10). Backoff theo `Retry-After`. Key chỉ ở biến môi trường hoặc Colab Secrets.                                     |
 | Phản hồi references bị **cắt** do bài có rất nhiều tham khảo                                    | Luôn gọi `.../references` với `offset`/`limit` đến trang ngắn. Không coi một mảng nhúng là đủ.                                                                                       |
-| **Colab ngắt kết nối / đĩa tạm** mất dữ liệu                                                    | Resume qua manifest; sao lưu định kỳ ra Drive (gói nén theo lô, tránh ghi hàng nghìn file nhỏ); chạy một lần đo "sạch" cho số liệu. |
+| **Colab ngắt kết nối / đĩa tạm** mất dữ liệu                                                    | Ưu tiên **một máy ổn định** (local/VM). Resume qua manifest trên cùng `data/`; sao lưu định kỳ ra Drive. Máy chết: khôi phục backup rồi tiếp tục — không mặc định tách 5 Colab. Chạy một lần đo "sạch" cho số liệu hiệu năng. |
 | Số đo hiệu năng **sai lệch** (resume nhiều lần, chạy trên máy khác Colab)                       | Ghi thời gian hoạt động tích lũy theo giai đoạn; số liệu nộp lấy từ chạy trên Colab CPU; nêu rõ nếu có resume.                      |
 | Lỡ **commit dữ liệu/khóa API** vào repo                                                         | `.gitignore`, `pre-commit` chặn file lớn/khóa, kiểm tra ở T5.3.                                                                     |
 | Hình/bảng trong sách là **ảnh tĩnh**                                                            | Mọi hình vẽ từ notebook khi build; kiểm tra bằng build sạch trong CI.                                                               |
@@ -356,6 +372,7 @@ M2 sẽ phân tích cú pháp từng phiên bản thành cây phân cấp và ch
 - `src/corpus.py`: API đọc duy nhất (duyệt bài, duyệt phiên bản, đọc file TeX/bib, đọc metadata/references). M2/M3 gọi qua đây, **không** tự dựng đường dẫn.
 - **Manifest** là nguồn sự thật về trạng thái → M2 biết phiên bản nào "bản ghi rỗng".
 - **Dữ liệu thô S2/arXiv** được giữ lại → có thể đối chiếu `.bib`/`\bibitem` với S2 mà không crawl lại.
+- **Corpus chung (D8):** M2/M3 đọc cùng `data/` sau một lần crawl M1. **Cuối M3:** script xuất subset theo dải từng thành viên cho Hugging Face (lọc theo ID trong `id_ranges.csv`).
 - Quy ước: mỗi milestone thêm package riêng trong `src/` (vd. `src/parsing/`) và commit tích lũy vào cùng repo; báo cáo M2 thêm `m2/` vào cùng Jupyter Book.
 
 ---
@@ -432,7 +449,8 @@ Các câu dưới đây từng để mở. Code đi theo bảng này. Hỏi gi�
 | 3 | Tỷ lệ thành công tham khảo | Báo cả (a), (b), (c) ở §8 |
 | 4 | Chờ 3 giây | Tính từ lúc yêu cầu arXiv trước kết thúc. Mỗi Colab tự chờ |
 | 5 | Bản ghi rỗng | Thư mục không có TeX + `meta.json` có trạng thái |
-| 6 | Sách, key, đóng băng | Jupyter Book v1. Mỗi Colab một API key. Đóng băng sáng 4/11. Nộp mục tiêu chiều 4/11. Hạn Moodle cứng 5/11 |
+| 6 | Sách, key, đóng băng | Jupyter Book v1. Một key S2 trên máy crawl chính (B); mỗi người vẫn có thể xin key cho pilot. Đóng băng sáng 4/11. Nộp mục tiêu chiều 4/11. Hạn Moodle cứng 5/11 |
+| 7 | Crawl chung / HF M3 | Gom 25.000 ID, **một máy** crawl (D8). Subset Hugging Face **cuối M3** theo dải từng người; M1 không tách corpus theo thành viên |
 
 **Còn mở, không chặn Phase 1:** gán tên B–E và người nhận từng dải (họp 21/10; A đã là leader); xin API key S2 trước tối 25/10; mời thành viên, bảo vệ `main`, xác nhận Actions.
 
