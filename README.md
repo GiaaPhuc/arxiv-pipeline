@@ -17,6 +17,9 @@ pre-commit install
 pytest
 ```
 
+**Chỉ lint + test (nhanh, ~3 giây):** cài `src/requirements-ci.txt` (không pandas/pyarrow), rồi `.\scripts\check.ps1`.
+CI GitHub cũng dùng file này — pytest thực tế ~1 giây; nếu UI “chờ” 5–10 phút thường là **hàng đợi runner** hoặc **`pip install` lần đầu** trên máy, không phải test treo.
+
 Environment variables (never commit them; copy nothing into the repo):
 
 | Variable           | Meaning                                                            |

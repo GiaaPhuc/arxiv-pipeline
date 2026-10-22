@@ -1,4 +1,5 @@
 -r requirements.txt
+# Fast lint/test only (CI + scripts/check.ps1): requirements-ci.txt
 pytest>=8
 responses>=0.25
 ruff==0.17.1  # keep equal to rev in .pre-commit-config.yaml
