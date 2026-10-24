@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T7 24/10/2026, 10:21 (Asia/Saigon)**
+> Cập nhật lần cuối: **T7 24/10/2026, 21:35 (Asia/Saigon)**
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -25,22 +25,24 @@
 | Nguồn và lịch sự | Chỉ `export.arxiv.org`, chờ ≥ 3 giây, một kết nối. Semantic Scholar `paper/arXiv:{id}`, ≥ 1 yêu cầu/giây; khóa API để khỏi bị điều tiết | 🟡 `http.py` T1.1: limiter, **403/429 trả caller (không retry client)**, retry 5xx, log không lộ key. Chưa có khóa S2 (R3) |
 | Gói nguồn | Tải từng phiên bản qua `/src/{id}vN`. Chỉ giữ `.tex` và `.bib` bằng cách **trích**, không sửa nội dung. Giữ lệnh hình trong TeX. Bản không có TeX = bản ghi rỗng, không bỏ bài | 🟡 T1.5 đã merge qua PR #4. T2.2 hoàn tất trên `m1/c-source-v3`: tải stream, nhận dạng, trích xuất an toàn; 70 passed, 15 skipped. Chưa có crawl/pilot thật |
 | Siêu dữ liệu | Mỗi phiên bản: tiêu đề, tác giả, ngày nộp, ngày sửa, venue khi có. Mỗi tham khảo S2: tiêu đề, tác giả, ngày, arXiv ID nếu có, S2 ID. Giữ **mọi** tham khảo ở máy | 🟡 Hợp đồng khóa ở `src/crawler/models.py` (T0.1). `discovery.py`, `s2.py` stub |
-| Hai bảng (nộp Hugging Face ở Milestone 3) | `papers`: arxiv_id, title, authors, submission_date, revised_dates, venue. `references`: chỉ tham khảo **có arXiv ID** — arxiv_id, ref_arxiv_id, ref_title, ref_authors, ref_submission_date, ref_s2_id | ⬜ `export.py` stub. Cột đã ghi trong `models.py`. `arxiv_id` bài trích dẫn lấy từ thư mục bài lúc xuất, không nằm trên từng `Reference` |
+| Hai bảng (nộp Hugging Face ở Milestone 3) | `papers`: arxiv_id, title, authors, submission_date, revised_dates, venue. `references`: chỉ tham khảo **có arXiv ID** — arxiv_id, ref_arxiv_id, ref_title, ref_authors, ref_submission_date, ref_s2_id | 🟡 `export_tables()` dùng đúng `schema`, 14 test tổng hợp đạt. Chưa validate/pilot thật. `arxiv_id` bài trích dẫn lấy từ thư mục bài lúc xuất, không nằm trên từng `Reference` |
 | Kho làm việc | Giữ cục bộ làm đầu vào Milestone 2 và 3. Gợi ý đề: một thư mục mỗi bài | 🟡 `manifest.py` xong T1.2 (SQLite + ghi nguyên tử). `corpus.py` đã có API đọc cục bộ; `versions()` trả danh sách đầy đủ, dùng đường dẫn trực tiếp, lọc và sắp xếp `vN`; `references()` đọc danh sách tham khảo qua hàm JSON chung. Test xác nhận phiên bản không TeX vẫn đọc được và file ngoài `tex/` bị bỏ qua. Bố cục `data/papers/...` đã khóa |
-| Báo cáo | Jupyter Book: cách thu thập, thư viện, số bài thành công, tỷ lệ thành công, kích thước trung bình trước/sau khi bỏ ảnh, số tham khảo trung bình, tỷ lệ thành công siêu dữ liệu tham khảo. Thời gian wall và RAM trên Colab chỉ CPU. Hình và bảng sinh lúc biên dịch sách | ⬜ Repo sách chưa tạo (T1.4, vai E). Chốt dùng Jupyter Book v1 |
-| Mã nguồn | Sạch, chạy được, có chú thích; trích dẫn nếu dùng tài liệu ngoài | 🟡 T1.1/T1.2/T1.5 đã có; T2.2 hoàn tất trên nhánh C. Suite hiện tại đạt 115 passed, 4 skipped; chưa tích hợp pipeline/crawl thật. Quy ước làm việc: `CONTRIBUTING.md` |
+| Báo cáo | Jupyter Book: cách thu thập, thư viện, số bài thành công, tỷ lệ thành công, kích thước trung bình trước/sau khi bỏ ảnh, số tham khảo trung bình, tỷ lệ thành công siêu dữ liệu tham khảo. Thời gian wall và RAM trên Colab chỉ CPU. Hình và bảng sinh lúc biên dịch sách | 🟡 `src/corpus_stats.ipynb` đã tạo bảng theo bài/phiên bản trên dữ liệu giả; chưa có bảng tổng hợp, biểu đồ và số đo hiệu năng. Repo sách chưa tạo (T1.4, vai E). Chốt dùng Jupyter Book v1 |
+| Mã nguồn | Sạch, chạy được, có chú thích; trích dẫn nếu dùng tài liệu ngoài | 🟡 T1.1/T1.2/T1.5 đã có; T2.2 hoàn tất trên nhánh C. Suite hiện tại: 129 passed, 2 skipped (pipeline stub); ruff check/format đạt. Chưa tích hợp pipeline/crawl thật. Quy ước làm việc: `CONTRIBUTING.md` |
 | Chấm (5 mục) | Báo cáo, mã, khám phá và tải đủ phiên bản, dữ liệu thu được, hiệu năng so với nhóm khác | ⬜ Chưa có số liệu |
 
 ### Việc đang làm (21/10)
 
+- **Notebook T2.5 (24/10):** đã có bảng theo bài/phiên bản trong `src/corpus_stats.ipynb`. Tách cell thiết lập đường dẫn khỏi import để sửa E402; chuyển tạo/hiển thị DataFrame ra ngoài vòng lặp. Chạy tuần tự các cell trong namespace mới từ `src/` đạt: 1 bài, 1 phiên bản, 2 tham khảo, 1 có arXiv ID. Chưa có bảng tổng hợp, biểu đồ và số đo hiệu năng. Toàn suite: 129 passed, 2 skipped; ruff check/format đạt.
+- **Test export T3.2 (24/10):** fixture trong thư mục tạm, chặn mạng; kiểm tra schema/giá trị Parquet, lọc và chống trùng tham khảo, bảng rỗng, bản không TeX, ID cũ, giữ nguyên nguồn và lỗi dữ liệu. Đã thêm `pyarrow` cho CI. File hiện tại dùng đúng `schema=REFERENCES_SCHEMA`, 14/14 test export đạt.
 - **Corpus T3.2 (24/10):** `versions()` trả đủ `list[VersionMeta]` theo thứ tự số, không dừng sau bản đầu; trả `[]` khi bài chưa có thư mục phiên bản. `_read_json()` chỉ đọc JSON; `references()` tạo `list[Reference]`. Test gồm `v1/v2/v10`, bỏ tên/file sai, nguồn ngoài `tex/`, phiên bản không TeX, metadata sai cấu trúc. 32 test corpus đạt; toàn suite 115 passed, 4 skipped. `ruff check .`, `ruff format .` đạt.
-- **Mock T3.2 (23/10):** đã điền 4 file mẫu cục bộ tại `data/test-corpus/2408-11045/`: một bài, một phiên bản, hai tham khảo (có/không có arXiv ID). Dữ liệu giả theo `models.py`, không commit; thư mục hiện chưa có tầng `papers/` theo bố cục corpus đã khóa.
+- **Mock T3.2 (24/10):** 4 file mẫu cục bộ tại `data/test-corpus/papers/2408-11045/`: một bài, một phiên bản, hai tham khảo (có/không có arXiv ID). Dữ liệu giả theo `models.py`, không commit; đã có tầng `papers/` đúng bố cục corpus.
 - **Kiểm tra mock (23/10):** đọc được theo model, kích thước/SHA-256 khớp; 4 file đều được Git bỏ qua. `pytest`: 71 passed, 15 skipped. `ruff check .` còn 2 lỗi import I001 có sẵn tại `src/corpus.py` và `src/tests/test_corpus.py`, nên chuỗi kiểm tra dừng trước `ruff format .`.
 - **Giai đoạn:** Phase 0 leader đã làm (18/10). Họp **T4 21/10** nói lại mục tiêu Milestone 1, phần leader đã làm, và trạng thái repo, rồi giao Phase 1. Không còn phiếu Phase 0. Phase 1 = code và pilot, hạn **trưa 25/10**. Phase 2 = crawl, sách, nộp, giao sau go/no-go trưa 25/10, đóng băng **sáng 4/11**, nộp **chiều 4/11**. Hạn Moodle **5/11** là hạn cứng. Crawl đủ bắt đầu **tối 25/10**. Kịch bản họp: `Leader/briefing-kickoff-21-10-vi.md`. Phiếu việc: `Leader/phase1-phan-cong-vi.md` (cả hai ngoài repo).
 - **Mốc trong Phase 1** (không giao lại): hết 22/10 có `http.py`, `manifest.py`, `ids.py`, fixture, trang Pages giả; hết 23/10 có `discovery`, `source`; sáng 24/10 có `s2`; hết 24/10 có pipeline resume; sáng 25/10 pilot 30–50 ID.
 - **T2.2 của C:** code/test nằm cục bộ trên `m1/c-source-v3`, base `origin/main=337d38c` (đã có PR #5 sửa HTTP 403/429). PR source chưa tạo; nhánh cũ `m1/c-source-v2` dựa trên base trước PR #5, không dùng để mở PR.
 - **Đã có:** khung repo, `config.py`, `models.py` (hợp đồng đã khóa), `src/id_ranges.csv` (5 dải, 25.000 ID), `CONTRIBUTING.md`, CLI, fixture T1.5, test khung và 14 kiểm tra fixture, ruff/pytest/pre-commit/CI.
-- **Chưa có logic:** `ids`, `discovery`, `s2`, `metrics`, `pipeline`, `export`, `validate_corpus` còn stub. `source.py` đã có implementation trên nhánh local C. **`http.py` và `manifest.py` đã có logic (T1.1, T1.2); HTTP không retry 403/429, retry 5xx.**
+- **Chưa có logic:** `ids`, `discovery`, `s2`, `metrics`, `pipeline`, `validate_corpus` còn stub. `source.py` đã có implementation trên nhánh local C. **`http.py` và `manifest.py` đã có logic (T1.1, T1.2); HTTP không retry 403/429, retry 5xx.**
 - **Test:** trên `m1/c-source-v3` từ `origin/main=337d38c`, `pytest -q` → **70 passed, 15 skipped (1,54 s)**; `ruff check --no-cache .`, `ruff format .` và `git diff --check` đạt (32 file không đổi).
 - **Bị chặn / còn bấm tay:** A là leader (19/10). Chưa gán tên B–E và chưa gán dải (R2). Chưa có API key S2 (R3). Chưa mời thành viên, chưa bảo vệ `main`, chưa xác nhận Actions trên GitHub (máy này không có `gh`).
 - **Việc kế tiếp:** (1) họp 21/10 giao cả Phase 1 theo phiếu; (2) code từ `http`/`ids`/fixture đến pilot, cùng một hạn trưa 25/10; (3) B xin key S2 của B trong Phase 1, D gửi link trang đăng ký, trước tối 25/10.
@@ -117,9 +119,9 @@ B và C test bằng HTTP giả, không đợi `http.py`. B làm `s2` sau `discov
 | T2.2 | `source.py` (fixture + client giả) | C (Quỳnh) | hết 23/10 | ✅ Trích xuất/tải nguồn, 70 passed/15 skipped trên base sau PR #5; chưa chạy crawl thật |
 | T2.3 | `s2.py` test giả sáng 24/10; 5 bài thật đợi key của B, trước trưa 25/10 | B | sáng 24/10 | ⬜ stub |
 | T2.4 | Đo mỏng trong pipeline (`metrics.py`) | A | hết 24/10 | ⬜ stub |
-| T2.5 | Notebook thống kê trên số giả / pilot. E nhúng vào sách | D | trưa 25/10 | ⬜ |
+| T2.5 | Notebook thống kê trên số giả / pilot. E nhúng vào sách | D | trưa 25/10 | 🟡 Bảng theo bài/phiên bản chạy trên corpus giả; đã sửa E402 và thụt lề tạo DataFrame. Chưa có bảng tổng hợp, biểu đồ và số đo hiệu năng |
 | T3.1 | `pipeline.py` (đợi PR discovery, source, s2 xanh) | A | hết 24/10 | ⬜ stub |
-| T3.2 | `export.py` + `corpus.py` (D) và `validate_corpus.py` (E), mỗi người một thư mục mẫu | D, E | hết 24/10 | 🟡 `corpus.py` đọc mock, 32 test đạt; đã tách đọc JSON và tạo model, kiểm tra cấu trúc metadata/tham khảo. `export.py` / validate chưa hoàn tất |
+| T3.2 | `export.py` + `corpus.py` (D) và `validate_corpus.py` (E), mỗi người một thư mục mẫu | D, E | hết 24/10 | 🟡 `corpus.py` đọc mock, 32 test đạt; export có 14 test đạt. Validate chưa hoàn tất |
 | T3.3 | Pilot 30–50 ID trên Colab (đợi pipeline resume) | A + cả nhóm | trưa 25/10 | ⬜ |
 | T3.4 | Review chéo, lint sạch | Cả nhóm | trưa 25/10 | ⬜ |
 

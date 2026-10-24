@@ -1,6 +1,7 @@
-# CI and fast local lint/test (no pandas/pyarrow/arxiv — not needed for current unit tests).
+# CI and fast local lint/test, including Parquet export tests (no pandas/arxiv).
 requests>=2.32,<3
 urllib3>=2.2,<3
 pytest>=8
 responses>=0.25
+pyarrow>=16
 ruff==0.17.1
