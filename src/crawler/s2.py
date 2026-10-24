@@ -14,9 +14,13 @@ arXiv id happens only in export.py. The API key is read from the environment.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 from .http import HostClient
+from .ids import normalize_id, split_version
 from .models import Reference
+
+_FIELDS = "title,authors,year,publicationDate,externalIds"
 
 
 @dataclass
@@ -26,5 +30,61 @@ class S2Result:
     raw: dict | None = None
 
 
+def _parse_ref(item: dict) -> Reference:
+    paper = item.get("citedPaper") or item
+    if not isinstance(paper, dict):
+        paper = {}
+    external = paper.get("externalIds") or {}
+    if not isinstance(external, dict):
+        external = {}
+    arxiv_id = external.get("ArXiv")
+    if arxiv_id:
+        try:
+            arxiv_id, _ = split_version(normalize_id(str(arxiv_id)))
+        except ValueError:
+            arxiv_id = None
+    authors = [a.get("name", "") for a in (paper.get("authors") or []) if isinstance(a, dict)]
+    date = paper.get("publicationDate") or paper.get("year")
+    return Reference(
+        ref_s2_id=paper.get("paperId"),
+        ref_arxiv_id=arxiv_id,
+        ref_title=paper.get("title"),
+        ref_authors=[a for a in authors if a],
+        ref_submission_date=str(date) if date is not None else None,
+    )
+
+
 def fetch_references(client: HostClient, arxiv_id: str) -> S2Result:
-    raise NotImplementedError("T2.3")
+    """Get *all* available S2 references; preserve null arXiv IDs until export.
+
+    On 404 return found=False. Propagate 429/5xx after HostClient retry budget
+    rather than silently treating upstream outages as absent papers.
+    """
+    base, _ = split_version(normalize_id(arxiv_id))
+    paper_id = quote("ARXIV:" + base, safe=":")
+    url = f"/graph/v1/paper/{paper_id}/references"
+    offset, limit = 0, 100
+    all_rows: list[dict] = []
+    pages: list[dict] = []
+    while True:
+        response = client.get(url, params={"fields": _FIELDS, "offset": offset, "limit": limit})
+        if response.status_code == 404:
+            return S2Result(found=False, references=[], raw={"status": 404})
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict) or not isinstance(data.get("data", []), list):
+            raise ValueError("Unexpected Semantic Scholar references response")
+        items = data.get("data", [])
+        pages.append(data)
+        all_rows.extend(items)
+        next_offset = data.get("next")
+        if next_offset is None:
+            break
+        if not isinstance(next_offset, int) or next_offset <= offset:
+            raise ValueError("Non-progressing Semantic Scholar pagination")
+        offset = next_offset
+    return S2Result(
+        found=True,
+        references=[_parse_ref(x) for x in all_rows],
+        raw={"pages": pages, "arxiv_id": base},
+    )
