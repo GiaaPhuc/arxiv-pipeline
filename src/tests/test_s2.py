@@ -137,3 +137,20 @@ def test_references_missing_fields_and_old_style_arxiv_ids_kept_verbatim():
     assert ref_book.ref_arxiv_id is None
     assert ref_book.ref_title == "Textbook Title"
     assert ref_book.ref_submission_date == "1998-05-01"
+
+
+@responses.activate
+def test_fetch_venue_returns_real_venue_and_drops_arxiv_repository():
+    from crawler.s2 import fetch_venue
+
+    base = "https://api.semanticscholar.org/graph/v1/paper"
+    responses.add(responses.GET, f"{base}/ARXIV:2310.00001", json={"venue": "  NeurIPS  2023 "})
+    responses.add(responses.GET, f"{base}/ARXIV:2310.00002", json={"venue": "arXiv.org"})
+    responses.add(responses.GET, f"{base}/ARXIV:2310.00003", json={"venue": ""})
+    responses.add(responses.GET, f"{base}/ARXIV:2310.00004", status=404, json={})
+    client = DummyS2Client()
+
+    assert fetch_venue(client, "2310.00001v2") == "NeurIPS 2023"
+    assert fetch_venue(client, "2310.00002") is None
+    assert fetch_venue(client, "2310.00003") is None
+    assert fetch_venue(client, "2310.00004") is None

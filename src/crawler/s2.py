@@ -54,6 +54,28 @@ def _parse_ref(item: dict) -> Reference:
     )
 
 
+def fetch_venue(client: HostClient, arxiv_id: str) -> str | None:
+    """Venue of the paper according to S2 (fallback for a missing arXiv ``journal_ref``).
+
+    Returns None when S2 does not know the paper or has no real venue. S2 reports
+    ``arXiv.org`` for plain preprints; that is the repository, not a venue, so it is dropped.
+    """
+    base, _ = split_version(normalize_id(arxiv_id))
+    paper_id = quote("ARXIV:" + base, safe=":")
+    response = client.get(f"/graph/v1/paper/{paper_id}", params={"fields": "venue"})
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    data = response.json()
+    venue = data.get("venue") if isinstance(data, dict) else None
+    if not isinstance(venue, str):
+        return None
+    venue = " ".join(venue.split())
+    if not venue or venue.lower() in {"arxiv.org", "arxiv"}:
+        return None
+    return venue
+
+
 def fetch_references(client: HostClient, arxiv_id: str) -> S2Result:
     """Get *all* available S2 references; preserve null arXiv IDs until export.
 
