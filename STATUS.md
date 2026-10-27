@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T3 27/10/2026, 21:35 (Asia/Saigon)** — A: đã push nhánh **`m1/a-pipeline`** (5 commit: http, metrics+pipeline, run_crawl, docs, deps B). Còn local chưa commit: D (`export`/`export_data`), E (`validate_corpus` mở rộng), `colab_run.ipynb`, `STATUS.md`
+> Cập nhật lần cuối: **T3 27/10/2026, 21:43 (Asia/Saigon)** — Toàn bộ đợt rà soát đã trên **`origin/m1/a-pipeline`** (7 commit từ `main`; gồm D/E + `colab_run` + `STATUS`). Working tree sạch; chờ PR/review và pilot.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -33,11 +33,11 @@
 
 ### Việc đang làm (đối chiếu 27/10)
 
-- **Trạng thái code (21:35 27/10):** `origin/main` + nhánh **`m1/a-pipeline`** (đã push) + thay đổi local D/E chưa commit. Python 3.11, `pytest -q` → **177 passed, 0 skipped** (cây làm việc đầy đủ). Mọi test dùng `responses`/dữ liệu giả, không gọi mạng.
-- **A — PR `m1/a-pipeline` (reviewer C):** `http` timeout/retry; `metrics` + `pipeline` + `run_crawl` + README/CONTRIBUTING; commit **`deps`** gom `discovery`/`s2`/`requirements.txt` vì pipeline import trực tiếp (B đồng review). Chưa merge; chưa pilot thật → T2.4/T3.1 vẫn 🟡.
-- **B — trong PR pipeline:** `discovery`/`s2` đã nằm trên `m1/a-pipeline`; nhánh riêng B (nếu có) nên rebase hoặc bỏ trùng. **Còn nợ B:** đối chiếu 10 ID arXiv / 5 bài S2 thật sau merge/pilot.
-- **D — T4.4:** `export_stats()` + CLI `export_data.py` → `data/stats/` (`summary.json`, `papers_stats.csv`, `versions_stats.csv`, `performance.json`), có định nghĩa từng số và ba tỷ lệ tham khảo (a)(b)(c). Cần E nối vào notebook sách khi có số thật.
-- **E:** `validate_corpus` đã ở `main` (PR #10); sách [arxiv-book](https://github.com/GiaaPhuc/arxiv-book). Đợt này validator thêm kiểm tra: thiếu `references.json`, `revised_dates` sai độ dài, hàng `not_found` không có bài; cho phép `stats/` và file WAL ở gốc `data/`.
+- **Trạng thái code (21:43 27/10):** **`origin/m1/a-pipeline`** = toàn bộ mã pilot-ready (A/B/D/E trong một PR tạm). `origin/main` chưa merge. Python 3.11, `pytest -q` → **177 passed, 0 skipped**; `ruff` sạch. Test giả, không mạng.
+- **PR `m1/a-pipeline` (reviewer C, + D/E xem phần mình):** http → metrics+pipeline → run_crawl → docs → deps B → export T4.4 → validate + colab + STATUS. Chưa pilot thật → T2.4/T3.1/T4.4 validator mở rộng vẫn 🟡 đến khi có số crawl.
+- **B — cùng PR:** `discovery`/`s2`; nhánh B riêng (nếu có) tránh trùng diff. **Còn nợ:** 10 ID / 5 bài S2 thật sau pilot.
+- **D — trên PR:** `export_stats` + `export_data.py` → `data/stats/`. E nối sách khi có số thật.
+- **E — trên PR:** mở rộng `validate_corpus` (refs, `revised_dates`, `not_found`, `stats/`, WAL).
 - **Việc kế tiếp (pilot, đợi người cầm máy chính):** đặt `CRAWLER_CONTACT`, `S2_API_KEY` → `python src/run_crawl.py --ranges src/id_ranges.csv --limit 30` → đối chiếu 10 ID/5 bài S2 với trang web → `validate_corpus` → `export_data` → đọc `logs/metrics.json` ước lượng giờ cho 25.000 ID, rồi go/no-go.
 - **Hạn Moodle (ảnh 21/10):** Book M1/M2 **6/11/2026 23:59**, dataset cá nhân **20/11/2026 23:59**, poster **27/11/2026 23:59** — chưa truy cập Moodle trực tiếp.
 - **Còn xác nhận:** key S2 trên máy crawl chính, **Pages [arxiv-book](https://giaaphuc.github.io/arxiv-book/) xanh**, quyền bảo vệ main và người dự phòng nộp Moodle.
