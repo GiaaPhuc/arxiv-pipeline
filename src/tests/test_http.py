@@ -92,3 +92,41 @@ def test_api_key_never_appears_in_logs(caplog):
     joined = "\n".join(r.getMessage() for r in caplog.records)
     assert "super-secret-key-12345" not in joined
     assert client._session.headers["x-api-key"] == "super-secret-key-12345"  # noqa: SLF001
+
+
+def test_default_timeout_is_applied_to_every_request():
+    config = Config(contact="test@example.com", request_timeout=(3.0, 9.0))
+    client = HostClient("https://export.arxiv.org", RateLimiter(0.0), config)
+    ok = MagicMock(spec=requests.Response)
+    ok.status_code = 200
+    client._session.get = MagicMock(return_value=ok)  # noqa: SLF001
+
+    client.get("/api/query?id_list=1")
+    client.get("/api/query?id_list=2", timeout=1.0)
+
+    first, second = client._session.get.call_args_list  # noqa: SLF001
+    assert first.kwargs["timeout"] == (3.0, 9.0)
+    assert second.kwargs["timeout"] == 1.0  # explicit value wins
+
+
+def test_connection_errors_are_retried_within_budget_then_raised():
+    config = Config(contact="test@example.com", max_retries=2)
+    client = HostClient("https://export.arxiv.org", RateLimiter(0.0), config)
+    ok = MagicMock(spec=requests.Response)
+    ok.status_code = 200
+    client._session.get = MagicMock(  # noqa: SLF001
+        side_effect=[requests.ConnectionError("reset"), requests.Timeout("slow"), ok]
+    )
+    with patch("crawler.http.time.sleep"):
+        assert client.get("/api/query?id_list=1").status_code == 200
+    assert client._session.get.call_count == 3  # noqa: SLF001
+
+    client._session.get = MagicMock(side_effect=requests.ConnectionError("down"))  # noqa: SLF001
+    with patch("crawler.http.time.sleep"):
+        try:
+            client.get("/api/query?id_list=1")
+        except requests.ConnectionError:
+            pass
+        else:
+            raise AssertionError("must raise once the retry budget is spent")
+    assert client._session.get.call_count == 3  # noqa: SLF001

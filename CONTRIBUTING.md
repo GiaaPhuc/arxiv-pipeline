@@ -17,7 +17,7 @@ pre-commit install
 pytest
 ```
 
-Kỳ vọng lúc khung chưa có logic module: `17 passed, 26 skipped`. Số khác thì báo người vai A, không sửa file của người khác.
+Kỳ vọng: toàn bộ test đạt, không còn test bị skip (đếm số ở `STATUS.md`). Có test đỏ thì báo người vai A, không sửa file của người khác.
 
 ## Nhánh và pull request
 
@@ -60,13 +60,13 @@ Chỉ ở spike, smoke và pilot. Không gọi trong unit test.
 
 - arXiv chỉ qua `export.arxiv.org`. Không gọi `arxiv.org`.
 - Cách nhau ≥ 3 giây, tính từ lúc yêu cầu trước kết thúc. Một kết nối. API và `/src/` chung một limiter.
-- Semantic Scholar ≥ 1 yêu cầu/giây khi có key. Gặp 429 thì dừng, tôn trọng `Retry-After`, không gọi dồn.
-- Gặp 403 hoặc 429 trên arXiv: dừng và báo nhóm. Không tăng số kết nối.
+- Semantic Scholar ≥ 1 yêu cầu/giây khi có key. Gặp 429 thì chờ `Retry-After` (30–600 giây) rồi thử lại tối đa 4 lần cho bài đó; hết lần thì bỏ bài đó ở lần chạy này (lần sau tự làm lại). 403 (key sai) hoặc 5 bài liên tiếp bị bỏ thì tắt worker S2 trong lần chạy này, arXiv vẫn chạy tiếp.
+- Gặp 403 hoặc 429 trên arXiv: pipeline tự dừng (mã thoát 3) và in tóm tắt. Báo nhóm, không tăng số kết nối, không chạy lại dồn dập.
 - User-Agent lấy từ `CRAWLER_CONTACT`. Đặt biến này trước khi crawl thật.
 
 ## Dải ID
 
-File đang dùng: `src/id_ranges.csv` (5 dải, cả hai đầu, tổng 25.000 ID). Mẫu định dạng: `src/id_ranges.example.csv`. Mỗi người crawl đúng dải được giao trong họp, trên Colab của mình.
+File đang dùng: `src/id_ranges.csv` (5 dải, cả hai đầu, tổng 25.000 ID). Mẫu định dạng: `src/id_ranges.example.csv`. Crawl đủ cả file trên **một máy** (D8): `python src/run_crawl.py --ranges src/id_ranges.csv`. Mỗi người chỉ theo dõi dải của mình; không bật crawl đầy đủ trên máy khác cùng lúc.
 
 ## Mỗi ngày
 

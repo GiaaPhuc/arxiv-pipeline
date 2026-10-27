@@ -5,15 +5,480 @@ Depends on: T2.1-T2.4.
 Done when: end-to-end on 10-20 real ids; one failing pair never stops the batch;
 re-running skips ``ok`` pairs. The two workers never call each other's host and
 only meet in the manifest. Use threads (I/O bound, only 2 workers), not asyncio.
+
+Design
+------
+* **arXiv worker** (main thread, one connection, >= 3 s between calls): for chunks of 50
+  ids it discovers metadata, writes ``paper.json``, then for every version ``v1..vN``
+  downloads ``/src/{id}vK`` and extracts ``.tex``/``.bib``. A version is built in
+  ``.vK.part/`` and swapped into ``vK/`` with ``os.replace``; the manifest row is written
+  LAST, so a killed run never leaves a "final" row without its files.
+* **S2 worker** (one thread, >= 1 s between calls): receives a paper once all of its
+  versions are processed, fetches its references ONCE (``s2_scope: "paper"``), writes
+  ``references.json`` into every version dir and, last, ``s2_references.raw.json.gz``.
+  The raw file is the "S2 done" marker, so an interrupted paper is picked up again on resume.
+* **Resume**: ids with ``paper.json`` skip discovery; pairs in a final state are skipped;
+  ``failed``/``pending`` pairs are retried on the next run (never in a loop within one
+  run); papers lacking the raw S2 file are queued for S2 again.
+* **Stopping**: 403/429 from arXiv stops the whole run (``StopCrawl``); the team is told
+  and nothing is sped up. S2 429 waits ``Retry-After`` and retries a few times; an S2 403
+  (bad key) or repeated give-ups disable only the S2 worker for this run.
+* A failing pair is recorded as ``failed`` with the error text and the batch continues.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import gzip
+import json
+import logging
+import queue
+import shutil
+import threading
+import time
+from collections.abc import Iterable, Iterator
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 
+import requests
+
+from . import metrics
 from .config import Config
+from .discovery import discover, fetch_revised_dates
+from .http import HostClient, make_arxiv_client, make_s2_client
+from .ids import id_to_dirname, normalize_id, split_version
+from .manifest import Manifest, atomic_write
+from .models import PaperMeta, Status, VersionMeta
+from .s2 import S2Result, fetch_references, fetch_venue
+from .source import download_source, extract_tex_bib
+
+logger = logging.getLogger(__name__)
+
+S2_RAW_NAME = "s2_references.raw.json.gz"
+_S2_MAX_ATTEMPTS = 4  # per paper, only consumed by HTTP 429
+_S2_MAX_CONSECUTIVE_GIVEUPS = 5  # then the S2 worker is switched off for this run
 
 
-def run(arxiv_ids: Iterable[str], config: Config) -> dict[str, int]:
-    """Crawl ``arxiv_ids``; return the manifest summary (count per status)."""
-    raise NotImplementedError("T3.1")
+class StopCrawl(Exception):
+    """arXiv answered 403/429: stop the whole run and tell the team (CONTRIBUTING.md)."""
+
+    def __init__(self, message: str, summary: dict[str, int] | None = None) -> None:
+        super().__init__(message)
+        self.summary = summary or {}
+
+
+@dataclass
+class _S2Job:
+    paper: PaperMeta
+    paper_dir: Path
+
+
+@dataclass
+class _Run:
+    config: Config
+    manifest: Manifest
+    arxiv: HostClient
+    s2: HostClient
+    papers_dir: Path
+    tmp_dir: Path
+    stop: threading.Event = field(default_factory=threading.Event)
+    s2_queue: queue.Queue[_S2Job | None] = field(default_factory=queue.Queue)
+    s2_disabled: bool = False
+    counters: dict[str, int] = field(
+        default_factory=lambda: {
+            "papers_done": 0,
+            "papers_not_found": 0,
+            "discovery_errors": 0,
+            "revised_dates_incomplete": 0,
+            "s2_ok": 0,
+            "s2_not_indexed": 0,
+            "s2_giveups": 0,
+        }
+    )
+
+
+# --------------------------------------------------------------------------- helpers
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _write_json(path: Path, payload: object) -> None:
+    with atomic_write(path) as tmp:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _paper_dir(run: _Run, arxiv_id: str) -> Path:
+    return run.papers_dir / id_to_dirname(arxiv_id)
+
+
+def _read_paper(path: Path) -> PaperMeta | None:
+    """Load ``paper.json``; None if absent or unreadable (then it is discovered again)."""
+    try:
+        return PaperMeta(**json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _chunks(items: list[str], size: int) -> Iterator[list[str]]:
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def _http_status(exc: BaseException) -> int | None:
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None)
+
+
+def _clean_stale(paper_dir: Path) -> None:
+    """Remove leftovers of an interrupted run: ``.v*.part``, ``.v*.old``, ``*.tmp``."""
+    if not paper_dir.is_dir():
+        return
+    for entry in paper_dir.iterdir():
+        if entry.name.startswith(".v") and entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+        elif entry.name.endswith(".tmp") and entry.is_file():
+            entry.unlink(missing_ok=True)
+        elif entry.is_dir() and entry.name.startswith("v"):
+            for inner in entry.glob("*.tmp"):
+                inner.unlink(missing_ok=True)
+
+
+# --------------------------------------------------------------------------- versions
+
+
+def _version_date(paper: PaperMeta, version: int) -> str | None:
+    if version == 1:
+        return paper.submission_date or None
+    index = version - 2
+    return paper.revised_dates[index] if 0 <= index < len(paper.revised_dates) else None
+
+
+def _build_version(run: _Run, paper: PaperMeta, version: int, part: Path) -> VersionMeta:
+    """Download + extract one version into ``part``. Raises ``StopCrawl`` on 403/429."""
+    arxiv_id = paper.arxiv_id
+    archive: Path | None = None
+    try:
+        with metrics.stage_timer("download"):
+            download = download_source(run.arxiv, arxiv_id, version, run.tmp_dir)
+        archive = download.path
+        if download.http_status in (403, 429):
+            raise StopCrawl(f"arXiv answered HTTP {download.http_status} for {arxiv_id}v{version}")
+        if download.http_status == 404:
+            return VersionMeta(arxiv_id, version, Status.NOT_FOUND, error="HTTP 404 on /src/")
+        if archive is None:
+            return VersionMeta(
+                arxiv_id, version, Status.FAILED, error=f"HTTP {download.http_status} on /src/"
+            )
+        part.mkdir(parents=True, exist_ok=True)
+        with metrics.stage_timer("extract"):
+            return extract_tex_bib(
+                archive, part / "tex", run.config, arxiv_id=arxiv_id, version=version
+            )
+    finally:
+        if archive is not None:
+            archive.unlink(missing_ok=True)
+
+
+def _install_version(final: Path, part: Path, old: Path, meta: VersionMeta) -> None:
+    """Write ``meta.json`` into ``part`` and swap it into ``final`` (keeps old references)."""
+    part.mkdir(parents=True, exist_ok=True)
+    payload = asdict(meta)
+    payload["status"] = meta.status.value
+    _write_json(part / "meta.json", payload)
+    refs = final / "references.json"
+    if refs.is_file():  # S2 already wrote it for the previous attempt of this version
+        shutil.copy2(refs, part / "references.json")
+    if final.exists():
+        final.replace(old)
+    part.replace(final)
+    shutil.rmtree(old, ignore_errors=True)
+
+
+def _process_version(run: _Run, paper: PaperMeta, version: int) -> Status:
+    """Build ``vK/`` atomically, then record the pair in the manifest (last step)."""
+    paper_dir = _paper_dir(run, paper.arxiv_id)
+    final = paper_dir / f"v{version}"
+    part = paper_dir / f".v{version}.part"
+    old = paper_dir / f".v{version}.old"
+    shutil.rmtree(part, ignore_errors=True)
+    shutil.rmtree(old, ignore_errors=True)
+
+    try:
+        meta = _build_version(run, paper, version, part)
+    except StopCrawl:
+        shutil.rmtree(part, ignore_errors=True)
+        raise
+    except Exception as exc:  # one bad pair must never stop the batch
+        logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
+        shutil.rmtree(part, ignore_errors=True)
+        meta = VersionMeta(
+            paper.arxiv_id, version, Status.FAILED, error=f"{type(exc).__name__}: {exc}"[:500]
+        )
+
+    meta.version_date = _version_date(paper, version)
+    meta.crawled_at = _now()
+    meta.s2_scope = "paper"
+
+    try:
+        _install_version(final, part, old, meta)
+    except OSError as exc:  # e.g. antivirus lock or full disk: do not stop the batch
+        logger.error("%s v%d: cannot write the version dir: %r", paper.arxiv_id, version, exc)
+        shutil.rmtree(part, ignore_errors=True)
+        if old.exists() and not final.exists():
+            old.replace(final)  # put the previous attempt back
+        shutil.rmtree(old, ignore_errors=True)
+        meta = VersionMeta(
+            paper.arxiv_id,
+            version,
+            Status.FAILED,
+            version_date=meta.version_date,
+            crawled_at=meta.crawled_at,
+            error=f"cannot write version dir: {exc}"[:500],
+        )
+
+    run.manifest.record(meta)
+    logger.info("%s v%d -> %s", paper.arxiv_id, version, meta.status.value)
+    return meta.status
+
+
+def _process_paper(run: _Run, paper: PaperMeta) -> None:
+    paper_dir = _paper_dir(run, paper.arxiv_id)
+    _clean_stale(paper_dir)
+    for version in range(1, paper.num_versions + 1):
+        run.manifest.register(paper.arxiv_id, version)
+        status = run.manifest.status(paper.arxiv_id, version)
+        if status is not None and status.is_final:
+            continue
+        if run.stop.is_set():
+            return
+        _process_version(run, paper, version)
+    run.counters["papers_done"] += 1
+    if not (paper_dir / S2_RAW_NAME).is_file():
+        run.s2_queue.put(_S2Job(paper, paper_dir))
+
+
+# --------------------------------------------------------------------------- discovery
+
+
+def _record_not_found(run: _Run, arxiv_id: str) -> None:
+    run.manifest.record(
+        VersionMeta(
+            arxiv_id,
+            1,
+            Status.NOT_FOUND,
+            crawled_at=_now(),
+            error="id not returned by the arXiv API",
+        )
+    )
+    run.counters["papers_not_found"] += 1
+    logger.info("%s -> not_found", arxiv_id)
+
+
+def _discover_chunk(run: _Run, arxiv_ids: list[str]) -> list[PaperMeta]:
+    """Discover metadata for ids without ``paper.json``; persist it; record missing ids."""
+    try:
+        with metrics.stage_timer("discovery"):
+            found, missing = discover(arxiv_ids, run.arxiv, run.config)
+            incomplete = fetch_revised_dates(found, run.arxiv, run.config)
+    except (requests.RequestException, ValueError) as exc:
+        if _http_status(exc) in (403, 429):
+            raise StopCrawl(f"arXiv answered HTTP {_http_status(exc)} during discovery") from exc
+        # Not "missing": leave the ids untouched, they are retried by the next run.
+        run.counters["discovery_errors"] += 1
+        logger.error("discovery failed for %d ids (%r); retried on next run", len(arxiv_ids), exc)
+        return []
+    run.counters["revised_dates_incomplete"] += len(incomplete)
+    for arxiv_id in missing:
+        _record_not_found(run, arxiv_id)
+    for paper in found:
+        paper_dir = _paper_dir(run, paper.arxiv_id)
+        _clean_stale(paper_dir)
+        _write_json(paper_dir / "paper.json", asdict(paper))
+    return found
+
+
+def _plan_chunk(run: _Run, chunk: list[str]) -> list[PaperMeta]:
+    """Papers of ``chunk`` that still need work, discovering the unknown ones first."""
+    known: list[PaperMeta] = []
+    unknown: list[str] = []
+    for arxiv_id in chunk:
+        paper = _read_paper(_paper_dir(run, arxiv_id) / "paper.json")
+        if paper is not None:
+            known.append(paper)
+        elif run.manifest.status(arxiv_id, 1) is Status.NOT_FOUND:
+            continue
+        else:
+            unknown.append(arxiv_id)
+    discovered = _discover_chunk(run, unknown) if unknown else []
+    by_id = {p.arxiv_id: p for p in [*known, *discovered]}
+    return [by_id[i] for i in chunk if i in by_id]
+
+
+# --------------------------------------------------------------------------- S2 worker
+
+
+def _retry_after(response: requests.Response | None, default: float = 60.0) -> float:
+    try:
+        value = float(response.headers.get("Retry-After", default)) if response else default
+    except (TypeError, ValueError):
+        value = default
+    return min(max(value, 30.0), 600.0)
+
+
+def _store_s2(job: _S2Job, result: S2Result, venue: str | None) -> None:
+    """Write references into every version dir, then the raw file (completion marker)."""
+    payload = [asdict(ref) for ref in result.references]
+    for version in range(1, job.paper.num_versions + 1):
+        version_dir = job.paper_dir / f"v{version}"
+        if version_dir.is_dir():
+            _write_json(version_dir / "references.json", payload)
+    if venue and not job.paper.venue:
+        job.paper.venue = venue
+        _write_json(job.paper_dir / "paper.json", asdict(job.paper))
+    raw = json.dumps(result.raw, ensure_ascii=False).encode("utf-8")
+    with atomic_write(job.paper_dir / S2_RAW_NAME) as tmp:
+        tmp.write_bytes(gzip.compress(raw, mtime=0))
+
+
+def _handle_s2_job(run: _Run, job: _S2Job) -> bool:
+    """Fetch + store one paper. Return False when the paper was given up (retry next run)."""
+    arxiv_id = job.paper.arxiv_id
+    for _ in range(_S2_MAX_ATTEMPTS):
+        try:
+            with metrics.stage_timer("s2"):
+                result = fetch_references(run.s2, arxiv_id)
+                venue = None
+                if result.found and not job.paper.venue:
+                    venue = fetch_venue(run.s2, arxiv_id)
+        except requests.HTTPError as exc:
+            status = _http_status(exc)
+            if status == 429:
+                wait = _retry_after(exc.response)
+                logger.warning("S2 429 for %s; waiting %.0fs (Retry-After)", arxiv_id, wait)
+                if run.stop.wait(wait):
+                    return True
+                continue
+            if status == 403:
+                logger.error("S2 answered 403 (invalid/expired key?); S2 worker switched off")
+                run.s2_disabled = True
+                return True
+            logger.warning("S2 HTTP %s for %s; retried on next run", status, arxiv_id)
+            return False
+        except (requests.RequestException, ValueError) as exc:
+            logger.warning("S2 failed for %s (%r); retried on next run", arxiv_id, exc)
+            return False
+        _store_s2(job, result, venue)
+        run.counters["s2_ok" if result.found else "s2_not_indexed"] += 1
+        return True
+    logger.warning("S2 gave up on %s after %d rate-limited attempts", arxiv_id, _S2_MAX_ATTEMPTS)
+    return False
+
+
+def _s2_worker(run: _Run) -> None:
+    giveups = 0
+    while True:
+        job = run.s2_queue.get()
+        if job is None:
+            return
+        if run.stop.is_set() or run.s2_disabled:
+            continue  # drain; the paper is queued again on resume (no raw file)
+        try:
+            ok = _handle_s2_job(run, job)
+        except Exception:  # never let the S2 thread die silently
+            logger.exception("S2 worker error on %s", job.paper.arxiv_id)
+            ok = False
+        if ok:
+            giveups = 0
+            continue
+        run.counters["s2_giveups"] += 1
+        giveups += 1
+        if giveups >= _S2_MAX_CONSECUTIVE_GIVEUPS:
+            logger.error("S2 failed %d papers in a row; S2 worker off for this run", giveups)
+            run.s2_disabled = True
+
+
+# --------------------------------------------------------------------------- entry point
+
+
+def _crawl(run: _Run, ids: list[str], started: float) -> None:
+    total = len(ids)
+    seen = 0
+    for chunk in _chunks(ids, run.config.discovery_batch_size):
+        if run.stop.is_set():
+            return
+        for paper in _plan_chunk(run, chunk):
+            if run.stop.is_set():
+                return
+            _process_paper(run, paper)
+        seen += len(chunk)
+        logger.info(
+            "progress %d/%d ids | %s | s2 queue %d | %.0f s",
+            seen,
+            total,
+            run.manifest.summary(),
+            run.s2_queue.qsize(),
+            time.monotonic() - started,
+        )
+
+
+def run(
+    arxiv_ids: Iterable[str],
+    config: Config,
+    *,
+    arxiv_client: HostClient | None = None,
+    s2_client: HostClient | None = None,
+) -> dict[str, int]:
+    """Crawl ``arxiv_ids``; return the manifest summary (count per status).
+
+    Raises ``StopCrawl`` (403/429 from arXiv) or ``KeyboardInterrupt`` AFTER the S2 thread,
+    the sampler and the metrics file have been finalised. Everything already written
+    stays valid; run the same command again to resume.
+    """
+    ids = list(dict.fromkeys(split_version(normalize_id(x))[0] for x in arxiv_ids))
+    data_dir = Path(config.data_dir)
+    (data_dir / "papers").mkdir(parents=True, exist_ok=True)
+    (data_dir / "logs").mkdir(parents=True, exist_ok=True)
+    manifest = Manifest(data_dir / "manifest.sqlite")
+    state = _Run(
+        config=config,
+        manifest=manifest,
+        arxiv=arxiv_client or make_arxiv_client(config),
+        s2=s2_client or make_s2_client(config),
+        papers_dir=data_dir / "papers",
+        tmp_dir=data_dir / ".tmp",
+    )
+    state.tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics.reset()
+    sampler = metrics.ResourceSampler(data_dir)
+    sampler.start()
+    s2_thread = threading.Thread(target=_s2_worker, args=(state,), name="s2-worker")
+    s2_thread.start()
+    logger.info("crawl started: %d ids, data dir %s", len(ids), data_dir)
+
+    failure: BaseException | None = None
+    try:
+        _crawl(state, ids, time.monotonic())
+    except BaseException as exc:  # StopCrawl, KeyboardInterrupt, programming errors
+        failure = exc
+        state.stop.set()
+    finally:
+        state.s2_queue.put(None)
+        s2_thread.join()
+        resources = sampler.stop()
+        merged = metrics.save_run(
+            data_dir / "logs" / "metrics.json", metrics.stage_seconds(), resources
+        )
+        summary = manifest.summary()
+        manifest.close()
+        shutil.rmtree(state.tmp_dir, ignore_errors=True)
+        logger.info("crawl finished: %s | counters %s", summary, state.counters)
+        logger.info("cumulative active seconds per stage: %s", merged["stage_seconds"])
+
+    if isinstance(failure, StopCrawl):
+        failure.summary = summary
+    if failure is not None:
+        raise failure
+    return summary
