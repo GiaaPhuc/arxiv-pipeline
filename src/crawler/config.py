@@ -27,6 +27,8 @@ class Config:
     s2_min_interval: float = 1.0
     max_retries: int = 5
     max_extract_bytes: int = 2 * 1024**3  # zip-bomb guard (uncompressed total)
+    request_timeout: tuple[float, float] = (30.0, 120.0)  # (connect, read) seconds per request
+    discovery_batch_size: int = 50  # ids per arXiv ``id_list`` call (T0.2)
 
     @property
     def user_agent(self) -> str:

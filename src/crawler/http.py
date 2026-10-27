@@ -92,12 +92,21 @@ class HostClient:
 
     def get(self, path: str, **kwargs) -> requests.Response:
         url = self._full_url(path)
+        kwargs.setdefault("timeout", self._config.request_timeout)  # never hang forever
         response: requests.Response | None = None
         for attempt in range(self._config.max_retries + 1):
             self.limiter.wait()
             try:
                 self._log_request("GET", url)
-                response = self._session.get(url, **kwargs)
+                try:
+                    response = self._session.get(url, **kwargs)
+                except (requests.ConnectionError, requests.Timeout) as exc:
+                    # Transient network failure: back off and retry within the budget.
+                    if attempt >= self._config.max_retries:
+                        raise
+                    logger.warning("GET %s failed (%s); retry %d", url, type(exc).__name__, attempt)
+                    self._sleep_for_retry(attempt)
+                    continue
                 self._log_request("GET", url, response.status_code)
                 if response.status_code in _STOP_STATUSES:
                     return response
@@ -117,6 +126,7 @@ class HostClient:
     def stream_to_file(self, path: str, dest: BinaryIO, **kwargs) -> int:
         """Stream a response to ``dest`` (never hold the archive in RAM); return bytes written."""
         url = self._full_url(path)
+        kwargs.setdefault("timeout", self._config.request_timeout)
         for attempt in range(self._config.max_retries + 1):
             self.limiter.wait()
             written = 0
