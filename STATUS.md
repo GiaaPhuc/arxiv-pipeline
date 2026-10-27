@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T3 27/10/2026, 21:15 (Asia/Saigon)** — E: `validate_corpus` + khung sách cục bộ (nhánh `m1/e-validate-book`)
+> Cập nhật lần cuối: **T3 27/10/2026, 21:35 (Asia/Saigon)** — A: đã push nhánh **`m1/a-pipeline`** (5 commit: http, metrics+pipeline, run_crawl, docs, deps B). Còn local chưa commit: D (`export`/`export_data`), E (`validate_corpus` mở rộng), `colab_run.ipynb`, `STATUS.md`
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -22,27 +22,27 @@
 | Hạng mục đề | Đề yêu cầu (rút gọn) | Hiện trạng |
 | --- | --- | --- |
 | Phạm vi crawl | Dải arXiv ID được giao; **mọi phiên bản** của từng bài. Không thu hoạch cả kho. OAI-PMH và Kaggle chỉ là hộp công cụ | 🟡 `src/id_ranges.csv`: 5 dải (tháng 6, 7, 8/2024), **25.000** ID, cả hai đầu. **Chạy chung một máy** (D8). Chưa crawl |
-| Nguồn và lịch sự | Chỉ `export.arxiv.org`, chờ ≥ 3 giây, một kết nối. Semantic Scholar `paper/arXiv:{id}`, ≥ 1 yêu cầu/giây; khóa API để khỏi bị điều tiết | 🟡 `http.py` T1.1: limiter, **403/429 trả caller (không retry client)**, retry 5xx, log không lộ key. Chưa có khóa S2 (R3) |
-| Gói nguồn | Tải từng phiên bản qua `/src/{id}vN`. Chỉ giữ `.tex` và `.bib` bằng cách **trích**, không sửa nội dung. Giữ lệnh hình trong TeX. Bản không có TeX = bản ghi rỗng, không bỏ bài | 🟡 T1.5/T2.2 đã merge PR #4/#6. Tải stream, nhận dạng, trích an toàn và test giả đã có. Chưa có bằng chứng pilot/crawl đầy đủ |
-| Siêu dữ liệu | Mỗi phiên bản: tiêu đề, tác giả, ngày nộp, ngày sửa, venue khi có. Mỗi tham khảo S2: tiêu đề, tác giả, ngày, arXiv ID nếu có, S2 ID. Giữ **mọi** tham khảo ở máy | 🟡 PR #7 đã đưa `ids`, `discovery`, `s2` và test giả vào main. Discovery còn trả `revised_dates=[]`, chưa xác nhận riêng ID vắng trong batch; chưa xác minh đối chiếu 10 ID arXiv/5 bài S2 thật |
-| Hai bảng (nộp Hugging Face ở Milestone 3) | `papers`: arxiv_id, title, authors, submission_date, revised_dates, venue. `references`: chỉ tham khảo **có arXiv ID** — arxiv_id, ref_arxiv_id, ref_title, ref_authors, ref_submission_date, ref_s2_id | 🟡 `export_tables()` dùng đúng `schema`, 14 test export đạt. Chưa validate/pilot thật. `arxiv_id` bài trích dẫn lấy từ thư mục bài lúc xuất, không nằm trên từng `Reference` |
-| Kho làm việc | Giữ cục bộ làm đầu vào Milestone 2 và 3. Gợi ý đề: một thư mục mỗi bài | 🟡 `manifest.py` xong T1.2 (SQLite + ghi nguyên tử). `corpus.py` đọc cục bộ; `versions()`/`references()` đầy đủ, 32 test corpus đạt. Bố cục `data/papers/...` đã khóa |
+| Nguồn và lịch sự | Chỉ `export.arxiv.org`, chờ ≥ 3 giây, một kết nối. Semantic Scholar `paper/arXiv:{id}`, ≥ 1 yêu cầu/giây; khóa API để khỏi bị điều tiết | 🟡 `http.py` T1.1: limiter, **403/429 trả caller (không retry client)**, retry 5xx **và lỗi kết nối/timeout** (có timeout mặc định 30 s/120 s), log không lộ key. `pipeline` dừng cả lần chạy khi arXiv trả 403/429 (mã thoát 3); S2 429 chờ `Retry-After`. Chưa có khóa S2 (R3) |
+| Gói nguồn | Tải từng phiên bản qua `/src/{id}vN`. Chỉ giữ `.tex` và `.bib` bằng cách **trích**, không sửa nội dung. Giữ lệnh hình trong TeX. Bản không có TeX = bản ghi rỗng, không bỏ bài | 🟡 `pipeline` ghép tải + trích: mỗi phiên bản dựng trong `.vK.part/` rồi đổi tên nguyên tử, manifest ghi **sau cùng**; PDF/zip = `no_source` có `meta.json`; lỗi một cặp = `failed`, lô vẫn chạy. Test giả đạt; chưa chạy trên arXiv thật (pilot) |
+| Siêu dữ liệu | Mỗi phiên bản: tiêu đề, tác giả, ngày nộp, ngày sửa, venue khi có. Mỗi tham khảo S2: tiêu đề, tác giả, ngày, arXiv ID nếu có, S2 ID. Giữ **mọi** tham khảo ở máy | 🟡 `discovery` nay lấy `revised_dates` (v2..vN) bằng `id_list=<id>v2,<id>v3,…` theo lô 50, xác nhận từng ID vắng bằng một lần gọi riêng; `s2.fetch_venue` bù venue khi arXiv không có `journal_ref`. Test giả đạt; **chưa đối chiếu 10 ID arXiv / 5 bài S2 thật** |
+| Hai bảng (nộp Hugging Face ở Milestone 3) | `papers`: arxiv_id, title, authors, submission_date, revised_dates, venue. `references`: chỉ tham khảo **có arXiv ID** — arxiv_id, ref_arxiv_id, ref_title, ref_authors, ref_submission_date, ref_s2_id | 🟡 `export_tables()` dùng đúng `schema`; test tích hợp `pipeline → validate → export_tables` đạt trên dữ liệu giả. CLI `src/export_data.py`. Chưa chạy trên dữ liệu thật. `arxiv_id` bài trích dẫn lấy từ thư mục bài lúc xuất, không nằm trên từng `Reference` |
+| Kho làm việc | Giữ cục bộ làm đầu vào Milestone 2 và 3. Gợi ý đề: một thư mục mỗi bài | 🟡 `manifest.py` xong T1.2. `corpus.py` đọc cục bộ. `pipeline` ghi đúng bố cục `data/papers/...`; `validate_corpus` kiểm cả kết quả pipeline (thêm: thiếu `references.json`, `revised_dates` sai độ dài, hàng `not_found` của ID không có bài). ID arXiv không biết = một hàng `not_found` (v1) trong manifest, không có thư mục |
 | Báo cáo | Jupyter Book: cách thu thập, thư viện, số bài thành công, tỷ lệ thành công, kích thước trung bình trước/sau khi bỏ ảnh, số tham khảo trung bình, tỷ lệ thành công siêu dữ liệu tham khảo. Thời gian wall và RAM trên Colab chỉ CPU. Hình và bảng sinh lúc biên dịch sách | 🟡 Repo sách [GiaaPhuc/arxiv-book](https://github.com/GiaaPhuc/arxiv-book): JB v1, overview + notebook **số mẫu**, workflow deploy Pages. Thư mục làm việc `arxiv-pipeline-book/` (clone/push cùng remote). Chờ Actions/Pages xanh. Số crawl/hiệu năng vẫn *chưa crawl* |
-| Mã nguồn | Sạch, chạy được, có chú thích; trích dẫn nếu dùng tài liệu ngoài | 🟡 Nhánh E: **135 passed, 2 skipped** (pipeline stub); `validate_corpus` + 6 test trên corpus mẫu. `metrics`, `pipeline` còn stub. Quy ước: `CONTRIBUTING.md` |
+| Mã nguồn | Sạch, chạy được, có chú thích; trích dẫn nếu dùng tài liệu ngoài | 🟡 **177 passed, 0 skipped**; `ruff check` + `ruff format --check` sạch. `pipeline`, `metrics`, `export_stats`, `run_crawl` (`--dry-run`), `export_data` đã có. Còn thiếu: chạy thật (pilot). Quy ước: `CONTRIBUTING.md` |
 | Chấm (5 mục) | Báo cáo, mã, khám phá và tải đủ phiên bản, dữ liệu thu được, hiệu năng so với nhóm khác | ⬜ Chưa có số liệu |
 
 ### Việc đang làm (đối chiếu 27/10)
 
-- **Merge nhánh:** `m1/d-export` đã merge `origin/main` (`c9e3880`, gồm PR #7). Chỉ conflict `STATUS.md`; mã Python merge sạch.
-- **Kiểm tra sau merge:** Python 3.11, `pytest -q` → **129 passed, 2 skipped** (pipeline stub); unit test dùng dữ liệu/client giả.
-- **D — T3.2 / T2.5:** `export_tables()` + 14 test export; `corpus.py` + 32 test corpus; `corpus_stats.ipynb` bảng theo bài/phiên bản trên mock cục bộ. Chưa bảng tổng hợp đầy đủ §8 và số đo hiệu năng; `export_stats` còn stub.
-- **E — T1.4 / T3.2 / nhúng notebook:** `validate_corpus.py` + test trên nhánh `m1/e-validate-book`; sách đã push [arxiv-book](https://github.com/GiaaPhuc/arxiv-book) (`main`). Kiểm tra Actions deploy Pages; mở PR validator vào repo mã.
-- **B cần hoàn thiện/xác minh:** ngày sửa từng phiên bản, kiểm tra riêng ID vắng trong batch và đối chiếu 10 ID arXiv / 5 bài S2 thật. Discovery parse Atom qua `HostClient`, khác docstring ghi arxiv.py — cần đồng bộ tài liệu.
-- **Còn thiếu trước pilot:** `metrics`, `pipeline` stub; pilot 30–50 ID đợi pipeline/resume. Phase 2 crawl chung một máy sau go/no-go; đóng băng sáng 4/11, mục tiêu nộp chiều 4/11.
+- **Trạng thái code (21:35 27/10):** `origin/main` + nhánh **`m1/a-pipeline`** (đã push) + thay đổi local D/E chưa commit. Python 3.11, `pytest -q` → **177 passed, 0 skipped** (cây làm việc đầy đủ). Mọi test dùng `responses`/dữ liệu giả, không gọi mạng.
+- **A — PR `m1/a-pipeline` (reviewer C):** `http` timeout/retry; `metrics` + `pipeline` + `run_crawl` + README/CONTRIBUTING; commit **`deps`** gom `discovery`/`s2`/`requirements.txt` vì pipeline import trực tiếp (B đồng review). Chưa merge; chưa pilot thật → T2.4/T3.1 vẫn 🟡.
+- **B — trong PR pipeline:** `discovery`/`s2` đã nằm trên `m1/a-pipeline`; nhánh riêng B (nếu có) nên rebase hoặc bỏ trùng. **Còn nợ B:** đối chiếu 10 ID arXiv / 5 bài S2 thật sau merge/pilot.
+- **D — T4.4:** `export_stats()` + CLI `export_data.py` → `data/stats/` (`summary.json`, `papers_stats.csv`, `versions_stats.csv`, `performance.json`), có định nghĩa từng số và ba tỷ lệ tham khảo (a)(b)(c). Cần E nối vào notebook sách khi có số thật.
+- **E:** `validate_corpus` đã ở `main` (PR #10); sách [arxiv-book](https://github.com/GiaaPhuc/arxiv-book). Đợt này validator thêm kiểm tra: thiếu `references.json`, `revised_dates` sai độ dài, hàng `not_found` không có bài; cho phép `stats/` và file WAL ở gốc `data/`.
+- **Việc kế tiếp (pilot, đợi người cầm máy chính):** đặt `CRAWLER_CONTACT`, `S2_API_KEY` → `python src/run_crawl.py --ranges src/id_ranges.csv --limit 30` → đối chiếu 10 ID/5 bài S2 với trang web → `validate_corpus` → `export_data` → đọc `logs/metrics.json` ước lượng giờ cho 25.000 ID, rồi go/no-go.
 - **Hạn Moodle (ảnh 21/10):** Book M1/M2 **6/11/2026 23:59**, dataset cá nhân **20/11/2026 23:59**, poster **27/11/2026 23:59** — chưa truy cập Moodle trực tiếp.
 - **Còn xác nhận:** key S2 trên máy crawl chính, **Pages [arxiv-book](https://giaaphuc.github.io/arxiv-book/) xanh**, quyền bảo vệ main và người dự phòng nộp Moodle.
 - **Vai → module:** A (leader) `http` `manifest` `pipeline` `metrics` · B `ids` `discovery` `s2` · C `source` + fixture · D `export` `corpus` + notebook số liệu · E `validate_corpus` + sách (repo riêng). A, B, C viết crawler. Mỗi người **một dải** (theo dõi / retry / trích HF M3); **Phase 2 crawl đủ trên một máy** do A vận hành (D8).
-- **Phụ thuộc hiện tại:** code discovery/source/S2 đã vào main; A ghép pipeline và metrics, B hoàn thiện metadata, D/E hoàn thiện đầu ra/validator. Pilot đợi pipeline/resume; kiểm tra S2 thật đợi key của B.
+- **Phụ thuộc hiện tại:** mã pilot-ready; chỉ còn chặn bởi việc **chạy thật**: cần `CRAWLER_CONTACT` và key S2 (B). Sau pilot mới biết V̄, giờ crawl, RAM, đĩa.
 
 ---
 
@@ -111,14 +111,14 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | T1.3 | `ids.py` | B | hết 22/10 | ✅ PR #7; test ID mới/cũ, version, 5.000 ID hai đầu và dải qua tháng đạt |
 | T1.4 | Khung Jupyter Book v1 + Pages | E | hết 22/10 | 🟡 [arxiv-book](https://github.com/GiaaPhuc/arxiv-book) có nội dung + workflow; chờ Actions/Pages |
 | T1.5 | Fixture tổng hợp (`tests/conftest.py`) | C (Quỳnh) | hết 22/10 | ✅ Tám nhóm bắt buộc + sáu mẫu phụ; 14 kiểm tra pass trong worktree sạch |
-| T2.1 | `discovery.py` (test giả; 10 ID thật ghi trên PR, không đợi `http.py`) | B | hết 23/10 | 🟡 PR #7, test giả đạt; thiếu ngày sửa/xác nhận missing riêng và bằng chứng 10 ID thật |
+| T2.1 | `discovery.py` (test giả; 10 ID thật ghi trên PR, không đợi `http.py`) | B | hết 23/10 | 🟡 Ngày sửa (`idvK`, lô 50) + xác nhận ID vắng riêng đã có, test giả đạt; **thiếu bằng chứng 10 ID thật** |
 | T2.2 | `source.py` (fixture + client giả) | C (Quỳnh) | hết 23/10 | ✅ PR #6 đã merge; fixture/source đạt trong suite 83 passed/4 skipped; chưa kiểm chứng pipeline thật |
-| T2.3 | `s2.py` test giả sáng 24/10; 5 bài thật đợi key của B, trước trưa 25/10 | B | sáng 24/10 | 🟡 PR #7; test giả phân trang/404/ID cũ đạt, chưa xác minh 5 bài thật |
-| T2.4 | Đo mỏng trong pipeline (`metrics.py`) | A | hết 24/10 | ⬜ stub |
+| T2.3 | `s2.py` test giả sáng 24/10; 5 bài thật đợi key của B, trước trưa 25/10 | B | sáng 24/10 | 🟡 Test giả phân trang/404/ID cũ/venue đạt, chưa xác minh 5 bài thật |
+| T2.4 | Đo mỏng trong pipeline (`metrics.py`) | A | hết 24/10 | 🟡 Timer + sampler + `metrics.json` cộng dồn, 7 test đạt; chưa đối chiếu với `/usr/bin/time -v` |
 | T2.5 | Notebook thống kê trên số giả / pilot. E nhúng vào sách | D + E | trưa 25/10 | 🟡 D: bảng corpus giả trong repo mã. E: notebook + biểu đồ **số mẫu** trong sách; đồng bộ số thật sau crawl |
-| T3.1 | `pipeline.py` (đợi PR discovery, source, s2 xanh) | A | hết 24/10 | ⬜ stub |
-| T3.2 | `export.py` + `corpus.py` (D) và `validate_corpus.py` (E), mỗi người một thư mục mẫu | D, E | hết 24/10 | 🟡 D: 32 + 14 test đạt trên main. E: validator + 6 test trên nhánh `m1/e-validate-book`, chờ PR |
-| T3.3 | Pilot 30–50 ID trên Colab (đợi pipeline resume) | A + cả nhóm | trưa 25/10 | ⬜ |
+| T3.1 | `pipeline.py` (đợi PR discovery, source, s2 xanh) | A | hết 24/10 | 🟡 13 test giả đạt (lỗi một cặp không dừng lô, resume idempotent, 403/429, dọn rác); **chưa chạy end-to-end trên 10–20 ID thật** |
+| T3.2 | `export.py` + `corpus.py` (D) và `validate_corpus.py` (E), mỗi người một thư mục mẫu | D, E | hết 24/10 | 🟡 D: 32 + 14 test đạt. E: validator đã ở `main` (PR #10). Test tích hợp pipeline → validate → export đạt trên dữ liệu giả; chưa có dữ liệu thật |
+| T3.3 | Pilot 30–50 ID trên Colab (đợi pipeline resume) | A + cả nhóm | trưa 25/10 | ⬜ Mã sẵn sàng (`--dry-run`, `--limit 30`, `colab_run.ipynb`); đợi `CRAWLER_CONTACT` + key S2 |
 | T3.4 | Review chéo, lint sạch | Cả nhóm | trưa 25/10 | ⬜ |
 
 ### Phase 2 — giao sau go/no-go trưa 25/10, đóng băng sáng 4/11
@@ -141,9 +141,10 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | # | Mô tả | Mức | Hành động | Owner |
 | --- | --- | --- | --- | --- |
 | R1 | 25.000 ID trên **một máy** (D8). Chưa biết V̄. Nếu V̄ ≈ 2, chờ arXiv cỡ **42 giờ** + tải/trích. Colab free có thể ngắt — cân nhắc máy local/VM; manifest resume + sao lưu Drive | TB | Pilot sáng 25/10 ước lượng giờ/đĩa; chọn máy chính trước tối 25/10; bật crawl một luồng `--ranges src/id_ranges.csv` | A |
-| R2 | Phiếu họp 21/10 đã gán vai/dải; chưa đồng bộ đủ vào repo. Pipeline/metrics còn stub; discovery thiếu ngày sửa và xác nhận missing riêng | Cao | A tích hợp, B hoàn thiện metadata trước pilot; xác nhận người dự phòng nộp Moodle | A, B |
-| R3 | Chưa xác minh API key S2 đã sẵn sàng | TB | Một key trên máy crawl chính; B kiểm tra 5 bài thật, không chia sẻ giá trị key | B, D |
-| R4 | CI main đã thành công; 2 test pipeline vẫn skip trên nhánh sau merge D | Thấp | CI xanh chưa chứng minh crawl end-to-end | A, D |
+| R2 | Mã crawler đã đủ nhưng **chưa từng chạy trên arXiv/S2 thật**: định dạng Atom, `/src/`, S2 chỉ được kiểm bằng dữ liệu giả. Hạn nộp 4/11 | Cao | Pilot 30 ID ngay khi có `CRAWLER_CONTACT` + key; đối chiếu 10 ID / 5 bài S2; xác nhận người dự phòng nộp Moodle | A, B |
+| R3 | Chưa xác minh API key S2 đã sẵn sàng. Không có key S2 sẽ 429 nhiều: worker S2 chờ `Retry-After`, tắt sau 5 bài bị bỏ liên tiếp, bài còn lại làm ở lần resume | TB | Một key trên máy crawl chính; B kiểm tra 5 bài thật, không chia sẻ giá trị key | B, D |
+| R4 | CI main xanh; đợt này không còn test skip. CI xanh chưa chứng minh crawl thật | Thấp | Pilot là bằng chứng end-to-end | A, D |
+| R8 | Crawl dài: Windows có thể khóa file (antivirus) làm một cặp `failed`; ghi vào Drive qua FUSE không hợp với SQLite | Thấp | Pipeline ghi `failed` rồi tiếp tục, `run_crawl` chạy lại để thử lại; `colab_run.ipynb` giữ `data/` ở đĩa cục bộ và `rsync` sang Drive | A |
 | R5 | Phiên bản thư viện chưa ghim (đang dùng khoảng phiên bản) | Thấp | Ghim sau pilot Colab | A |
 | R6 | Đề chỉ cho phép mã + `requirements.txt` + `README.md` trong repo nộp. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md` là file làm việc | TB | Gỡ ở T5.3, hoặc hỏi giảng viên trước khi nộp | Leader |
 | R7 | Chưa xác minh trạng thái bảo vệ main và quyền thành viên hiện tại | TB | Leader kiểm tra theo `CONTRIBUTING.md` | Leader |
@@ -156,6 +157,7 @@ Chỉ ghi sự kiện **đưa được vào Jupyter Book**: cách thu thập, c�
 
 | Ngày | Sự kiện |
 | --- | --- |
+| 27/10 | **Cách thu thập đã cài (chưa chạy thật).** arXiv đọc bằng Atom API qua `requests` (không dùng `arxiv.py`) để API và `/src/` dùng chung một bộ giới hạn ≥ 3 giây. Ngày v2..vN lấy bằng `id_list=<id>v2,<id>v3,…` theo lô 50 (trường `updated` của từng bản). ID vắng trong lô được hỏi lại riêng một lần rồi mới ghi `not_found`. S2: một lần mỗi bài, phân trang 100; `venue` = `journal_ref`, nếu rỗng thì S2 (bỏ giá trị `arXiv.org`). Hai luồng (arXiv, S2) gặp nhau qua đĩa/manifest; resume bỏ qua cặp đã xong, thử lại `failed`. Khi arXiv trả 403/429 thì dừng cả lần chạy. Đo: thời gian chủ động theo giai đoạn (khám phá/tải/trích/S2) cộng dồn qua các lần resume, RSS đỉnh/trung bình gồm tiến trình con, đĩa đỉnh |
 | 27/10 | **Khung báo cáo M1 (số mẫu).** Jupyter Book v1: trang tổng quan mô tả nguồn arXiv/S2, chờ ≥ 3 giây, `no_source` cho PDF, khác biệt bảng `papers` vs `references`; notebook thống kê từ CSV mẫu, ghi rõ chưa phải crawl. Số thật thay ở Phase 2 |
 | 18/10 | **Phạm vi.** `src/id_ranges.csv`: 5 dải × 5.000 ID = **25.000**, tính cả hai đầu, không chồng. Tháng 8/2024: `01045–06044`, `06045–11044`, `11045–16044`. Tháng 7: `07839–12838`. Tháng 6: `07938–12937`. Chưa crawl |
 | 18/10 | **Gói `/src/`** trên `export.arxiv.org`, cách nhau ≥ 3,5 giây, một kết nối, không lưu gói. tar.gz (`hep-th/9901001v1`, 15.221 byte): 1 `.tex` + 4 `.eps` — trích `.tex`/`.bib`, bỏ ảnh, giữ cây thư mục. `2408.11045v1` là tar.gz 10.199.199 byte, chưa liệt kê thành viên. PDF nằm trong dải được giao: `2408.01045v1`, 804.208 byte → `no_source`, vẫn giữ bản ghi. 404 `2408.00000v1` → `not_found`. Gzip một file và zip chưa gặp |

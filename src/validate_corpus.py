@@ -24,6 +24,7 @@ from crawler.ids import id_to_dirname
 from crawler.models import Status
 
 _VERSION_DIR = re.compile(r"v[1-9][0-9]*$")
+_ALLOWED_ROOT_FILES = frozenset({"manifest.sqlite", "manifest.sqlite-wal", "manifest.sqlite-shm"})
 _ALLOWED_PAPER_FILES = frozenset({"paper.json", "s2_references.raw.json.gz"})
 _ALLOWED_VERSION_FILES = frozenset({"meta.json", "references.json", "tex"})
 _MANIFEST_FINAL_STATUSES = frozenset(
@@ -136,22 +137,29 @@ def _check_ok_files(
     return problems
 
 
-def _check_manifest(manifest_path: Path, expected_pairs: int) -> list[str]:
+def _check_manifest(manifest_path: Path, expected_pairs: int, known_ids: set[str]) -> list[str]:
+    """Compare manifest rows with the pairs implied by ``paper.json`` files.
+
+    An id the arXiv API does not know has no ``paper.json``; the pipeline records it as one
+    ``not_found`` row (version 1). Those rows are not counted as a mismatch.
+    """
     problems: list[str] = []
     conn = sqlite3.connect(manifest_path)
     try:
-        row = conn.execute("SELECT COUNT(*) FROM version_pairs").fetchone()
-        total_rows = int(row[0]) if row else 0
-        if total_rows != expected_pairs:
+        rows = conn.execute("SELECT arxiv_id, version, status FROM version_pairs").fetchall()
+        pairs = [
+            (arxiv_id, status)
+            for arxiv_id, _version, status in rows
+            if not (status == Status.NOT_FOUND.value and arxiv_id not in known_ids)
+        ]
+        if len(pairs) != expected_pairs:
             problems.append(
-                f"manifest.sqlite: {total_rows} rows, expected {expected_pairs} "
+                f"manifest.sqlite: {len(pairs)} rows, expected {expected_pairs} "
                 f"from paper.json num_versions"
             )
         summary: dict[str, int] = {}
-        for status, count in conn.execute(
-            "SELECT status, COUNT(*) FROM version_pairs GROUP BY status"
-        ):
-            summary[str(status)] = int(count)
+        for _arxiv_id, status in pairs:
+            summary[str(status)] = summary.get(str(status), 0) + 1
         pending = summary.get(Status.PENDING.value, 0)
         if pending:
             problems.append(f"manifest.sqlite: {pending} pair(s) still pending")
@@ -209,9 +217,9 @@ def validate(data_dir: Path) -> list[str]:
     for entry in data_dir.iterdir():
         if entry.name.startswith("."):
             continue
-        if entry.is_dir() and entry.name not in ("papers", "logs"):
+        if entry.is_dir() and entry.name not in ("papers", "logs", "stats"):
             problems.append(f"unexpected directory at data root: {entry.name}")
-        elif entry.is_file() and entry.name not in ("manifest.sqlite",):
+        elif entry.is_file() and entry.name not in _ALLOWED_ROOT_FILES:
             problems.append(f"unexpected file at data root: {entry.name}")
 
     corpus = Corpus(data_dir)
@@ -232,6 +240,13 @@ def validate(data_dir: Path) -> list[str]:
             problems.append(f"{paper.arxiv_id}: {exc}")
             continue
 
+        expected_revisions = max(paper.num_versions - 1, 0)
+        if len(paper.revised_dates) != expected_revisions:
+            problems.append(
+                f"{paper.arxiv_id}: {len(paper.revised_dates)} revised_dates for "
+                f"{paper.num_versions} version(s), expected {expected_revisions}"
+            )
+
         observed = {version.version for version in versions}
         expected_versions = set(range(1, paper.num_versions + 1))
         missing = sorted(expected_versions - observed)
@@ -247,6 +262,11 @@ def validate(data_dir: Path) -> list[str]:
         for version in versions:
             version_dir = paper_dir / f"v{version.version}"
             problems.extend(_check_version_tree(version_dir, data_dir))
+            if not (version_dir / "references.json").is_file():
+                problems.append(
+                    f"{paper.arxiv_id} v{version.version}: missing references.json "
+                    "(Semantic Scholar step not finished)"
+                )
 
             if version.kept_bytes > version.raw_uncompressed_bytes:
                 problems.append(
@@ -269,7 +289,8 @@ def validate(data_dir: Path) -> list[str]:
 
     manifest_path = data_dir / "manifest.sqlite"
     if manifest_path.is_file():
-        problems.extend(_check_manifest(manifest_path, expected_pairs))
+        known_ids = {paper.arxiv_id for paper in papers}
+        problems.extend(_check_manifest(manifest_path, expected_pairs, known_ids))
 
     try:
         problems.extend(_check_export_parquet(data_dir))
