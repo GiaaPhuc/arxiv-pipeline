@@ -13,16 +13,16 @@ Design
   downloads ``/src/{id}vK`` and extracts ``.tex``/``.bib``. A version is built in
   ``.vK.part/`` and swapped into ``vK/`` with ``os.replace``; the manifest row is written
   LAST, so a killed run never leaves a "final" row without its files.
-* **S2 worker** (one thread, >= 1 s between calls): receives a paper once all of its
-  versions are processed, fetches its references ONCE (``s2_scope: "paper"``), writes
+* **S2 worker** (one thread, >= 1.1 s between calls, adaptive after 429): batches papers
+  (``POST /paper/batch``, up to 100 ids) once all versions are processed, writes
   ``references.json`` into every version dir and, last, ``s2_references.raw.json.gz``.
   The raw file is the "S2 done" marker, so an interrupted paper is picked up again on resume.
 * **Resume**: ids with ``paper.json`` skip discovery; pairs in a final state are skipped;
   ``failed``/``pending`` pairs are retried on the next run (never in a loop within one
   run); papers lacking the raw S2 file are queued for S2 again.
 * **Stopping**: 403/429 from arXiv stops the whole run (``StopCrawl``); the team is told
-  and nothing is sped up. S2 429 waits ``Retry-After`` and retries a few times; an S2 403
-  (bad key) or repeated give-ups disable only the S2 worker for this run.
+  and nothing is sped up. S2 429 waits ``Retry-After`` and retries the batch; an S2 403
+  (bad key) or too much cumulative 429 wait without success disables the S2 worker.
 * A failing pair is recorded as ``failed`` with the error text and the batch continues.
 """
 
@@ -45,18 +45,19 @@ import requests
 from . import metrics
 from .config import Config
 from .discovery import discover, fetch_revised_dates
-from .http import HostClient, make_arxiv_client, make_s2_client
+from .http import AdaptiveRateLimiter, HostClient, make_arxiv_client, make_s2_client
 from .ids import id_to_dirname, normalize_id, split_version
 from .manifest import Manifest, atomic_write
 from .models import PaperMeta, Status, VersionMeta
-from .s2 import S2Result, fetch_references, fetch_venue
+from .s2 import S2_BATCH_SIZE, S2Result, fetch_references_batch
 from .source import download_source, extract_tex_bib
 
 logger = logging.getLogger(__name__)
 
 S2_RAW_NAME = "s2_references.raw.json.gz"
-_S2_MAX_ATTEMPTS = 4  # per paper, only consumed by HTTP 429
-_S2_MAX_CONSECUTIVE_GIVEUPS = 5  # then the S2 worker is switched off for this run
+_S2_MAX_BATCH_ATTEMPTS = 4  # per batch, only consumed by HTTP 429
+_S2_MAX_RATE_LIMIT_WAIT = 30 * 60  # cumulative 429 wait without a success → stop S2 worker
+_S2_BATCH_FLUSH_SECONDS = 0.35  # wait briefly so nearby papers share one batch POST
 
 
 class StopCrawl(Exception):
@@ -92,9 +93,12 @@ class _Run:
             "revised_dates_incomplete": 0,
             "s2_ok": 0,
             "s2_not_indexed": 0,
-            "s2_giveups": 0,
+            "s2_batches": 0,
+            "s2_429": 0,
+            "s2_retry_wait_seconds": 0.0,
         }
     )
+    s2_rate_limit_wait: float = 0.0
 
 
 # --------------------------------------------------------------------------- helpers
@@ -327,13 +331,14 @@ def _retry_after(response: requests.Response | None, default: float = 60.0) -> f
     return min(max(value, 30.0), 600.0)
 
 
-def _store_s2(job: _S2Job, result: S2Result, venue: str | None) -> None:
+def _store_s2(job: _S2Job, result: S2Result) -> None:
     """Write references into every version dir, then the raw file (completion marker)."""
     payload = [asdict(ref) for ref in result.references]
     for version in range(1, job.paper.num_versions + 1):
         version_dir = job.paper_dir / f"v{version}"
         if version_dir.is_dir():
             _write_json(version_dir / "references.json", payload)
+    venue = result.venue
     if venue and not job.paper.venue:
         job.paper.venue = venue
         _write_json(job.paper_dir / "paper.json", asdict(job.paper))
@@ -342,61 +347,111 @@ def _store_s2(job: _S2Job, result: S2Result, venue: str | None) -> None:
         tmp.write_bytes(gzip.compress(raw, mtime=0))
 
 
-def _handle_s2_job(run: _Run, job: _S2Job) -> bool:
-    """Fetch + store one paper. Return False when the paper was given up (retry next run)."""
-    arxiv_id = job.paper.arxiv_id
-    for _ in range(_S2_MAX_ATTEMPTS):
+def _note_s2_success(run: _Run) -> None:
+    limiter = run.s2.limiter
+    if isinstance(limiter, AdaptiveRateLimiter):
+        limiter.note_success()
+
+
+def _wait_s2_429(run: _Run, response: requests.Response | None) -> bool:
+    """Wait for Retry-After; return True if the run was stopped."""
+    wait = _retry_after(response)
+    run.counters["s2_429"] += 1
+    run.counters["s2_retry_wait_seconds"] += wait
+    run.s2_rate_limit_wait += wait
+    limiter = run.s2.limiter
+    if isinstance(limiter, AdaptiveRateLimiter):
+        limiter.note_429()
+    logger.warning("S2 429; waiting %.0fs (Retry-After)", wait)
+    return run.stop.wait(wait)
+
+
+def _collect_s2_batch(q: queue.Queue[_S2Job | None]) -> list[_S2Job] | None:
+    """Block for the first job; return None when the sentinel is received."""
+    first = q.get()
+    if first is None:
+        return None
+    jobs = [first]
+    flush_until = time.monotonic() + _S2_BATCH_FLUSH_SECONDS
+    while len(jobs) < S2_BATCH_SIZE:
+        remaining = flush_until - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            nxt = q.get(timeout=remaining)
+        except queue.Empty:
+            break
+        if nxt is None:
+            q.put(None)
+            break
+        jobs.append(nxt)
+    return jobs
+
+
+def _requeue_s2_jobs(run: _Run, jobs: list[_S2Job]) -> None:
+    for job in jobs:
+        run.s2_queue.put(job)
+
+
+def _handle_s2_batch(run: _Run, jobs: list[_S2Job]) -> None:
+    """Fetch and store up to ``S2_BATCH_SIZE`` papers; re-queue on transient failure."""
+    ids = [job.paper.arxiv_id for job in jobs]
+    for _attempt in range(_S2_MAX_BATCH_ATTEMPTS):
         try:
             with metrics.stage_timer("s2"):
-                result = fetch_references(run.s2, arxiv_id)
-                venue = None
-                if result.found and not job.paper.venue:
-                    venue = fetch_venue(run.s2, arxiv_id)
+                results = fetch_references_batch(run.s2, ids)
+            _note_s2_success(run)
+            run.s2_rate_limit_wait = 0.0
+            run.counters["s2_batches"] += 1
+            for job in jobs:
+                base = job.paper.arxiv_id
+                result = results[base]
+                _store_s2(job, result)
+                run.counters["s2_ok" if result.found else "s2_not_indexed"] += 1
+            return
         except requests.HTTPError as exc:
             status = _http_status(exc)
             if status == 429:
-                wait = _retry_after(exc.response)
-                logger.warning("S2 429 for %s; waiting %.0fs (Retry-After)", arxiv_id, wait)
-                if run.stop.wait(wait):
-                    return True
+                if _wait_s2_429(run, exc.response):
+                    _requeue_s2_jobs(run, jobs)
+                    return
+                if run.s2_rate_limit_wait >= _S2_MAX_RATE_LIMIT_WAIT:
+                    logger.error(
+                        "S2 rate-limit wait exceeded %.0fs; worker off for this run",
+                        _S2_MAX_RATE_LIMIT_WAIT,
+                    )
+                    run.s2_disabled = True
+                    _requeue_s2_jobs(run, jobs)
+                    return
                 continue
             if status == 403:
                 logger.error("S2 answered 403 (invalid/expired key?); S2 worker switched off")
                 run.s2_disabled = True
-                return True
-            logger.warning("S2 HTTP %s for %s; retried on next run", status, arxiv_id)
-            return False
+                _requeue_s2_jobs(run, jobs)
+                return
+            logger.warning("S2 HTTP %s on batch; retried on next run", status)
+            _requeue_s2_jobs(run, jobs)
+            return
         except (requests.RequestException, ValueError) as exc:
-            logger.warning("S2 failed for %s (%r); retried on next run", arxiv_id, exc)
-            return False
-        _store_s2(job, result, venue)
-        run.counters["s2_ok" if result.found else "s2_not_indexed"] += 1
-        return True
-    logger.warning("S2 gave up on %s after %d rate-limited attempts", arxiv_id, _S2_MAX_ATTEMPTS)
-    return False
+            logger.warning("S2 batch failed (%r); retried on next run", exc)
+            _requeue_s2_jobs(run, jobs)
+            return
+    logger.warning("S2 batch gave up after %d rate-limited attempts", _S2_MAX_BATCH_ATTEMPTS)
+    _requeue_s2_jobs(run, jobs)
 
 
 def _s2_worker(run: _Run) -> None:
-    giveups = 0
     while True:
-        job = run.s2_queue.get()
-        if job is None:
+        jobs = _collect_s2_batch(run.s2_queue)
+        if jobs is None:
             return
         if run.stop.is_set() or run.s2_disabled:
-            continue  # drain; the paper is queued again on resume (no raw file)
+            continue  # drain; papers without raw.gz are queued again on the next run
         try:
-            ok = _handle_s2_job(run, job)
-        except Exception:  # never let the S2 thread die silently
-            logger.exception("S2 worker error on %s", job.paper.arxiv_id)
-            ok = False
-        if ok:
-            giveups = 0
-            continue
-        run.counters["s2_giveups"] += 1
-        giveups += 1
-        if giveups >= _S2_MAX_CONSECUTIVE_GIVEUPS:
-            logger.error("S2 failed %d papers in a row; S2 worker off for this run", giveups)
-            run.s2_disabled = True
+            _handle_s2_batch(run, jobs)
+        except Exception:
+            logger.exception("S2 worker error on batch starting with %s", jobs[0].paper.arxiv_id)
+            _requeue_s2_jobs(run, jobs)
 
 
 # --------------------------------------------------------------------------- entry point
@@ -469,7 +524,10 @@ def run(
         s2_thread.join()
         resources = sampler.stop()
         merged = metrics.save_run(
-            data_dir / "logs" / "metrics.json", metrics.stage_seconds(), resources
+            data_dir / "logs" / "metrics.json",
+            metrics.stage_seconds(),
+            resources,
+            crawl_counters=state.counters,
         )
         summary = manifest.summary()
         manifest.close()

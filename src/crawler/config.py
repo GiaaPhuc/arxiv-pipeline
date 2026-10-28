@@ -24,7 +24,7 @@ class Config:
     contact: str = ""
     s2_api_key: str | None = field(default=None, repr=False)  # repr=False: never log the key
     arxiv_min_interval: float = 3.0  # seconds, measured from END of previous request
-    s2_min_interval: float = 1.0
+    s2_min_interval: float = 1.1  # S2 key: 1 req/s; small margin for network latency
     max_retries: int = 5
     max_extract_bytes: int = 2 * 1024**3  # zip-bomb guard (uncompressed total)
     request_timeout: tuple[float, float] = (30.0, 120.0)  # (connect, read) seconds per request

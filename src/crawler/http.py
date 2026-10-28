@@ -12,6 +12,7 @@ arXiv API and /src/ share ONE limiter (same host, export.arxiv.org, one connecti
 from __future__ import annotations
 
 import logging
+import random
 import time
 from collections.abc import Callable
 from typing import BinaryIO
@@ -56,6 +57,48 @@ class RateLimiter:
     def done(self) -> None:
         """Mark the end of a request (interval is counted from here)."""
         self._last_done_at = self._clock()
+
+
+class AdaptiveRateLimiter(RateLimiter):
+    """S2 limiter: slow down after 429, ease back after a streak of successes."""
+
+    def __init__(
+        self,
+        min_interval: float,
+        *,
+        max_interval: float = 5.0,
+        success_streak_to_recover: int = 50,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        super().__init__(min_interval, clock=clock, sleep=sleep)
+        self._base_interval = min_interval
+        self._max_interval = max_interval
+        self._recover_streak = success_streak_to_recover
+        self._success_streak = 0
+
+    def wait(self) -> None:
+        if self._last_done_at is None:
+            return
+        elapsed = self._clock() - self._last_done_at
+        remaining = self._min_interval - elapsed
+        if remaining > 0:
+            self._sleep(remaining + random.uniform(0.0, 0.05))
+
+    def note_429(self) -> None:
+        self._success_streak = 0
+        self._min_interval = min(
+            max(self._min_interval * 2, self._base_interval * 2), self._max_interval
+        )
+
+    def note_success(self) -> None:
+        self._success_streak += 1
+        if (
+            self._success_streak >= self._recover_streak
+            and self._min_interval > self._base_interval
+        ):
+            self._min_interval = max(self._base_interval, self._min_interval * 0.5)
+            self._success_streak = 0
 
 
 class HostClient:
@@ -123,6 +166,40 @@ class HostClient:
         assert response is not None
         return response
 
+    def post(self, path: str, **kwargs) -> requests.Response:
+        url = self._full_url(path)
+        kwargs.setdefault("timeout", self._config.request_timeout)
+        response: requests.Response | None = None
+        for attempt in range(self._config.max_retries + 1):
+            self.limiter.wait()
+            try:
+                self._log_request("POST", url)
+                try:
+                    response = self._session.post(url, **kwargs)
+                except (requests.ConnectionError, requests.Timeout) as exc:
+                    if attempt >= self._config.max_retries:
+                        raise
+                    logger.warning(
+                        "POST %s failed (%s); retry %d", url, type(exc).__name__, attempt
+                    )
+                    self._sleep_for_retry(attempt)
+                    continue
+                self._log_request("POST", url, response.status_code)
+                if response.status_code in _STOP_STATUSES:
+                    return response
+                if (
+                    self._is_transient_server_error(response.status_code)
+                    and attempt < self._config.max_retries
+                ):
+                    response.close()
+                    self._sleep_for_retry(attempt)
+                    continue
+                return response
+            finally:
+                self.limiter.done()
+        assert response is not None
+        return response
+
     def stream_to_file(self, path: str, dest: BinaryIO, **kwargs) -> int:
         """Stream a response to ``dest`` (never hold the archive in RAM); return bytes written."""
         url = self._full_url(path)
@@ -159,5 +236,5 @@ def make_arxiv_client(config: Config) -> HostClient:
 
 
 def make_s2_client(config: Config) -> HostClient:
-    limiter = RateLimiter(config.s2_min_interval)
+    limiter = AdaptiveRateLimiter(config.s2_min_interval)
     return HostClient(f"https://{S2_API_HOST}", limiter, config)

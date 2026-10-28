@@ -5,7 +5,6 @@ from __future__ import annotations
 import gzip
 import io
 import json
-import re
 import tarfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -87,22 +86,56 @@ def _s2_refs(arxiv_id: str) -> dict:
                 }
             },
             {"citedPaper": {"paperId": f"s2-{arxiv_id}-b", "title": "No arXiv", "authors": []}},
-        ]
+        ],
+        "next": None,
     }
 
 
+def _s2_batch_refs(base: str) -> list[dict]:
+    return [
+        {
+            "paperId": f"s2-{base}-a",
+            "title": "Cited with arXiv",
+            "authors": [{"name": "Zed"}],
+            "year": 2020,
+            "publicationDate": "2020-05-06",
+            "externalIds": {"ArXiv": "2005.00001"},
+        },
+        {"paperId": f"s2-{base}-b", "title": "No arXiv", "authors": []},
+    ]
+
+
 def _mock_s2(*, unknown: tuple[str, ...] = ("2408.00002",)) -> None:
+    def batch_callback(request):
+        body = json.loads(request.body)
+        payload = []
+        for paper_id in body["ids"]:
+            base = paper_id.removeprefix("ARXIV:")
+            if base in unknown:
+                payload.append(None)
+            else:
+                refs = _s2_batch_refs(base)
+                payload.append(
+                    {
+                        "paperId": f"paper-{base}",
+                        "venue": "ICML" if base == "2408.00001" else "arXiv.org",
+                        "referenceCount": len(refs),
+                        "references": refs,
+                    }
+                )
+        return 200, {}, json.dumps(payload)
+
+    responses.add_callback(
+        responses.POST,
+        f"{S2}/graph/v1/paper/batch",
+        callback=batch_callback,
+        content_type="application/json",
+    )
     for base in PAPERS:
-        refs_url = f"{S2}/graph/v1/paper/ARXIV:{base}/references"
         if base in unknown:
-            responses.add(responses.GET, refs_url, status=404, json={"error": "not found"})
-        else:
-            responses.add(responses.GET, refs_url, json=_s2_refs(base))
-        responses.add(
-            responses.GET,
-            f"{S2}/graph/v1/paper/ARXIV:{base}",
-            json={"venue": "ICML" if base == "2408.00001" else "arXiv.org"},
-        )
+            continue
+        refs_url = f"{S2}/graph/v1/paper/ARXIV:{base}/references"
+        responses.add(responses.GET, refs_url, json=_s2_refs(base))
 
 
 def _mock_src(*, failing: tuple[str, ...] = ()) -> None:
@@ -195,7 +228,7 @@ def test_outputs_follow_the_contract(tmp_path):
     assert _read(root / "v1" / "references.json") == _read(root / "v2" / "references.json")
     raw = json.loads(gzip.decompress((root / pipeline.S2_RAW_NAME).read_bytes()))
     assert raw["arxiv_id"] == "2408.00001"
-    assert len(_calls(f"{S2}/graph/v1/paper/ARXIV:2408.00001/references")) == 1
+    assert len(_calls(f"{S2}/graph/v1/paper/batch")) <= 3  # batched, not one POST per paper
 
     # A paper S2 does not know still gets (empty) references and a completion marker.
     unknown = config.data_dir / "papers" / "2408-00002"
@@ -326,10 +359,31 @@ def test_discovery_server_error_is_not_reported_as_not_found(tmp_path):
 def test_s2_429_waits_and_retries_then_succeeds(tmp_path):
     responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
     _mock_src()
-    url = f"{S2}/graph/v1/paper/ARXIV:2408.00002/references"
-    responses.add(responses.GET, url, status=429, headers={"Retry-After": "1"})
-    responses.add(responses.GET, url, json=_s2_refs("2408.00002"))
-    responses.add(responses.GET, f"{S2}/graph/v1/paper/ARXIV:2408.00002", json={"venue": ""})
+    batch_url = f"{S2}/graph/v1/paper/batch"
+    attempts = {"n": 0}
+
+    def batch_with_429(request):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return 429, {"Retry-After": "1"}, ""
+        body = json.loads(request.body)
+        payload = []
+        for paper_id in body["ids"]:
+            base = paper_id.removeprefix("ARXIV:")
+            refs = _s2_batch_refs(base)
+            payload.append(
+                {
+                    "paperId": f"paper-{base}",
+                    "venue": "",
+                    "referenceCount": len(refs),
+                    "references": refs,
+                }
+            )
+        return 200, {}, json.dumps(payload)
+
+    responses.add_callback(
+        responses.POST, batch_url, callback=batch_with_429, content_type="application/json"
+    )
     config = _config(tmp_path)
 
     pipeline.run(["2408.00002"], config)
@@ -343,7 +397,7 @@ def test_s2_429_waits_and_retries_then_succeeds(tmp_path):
 def test_s2_403_switches_off_s2_only_and_resume_finishes_it(tmp_path):
     responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
     _mock_src()
-    responses.add(responses.GET, re.compile(rf"{S2}/.*"), status=403)
+    responses.add(responses.POST, f"{S2}/graph/v1/paper/batch", status=403)
     config = _config(tmp_path)
     ids = ["2408.00001", "2408.00002"]
 
