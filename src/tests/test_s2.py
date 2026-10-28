@@ -3,7 +3,7 @@
 import requests
 import responses
 
-from crawler.s2 import fetch_references
+from crawler.s2 import fetch_references, fetch_references_batch
 
 
 class DummyS2Client:
@@ -16,6 +16,10 @@ class DummyS2Client:
     def get(self, path: str, **kwargs) -> requests.Response:
         url = f"{self.base_url}{path}" if path.startswith("/") else f"{self.base_url}/{path}"
         return self.session.get(url, **kwargs)
+
+    def post(self, path: str, **kwargs) -> requests.Response:
+        url = f"{self.base_url}{path}" if path.startswith("/") else f"{self.base_url}/{path}"
+        return self.session.post(url, **kwargs)
 
 
 @responses.activate
@@ -154,3 +158,91 @@ def test_fetch_venue_returns_real_venue_and_drops_arxiv_repository():
     assert fetch_venue(client, "2310.00002") is None
     assert fetch_venue(client, "2310.00003") is None
     assert fetch_venue(client, "2310.00004") is None
+
+
+@responses.activate
+def test_batch_returns_references_and_venue():
+    client = DummyS2Client()
+    responses.add(
+        responses.POST,
+        "https://api.semanticscholar.org/graph/v1/paper/batch",
+        json=[
+            {
+                "paperId": "p-main",
+                "venue": "ICLR 2024",
+                "referenceCount": 1,
+                "references": [
+                    {
+                        "paperId": "p-ref",
+                        "title": "Batch ref",
+                        "authors": [{"name": "Ann"}],
+                        "year": 2023,
+                        "externalIds": {"ArXiv": "2301.00001"},
+                    }
+                ],
+            }
+        ],
+    )
+
+    out = fetch_references_batch(client, ["2310.12345"])
+    result = out["2310.12345"]
+    assert result.found is True
+    assert result.venue == "ICLR 2024"
+    assert len(result.references) == 1
+    assert result.references[0].ref_arxiv_id == "2301.00001"
+    assert result.raw["source"] == "batch"
+
+
+@responses.activate
+def test_batch_null_element_is_not_indexed():
+    client = DummyS2Client()
+    responses.add(
+        responses.POST,
+        "https://api.semanticscholar.org/graph/v1/paper/batch",
+        json=[None],
+    )
+
+    out = fetch_references_batch(client, ["2310.99999"])
+    result = out["2310.99999"]
+    assert result.found is False
+    assert result.raw == {"status": 404}
+
+
+@responses.activate
+def test_batch_falls_back_when_reference_count_exceeds_embedded_list():
+    client = DummyS2Client()
+    responses.add(
+        responses.POST,
+        "https://api.semanticscholar.org/graph/v1/paper/batch",
+        json=[
+            {
+                "paperId": "p-big",
+                "referenceCount": 50,
+                "references": [{"paperId": "only-one", "title": "One", "authors": []}],
+            }
+        ],
+    )
+    responses.add(
+        responses.GET,
+        "https://api.semanticscholar.org/graph/v1/paper/ARXIV:2310.12345/references",
+        json={
+            "data": [
+                {
+                    "citedPaper": {
+                        "paperId": "p1",
+                        "title": "From pagination",
+                        "authors": [],
+                        "year": 2020,
+                        "externalIds": {},
+                    }
+                }
+            ],
+            "next": None,
+        },
+    )
+
+    out = fetch_references_batch(client, ["2310.12345"])
+    result = out["2310.12345"]
+    assert result.found is True
+    assert result.references[0].ref_title == "From pagination"
+    assert result.raw["source"] == "references"

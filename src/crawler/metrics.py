@@ -192,7 +192,13 @@ def load_saved(path: Path) -> dict:
         return {}
 
 
-def save_run(path: Path, stages: dict[str, float], resources: dict[str, float]) -> dict:
+def save_run(
+    path: Path,
+    stages: dict[str, float],
+    resources: dict[str, float],
+    *,
+    crawl_counters: dict[str, float | int] | None = None,
+) -> dict:
     """Merge this run into the cumulative metrics file and return the merged document.
 
     ``stage_seconds`` are summed over runs (active time, honest under resume); RAM and
@@ -218,11 +224,23 @@ def save_run(path: Path, stages: dict[str, float], resources: dict[str, float]) 
         if total_n
         else 0.0
     )
+    prev_s2 = previous.get("s2", {})
+    s2_in = crawl_counters or {}
+    merged_s2 = {
+        "batches": int(prev_s2.get("batches", 0)) + int(s2_in.get("s2_batches", 0)),
+        "http_429": int(prev_s2.get("http_429", 0)) + int(s2_in.get("s2_429", 0)),
+        "retry_wait_seconds": float(prev_s2.get("retry_wait_seconds", 0.0))
+        + float(s2_in.get("s2_retry_wait_seconds", 0.0)),
+        "papers_ok": int(prev_s2.get("papers_ok", 0)) + int(s2_in.get("s2_ok", 0)),
+        "papers_not_indexed": int(prev_s2.get("papers_not_indexed", 0))
+        + int(s2_in.get("s2_not_indexed", 0)),
+    }
     merged = {
         "runs": int(previous.get("runs", 0)) + 1,
         "last_run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "stage_seconds": merged_stages,
         "active_seconds": sum(merged_stages.values()),
+        "s2": merged_s2,
         "resources": {
             "ram_peak_bytes": max(
                 float(prev_res.get("ram_peak_bytes", 0.0)),
