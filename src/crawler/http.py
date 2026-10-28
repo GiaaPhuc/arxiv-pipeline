@@ -28,6 +28,35 @@ logger = logging.getLogger(__name__)
 _STOP_STATUSES = frozenset({403, 429})
 
 
+class _StreamResponse:
+    """Wrap a streaming ``requests.Response``; rate limit ends when the body is closed."""
+
+    def __init__(self, inner: requests.Response, limiter: RateLimiter) -> None:
+        self._inner = inner
+        self._limiter = limiter
+        self._released = False
+
+    def _release(self) -> None:
+        if not self._released:
+            self._released = True
+            self._limiter.done()
+
+    def close(self) -> None:
+        try:
+            self._inner.close()
+        finally:
+            self._release()
+
+    def __enter__(self) -> _StreamResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+
 class RateLimiter:
     """Blocks so that calls are at least ``min_interval`` seconds apart.
 
@@ -136,9 +165,11 @@ class HostClient:
     def get(self, path: str, **kwargs) -> requests.Response:
         url = self._full_url(path)
         kwargs.setdefault("timeout", self._config.request_timeout)  # never hang forever
+        stream = bool(kwargs.get("stream"))
         response: requests.Response | None = None
         for attempt in range(self._config.max_retries + 1):
             self.limiter.wait()
+            handoff = False
             try:
                 self._log_request("GET", url)
                 try:
@@ -152,6 +183,9 @@ class HostClient:
                     continue
                 self._log_request("GET", url, response.status_code)
                 if response.status_code in _STOP_STATUSES:
+                    if stream:
+                        handoff = True
+                        return _StreamResponse(response, self.limiter)
                     return response
                 if (
                     self._is_transient_server_error(response.status_code)
@@ -160,9 +194,13 @@ class HostClient:
                     response.close()
                     self._sleep_for_retry(attempt)
                     continue
+                if stream:
+                    handoff = True
+                    return _StreamResponse(response, self.limiter)
                 return response
             finally:
-                self.limiter.done()
+                if not handoff:
+                    self.limiter.done()
         assert response is not None
         return response
 

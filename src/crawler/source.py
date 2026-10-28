@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import logging
 import os
 import shutil
 import tarfile
@@ -19,11 +20,16 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
+
 from .config import Config
 from .http import HostClient
 from .models import FileEntry, Status, VersionMeta
 
+logger = logging.getLogger(__name__)
+
 _CHUNK_SIZE = 64 * 1024
+_STREAM_RETRY_ERRORS = (ChunkedEncodingError, ConnectionError, Timeout)
 _GZIP_MAGIC = b"\x1f\x8b"
 _PDF_MAGIC = b"%PDF"
 _ZIP_MAGICS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
@@ -84,43 +90,65 @@ def sniff_archive_type(path: Path) -> ArchiveType:
     return ArchiveType.GZ_SINGLE
 
 
+def _stream_attempts(client: HostClient) -> int:
+    config = getattr(client, "_config", None)
+    return (config.max_retries + 1) if config is not None else 1
+
+
 def download_source(
     client: HostClient, arxiv_id: str, version: int, tmp_dir: Path
 ) -> DownloadResult:
     """Stream one source response into a temporary file in ``tmp_dir``.
 
-    HostClient owns rate limiting and any configured retries. This function
-    performs one client call and never retries on its own.
+    HostClient owns rate limiting and HTTP retries. Transient body read errors
+    (e.g. ``ChunkedEncodingError``) retry within the same budget.
     """
     path = f"/src/{arxiv_id}v{version}"
-    response = client.get(path, stream=True)
-    temp_path: Path | None = None
-    try:
-        status = response.status_code
-        if status == 404:
-            return DownloadResult(path=None, http_status=status)
-        if status in (403, 429):
-            return DownloadResult(path=None, http_status=status)
-        if not 200 <= status < 300:
-            return DownloadResult(path=None, http_status=status)
+    last_exc: BaseException | None = None
+    for attempt in range(_stream_attempts(client)):
+        response = client.get(path, stream=True)
+        temp_path: Path | None = None
+        try:
+            status = response.status_code
+            if status == 404:
+                return DownloadResult(path=None, http_status=status)
+            if status in (403, 429):
+                return DownloadResult(path=None, http_status=status)
+            if not 200 <= status < 300:
+                return DownloadResult(path=None, http_status=status)
 
-        tmp_dir = Path(tmp_dir)
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        fd, name = tempfile.mkstemp(prefix="arxiv-source-", suffix=".part", dir=tmp_dir)
-        temp_path = Path(name)
-        written = 0
-        with os.fdopen(fd, "wb") as output:
-            for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
-                if chunk:
-                    output.write(chunk)
-                    written += len(chunk)
-        return DownloadResult(path=temp_path, http_status=status, raw_archive_bytes=written)
-    except BaseException:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-        raise
-    finally:
-        response.close()
+            tmp_dir = Path(tmp_dir)
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            fd, name = tempfile.mkstemp(prefix="arxiv-source-", suffix=".part", dir=tmp_dir)
+            temp_path = Path(name)
+            written = 0
+            with os.fdopen(fd, "wb") as output:
+                for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
+                    if chunk:
+                        output.write(chunk)
+                        written += len(chunk)
+            return DownloadResult(path=temp_path, http_status=status, raw_archive_bytes=written)
+        except _STREAM_RETRY_ERRORS as exc:
+            last_exc = exc
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+            if attempt >= _stream_attempts(client) - 1:
+                raise
+            logger.warning(
+                "stream %sv%d failed (%s); retry %d",
+                arxiv_id,
+                version,
+                type(exc).__name__,
+                attempt + 1,
+            )
+        except BaseException:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+            raise
+        finally:
+            response.close()
+    assert last_exc is not None
+    raise last_exc
 
 
 def _safe_member_path(name: str) -> tuple[PurePosixPath, Path]:

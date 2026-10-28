@@ -11,6 +11,36 @@ from crawler.config import Config
 from crawler.http import HostClient, RateLimiter, make_s2_client
 
 
+def test_streaming_defers_rate_limit_until_response_is_closed():
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep)
+    config = Config(contact="test@example.com", arxiv_min_interval=3.0)
+    client = HostClient("https://export.arxiv.org", limiter, config)
+
+    inner = MagicMock(spec=requests.Response)
+    inner.status_code = 200
+    inner.iter_content = MagicMock(return_value=iter([b"payload"]))
+    inner.close = MagicMock()
+
+    client._session.get = MagicMock(return_value=inner)  # noqa: SLF001
+
+    first = client.get("/src/2408.11045v1", stream=True)
+    list(first.iter_content(chunk_size=64))
+    assert sleeps == []
+    first.close()
+    client.get("/src/2408.11045v2", stream=True)
+    assert sleeps == [3.0]
+
+
 def test_arxiv_requests_are_at_least_3s_apart_from_previous_end_fake_clock():
     now = [0.0]
     sleeps: list[float] = []

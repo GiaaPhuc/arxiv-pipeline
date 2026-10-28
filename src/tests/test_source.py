@@ -383,6 +383,27 @@ def test_stream_failure_removes_partial_download(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
+def test_chunked_encoding_error_retries_then_succeeds(tmp_path: Path) -> None:
+    bad = FakeResponse(200, [b"partial"], requests.exceptions.ChunkedEncodingError("broken"))
+    good = FakeResponse(200, [b"complete"])
+    client = _RetryFakeClient([bad, good])
+    result = download_source(client, "2408.11075", 1, tmp_path)
+    assert result.http_status == 200
+    assert result.path is not None and result.path.read_bytes() == b"complete"
+    assert len(client.calls) == 2
+
+
+class _RetryFakeClient:
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        self._responses = list(responses)
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self._config = Config(contact="test@example.com", max_retries=1)
+
+    def get(self, path: str, **kwargs: object) -> FakeResponse:
+        self.calls.append((path, kwargs))
+        return self._responses.pop(0)
+
+
 def test_network_error_without_response_propagates(tmp_path: Path) -> None:
     client = FakeClient(requests.ConnectionError("offline"))
     with pytest.raises(requests.ConnectionError, match="offline"):
