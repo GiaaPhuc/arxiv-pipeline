@@ -60,7 +60,7 @@ Chỉ ở spike, smoke và pilot. Không gọi trong unit test.
 
 - arXiv chỉ qua `export.arxiv.org`. Không gọi `arxiv.org`.
 - Cách nhau ≥ 3 giây, tính từ lúc yêu cầu trước kết thúc. Một kết nối. API và `/src/` chung một limiter.
-- Semantic Scholar ≥ 1 yêu cầu/giây khi có key. Gặp 429 thì chờ `Retry-After` (30–600 giây) rồi thử lại tối đa 4 lần cho bài đó; hết lần thì bỏ bài đó ở lần chạy này (lần sau tự làm lại). 403 (key sai) hoặc 5 bài liên tiếp bị bỏ thì tắt worker S2 trong lần chạy này, arXiv vẫn chạy tiếp.
+- Semantic Scholar: một worker, lô tối đa 100 ID qua `POST /paper/batch`; khoảng cách nền ~1,1 s/request (key ≈ 1 req/s), limiter tự chậm lại sau 429. Gặp 429 thì chờ `Retry-After` (30–600 giây) rồi thử lại **cả lô** tối đa 4 lần; lô chưa xong được đưa lại hàng đợi (lần chạy sau thử tiếp). 403 (key sai) hoặc tổng thời gian chờ 429 liên tiếp không có request thành công ≥ 30 phút thì tắt worker S2 trong lần chạy này, arXiv vẫn chạy tiếp.
 - Gặp 403 hoặc 429 trên arXiv: pipeline tự dừng (mã thoát 3) và in tóm tắt. Báo nhóm, không tăng số kết nối, không chạy lại dồn dập.
 - User-Agent lấy từ `CRAWLER_CONTACT`. Đặt biến này trước khi crawl thật.
 

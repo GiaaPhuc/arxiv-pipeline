@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T4 28/10/2026 (Asia/Saigon)** — Luồng S2: batch `POST /paper/batch` (lô 100), venue kèm batch, fallback `/references` limit 1000, limiter thích ứng sau 429, metrics `s2.*` trong `metrics.json`. **180 passed**. Chưa pilot batch trên S2 thật; `--s2-only`/staging (S4 plan) chưa code.
+> Cập nhật lần cuối: **T4 28/10/2026 (Asia/Saigon)** — Luồng S2: batch `POST /paper/batch` (lô 100), venue kèm batch, fallback `/references` limit 1000, limiter thích ứng sau 429, metrics `s2.*` trong `metrics.json`. **180 passed**. Tài liệu luồng: `Plans/du-an-va-luong-xu-ly-hien-tai-vi.md` (đồng bộ mã + plan S1–S5). `CONTRIBUTING.md` S2 cập nhật theo pipeline. Chưa pilot batch trên S2 thật; `--s2-only`/staging (S4) chưa code.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 

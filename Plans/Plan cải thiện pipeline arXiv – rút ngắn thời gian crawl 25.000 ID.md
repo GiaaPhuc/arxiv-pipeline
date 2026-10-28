@@ -1,6 +1,6 @@
 # Plan cải thiện luồng Semantic Scholar – giảm thời gian chờ 429
 
-*Ngày 28/10/2026 · Dựa trên tài liệu mô tả dự án và luồng xử lý hiện tại (nhánh `m1/a-pipeline`, 177 test pass, chưa crawl thật)*
+*Ngày 28/10/2026 · Dựa trên `Plans/du-an-va-luong-xu-ly-hien-tai-vi.md` (180 test pass, S2–S3 đã code, S4 chưa, chưa crawl thật)*
 
 S2 chậm vì mỗi bài tốn ít nhất một request ở 1 req/s, và mỗi lần dính 429 phải chờ khoảng 60 s. Plan này chỉ sửa luồng S2: gộp request theo lô, giảm cơ hội dính 429 và xử lý 429 rẻ hơn. Phần arXiv giữ nguyên.
 
