@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T4 28/10/2026 ~15:50 (Asia/Saigon)** — **Phase 0 ✅ · Phase 1 ✅** (go/no-go). Pilot **30 ID** trên máy local: `validate_corpus` + `export_data` → `data/stats/`; **180 passed**, `ruff` sạch. S2 batch đã chạy thật (2 lô, 3×429, ~180 s chờ). **Phase 2** tiếp: crawl **25.000 ID** một máy.
+> Cập nhật lần cuối: **T4 28/10/2026 ~18:55 (Asia/Saigon)** — `README.md` thiết kế lại (badge, TOC, mermaid, bố cục). Trước đó: bản tiếng Anh đầy đủ nội dung. Trước đó: `colab_run.ipynb` Restore/Crawl/Backup; `docs/huong-dan-crawl-colab-vi.md` đồng bộ. — **Phase 0 ✅ · Phase 1 ✅** (go/no-go). Pilot **30 ID** trên máy local: `validate_corpus` + `export_data` → `data/stats/`; **180 passed**, `ruff` sạch. S2 batch đã chạy thật (2 lô, 3×429, ~180 s chờ). **Phase 2** tiếp: crawl **25.000 ID** một máy.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
