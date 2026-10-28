@@ -56,6 +56,7 @@ class DownloadResult:
     path: Path | None  # None on 404/failure
     http_status: int
     raw_archive_bytes: int = 0
+    retry_after: float | None = None  # seconds from Retry-After on 429
 
 
 class _UnsafeArchiveError(ValueError):
@@ -95,6 +96,16 @@ def _stream_attempts(client: HostClient) -> int:
     return (config.max_retries + 1) if config is not None else 1
 
 
+def _retry_after_seconds(response) -> float | None:
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    try:
+        return float(headers.get("Retry-After", ""))
+    except (TypeError, ValueError):
+        return None
+
+
 def download_source(
     client: HostClient, arxiv_id: str, version: int, tmp_dir: Path
 ) -> DownloadResult:
@@ -113,7 +124,8 @@ def download_source(
             if status == 404:
                 return DownloadResult(path=None, http_status=status)
             if status in (403, 429):
-                return DownloadResult(path=None, http_status=status)
+                retry_after = _retry_after_seconds(response) if status == 429 else None
+                return DownloadResult(path=None, http_status=status, retry_after=retry_after)
             if not 200 <= status < 300:
                 return DownloadResult(path=None, http_status=status)
 

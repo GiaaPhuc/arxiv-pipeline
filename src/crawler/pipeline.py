@@ -20,8 +20,9 @@ Design
 * **Resume**: ids with ``paper.json`` skip discovery; pairs in a final state are skipped;
   ``failed``/``pending`` pairs are retried on the next run (never in a loop within one
   run); papers lacking the raw S2 file are queued for S2 again.
-* **Stopping**: 403/429 from arXiv stops the whole run (``StopCrawl``); the team is told
-  and nothing is sped up. S2 429 waits ``Retry-After`` and retries the batch; an S2 403
+* **Stopping**: arXiv **403** stops the run. arXiv **429** waits ``Retry-After`` and retries
+  the same ``/src/`` request (up to 4 times), then ``StopCrawl``. S2 429 waits and retries
+  the batch; an S2 403
   (bad key) or too much cumulative 429 wait without success disables the S2 worker.
 * A failing pair is recorded as ``failed`` with the error text and the batch continues.
 """
@@ -50,7 +51,7 @@ from .ids import id_to_dirname, normalize_id, split_version
 from .manifest import Manifest, atomic_write
 from .models import PaperMeta, Status, VersionMeta
 from .s2 import S2_BATCH_SIZE, S2Result, fetch_references_batch
-from .source import download_source, extract_tex_bib
+from .source import DownloadResult, download_source, extract_tex_bib
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ S2_RAW_NAME = "s2_references.raw.json.gz"
 _S2_MAX_BATCH_ATTEMPTS = 4  # per batch, only consumed by HTTP 429
 _S2_MAX_RATE_LIMIT_WAIT = 30 * 60  # cumulative 429 wait without a success → stop S2 worker
 _S2_BATCH_FLUSH_SECONDS = 0.35  # wait briefly so nearby papers share one batch POST
+_ARXIV_MAX_429_ATTEMPTS = 4  # wait Retry-After between attempts; then StopCrawl
 
 
 class StopCrawl(Exception):
@@ -160,15 +162,36 @@ def _version_date(paper: PaperMeta, version: int) -> str | None:
 
 
 def _build_version(run: _Run, paper: PaperMeta, version: int, part: Path) -> VersionMeta:
-    """Download + extract one version into ``part``. Raises ``StopCrawl`` on 403/429."""
+    """Download + extract into ``part``. ``StopCrawl`` on 403 or 429 after retry budget."""
     arxiv_id = paper.arxiv_id
     archive: Path | None = None
     try:
-        with metrics.stage_timer("download"):
-            download = download_source(run.arxiv, arxiv_id, version, run.tmp_dir)
+        download: DownloadResult | None = None
+        for rate_attempt in range(_ARXIV_MAX_429_ATTEMPTS):
+            with metrics.stage_timer("download"):
+                download = download_source(run.arxiv, arxiv_id, version, run.tmp_dir)
+            if download.http_status == 403:
+                raise StopCrawl(f"arXiv answered HTTP 403 for {arxiv_id}v{version}")
+            if download.http_status == 429:
+                wait = _retry_after_download(download)
+                if rate_attempt >= _ARXIV_MAX_429_ATTEMPTS - 1:
+                    raise StopCrawl(f"arXiv answered HTTP 429 for {arxiv_id}v{version}")
+                logger.warning(
+                    "arXiv 429 on %sv%d; waiting %.0fs (Retry-After), attempt %d/%d",
+                    arxiv_id,
+                    version,
+                    wait,
+                    rate_attempt + 1,
+                    _ARXIV_MAX_429_ATTEMPTS,
+                )
+                if run.stop.wait(wait):
+                    raise StopCrawl(
+                        f"arXiv 429 for {arxiv_id}v{version} (interrupted while waiting)"
+                    )
+                continue
+            break
+        assert download is not None
         archive = download.path
-        if download.http_status in (403, 429):
-            raise StopCrawl(f"arXiv answered HTTP {download.http_status} for {arxiv_id}v{version}")
         if download.http_status == 404:
             return VersionMeta(arxiv_id, version, Status.NOT_FOUND, error="HTTP 404 on /src/")
         if archive is None:
@@ -329,6 +352,12 @@ def _retry_after(response: requests.Response | None, default: float = 60.0) -> f
     except (TypeError, ValueError):
         value = default
     return min(max(value, 30.0), 600.0)
+
+
+def _retry_after_download(download: DownloadResult, default: float = 60.0) -> float:
+    if download.retry_after is not None:
+        return min(max(download.retry_after, 30.0), 600.0)
+    return default
 
 
 def _store_s2(job: _S2Job, result: S2Result) -> None:

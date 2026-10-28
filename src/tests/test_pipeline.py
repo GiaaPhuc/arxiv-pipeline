@@ -6,7 +6,9 @@ import gzip
 import io
 import json
 import tarfile
+import threading
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -316,15 +318,22 @@ def test_arxiv_429_stops_the_run_and_resume_continues(tmp_path):
     responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
     archive = _tar_gz()
     responses.add(responses.GET, f"{ARXIV}/src/2408.00004v1", body=archive)
-    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", status=429)
+    for _ in range(4):
+        responses.add(
+            responses.GET,
+            f"{ARXIV}/src/2408.00004v2",
+            status=429,
+            headers={"Retry-After": "1"},
+        )
     _mock_s2()
     config = _config(tmp_path)
 
-    with pytest.raises(pipeline.StopCrawl) as stopped:
-        pipeline.run(["2408.00004", "2408.00002"], config)
+    with patch.object(threading.Event, "wait", return_value=False):
+        with pytest.raises(pipeline.StopCrawl) as stopped:
+            pipeline.run(["2408.00004", "2408.00002"], config)
 
     assert stopped.value.summary["ok"] == 1  # v1 was kept
-    assert len(_calls(f"{ARXIV}/src/")) == 2  # stopped at once: no v3, no other paper
+    assert len(_calls(f"{ARXIV}/src/")) == 5  # v1 + four 429 attempts on v2
     assert not (config.data_dir / "papers" / "2408-00004" / ".v2.part").exists()
     assert _calls(f"{S2}/") == []  # the paper was not finished, so S2 was not asked
 
@@ -335,6 +344,29 @@ def test_arxiv_429_stops_the_run_and_resume_continues(tmp_path):
     summary = pipeline.run(["2408.00004", "2408.00002"], config)
     assert summary["ok"] == 4 and summary["failed"] == 0
     assert f"{ARXIV}/src/2408.00004v1" not in _calls(f"{ARXIV}/src/")
+
+
+@responses.activate
+def test_arxiv_429_on_src_waits_and_retries_then_continues(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v3", body=archive)
+    responses.add(
+        responses.GET,
+        f"{ARXIV}/src/2408.00004v2",
+        status=429,
+        headers={"Retry-After": "1"},
+    )
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", body=archive)
+    _mock_s2()
+    config = _config(tmp_path)
+
+    with patch.object(threading.Event, "wait", return_value=False):
+        summary = pipeline.run(["2408.00004"], config)
+
+    assert summary["ok"] == 3
+    assert len([u for u in _calls(f"{ARXIV}/src/") if u.endswith("2408.00004v2")]) == 2
 
 
 @responses.activate

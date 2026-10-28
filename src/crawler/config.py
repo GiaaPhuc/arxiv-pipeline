@@ -6,6 +6,7 @@ Environment variables:
     CRAWLER_CONTACT  e-mail/URL put in the User-Agent (required for real crawling)
     S2_API_KEY       Semantic Scholar key (optional locally; Colab Secrets on Colab)
     CRAWLER_DATA_DIR output directory (default: ./data)
+    CRAWLER_ARXIV_MIN_INTERVAL  seconds between arXiv requests (default 3.0, min 3.0)
 """
 
 from __future__ import annotations
@@ -48,10 +49,23 @@ class Config:
         data_dir_raw = (
             os.environ.get("CRAWLER_DATA_DIR") or local_vars.get("CRAWLER_DATA_DIR") or "data"
         )
+        arxiv_interval_raw = (
+            os.environ.get("CRAWLER_ARXIV_MIN_INTERVAL")
+            or local_vars.get("CRAWLER_ARXIV_MIN_INTERVAL")
+            or ""
+        )
+        arxiv_min_interval = 3.0
+        if arxiv_interval_raw:
+            try:
+                arxiv_min_interval = max(float(arxiv_interval_raw), 3.0)
+            except ValueError:
+                pass
+
         values = {
             "data_dir": Path(data_dir_raw),
             "contact": os.environ.get("CRAWLER_CONTACT") or local_vars.get("CRAWLER_CONTACT") or "",
             "s2_api_key": os.environ.get("S2_API_KEY") or local_vars.get("S2_API_KEY") or None,
+            "arxiv_min_interval": arxiv_min_interval,
         }
         values.update(overrides)
         return cls(**values)
