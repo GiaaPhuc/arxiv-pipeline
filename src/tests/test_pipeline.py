@@ -370,10 +370,40 @@ def test_arxiv_429_on_src_waits_and_retries_then_continues(tmp_path):
 
 
 @responses.activate
-def test_arxiv_429_in_discovery_stops_the_run(tmp_path):
-    responses.add(responses.GET, f"{ARXIV}/api/query", status=429)
-    with pytest.raises(pipeline.StopCrawl):
-        pipeline.run(["2408.00001"], _config(tmp_path))
+def test_arxiv_429_in_discovery_stops_after_retry_budget(tmp_path):
+    for _ in range(4):
+        responses.add(
+            responses.GET,
+            f"{ARXIV}/api/query",
+            status=429,
+            headers={"Retry-After": "1"},
+        )
+    with patch.object(threading.Event, "wait", return_value=False):
+        with pytest.raises(pipeline.StopCrawl):
+            pipeline.run(["2408.00001"], _config(tmp_path))
+    assert len(_calls(f"{ARXIV}/api/query")) == 4
+
+
+@responses.activate
+def test_arxiv_429_in_discovery_waits_and_retries_then_continues(tmp_path):
+    attempts = {"n": 0}
+
+    def query_with_429(request):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return 429, {"Retry-After": "1"}, ""
+        return _atom(request)
+
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=query_with_429)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+
+    with patch.object(threading.Event, "wait", return_value=False):
+        summary = pipeline.run(["2408.00002"], config)
+
+    assert summary["ok"] >= 1
+    assert attempts["n"] >= 2
 
 
 @responses.activate

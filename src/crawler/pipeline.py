@@ -21,8 +21,8 @@ Design
   ``failed``/``pending`` pairs are retried on the next run (never in a loop within one
   run); papers lacking the raw S2 file are queued for S2 again.
 * **Stopping**: arXiv **403** stops the run. arXiv **429** waits ``Retry-After`` and retries
-  the same ``/src/`` request (up to 4 times), then ``StopCrawl``. S2 429 waits and retries
-  the batch; an S2 403
+  the same arXiv call (discovery API or ``/src/``, up to 4 times), then ``StopCrawl``.
+  S2 429 waits and retries the batch; an S2 403
   (bad key) or too much cumulative 429 wait without success disables the S2 worker.
 * A failing pair is recorded as ``failed`` with the error text and the batch continues.
 """
@@ -175,21 +175,12 @@ def _build_version(run: _Run, paper: PaperMeta, version: int, part: Path) -> Ver
             if download.http_status == 403:
                 raise StopCrawl(f"arXiv answered HTTP 403 for {arxiv_id}v{version}")
             if download.http_status == 429:
-                wait = _retry_after_download(download)
-                if rate_attempt >= _ARXIV_MAX_429_ATTEMPTS - 1:
-                    raise StopCrawl(f"arXiv answered HTTP 429 for {arxiv_id}v{version}")
-                logger.warning(
-                    "arXiv 429 on %sv%d; waiting %.0fs (Retry-After), attempt %d/%d",
-                    arxiv_id,
-                    version,
-                    wait,
-                    rate_attempt + 1,
-                    _ARXIV_MAX_429_ATTEMPTS,
+                _wait_arxiv_429(
+                    run,
+                    context=f"for {arxiv_id}v{version}",
+                    rate_attempt=rate_attempt,
+                    download=download,
                 )
-                if run.stop.wait(wait):
-                    raise StopCrawl(
-                        f"arXiv 429 for {arxiv_id}v{version} (interrupted while waiting)"
-                    )
                 continue
             break
         assert download is not None
@@ -307,17 +298,33 @@ def _record_not_found(run: _Run, arxiv_id: str) -> None:
 
 def _discover_chunk(run: _Run, arxiv_ids: list[str]) -> list[PaperMeta]:
     """Discover metadata for ids without ``paper.json``; persist it; record missing ids."""
-    try:
-        with metrics.stage_timer("discovery"):
-            found, missing = discover(arxiv_ids, run.arxiv, run.config)
-            incomplete = fetch_revised_dates(found, run.arxiv, run.config)
-    except (requests.RequestException, ValueError) as exc:
-        if _http_status(exc) in (403, 429):
-            raise StopCrawl(f"arXiv answered HTTP {_http_status(exc)} during discovery") from exc
-        # Not "missing": leave the ids untouched, they are retried by the next run.
-        run.counters["discovery_errors"] += 1
-        logger.error("discovery failed for %d ids (%r); retried on next run", len(arxiv_ids), exc)
-        return []
+    found: list[PaperMeta] = []
+    missing: list[str] = []
+    incomplete: list[str] = []
+    for rate_attempt in range(_ARXIV_MAX_429_ATTEMPTS):
+        try:
+            with metrics.stage_timer("discovery"):
+                found, missing = discover(arxiv_ids, run.arxiv, run.config)
+                incomplete = fetch_revised_dates(found, run.arxiv, run.config)
+            break
+        except (requests.RequestException, ValueError) as exc:
+            status = _http_status(exc)
+            if status == 403:
+                raise StopCrawl("arXiv answered HTTP 403 during discovery") from exc
+            if status == 429:
+                _wait_arxiv_429(
+                    run,
+                    context="during discovery",
+                    rate_attempt=rate_attempt,
+                    response=getattr(exc, "response", None),
+                )
+                continue
+            # Not "missing": leave the ids untouched, they are retried by the next run.
+            run.counters["discovery_errors"] += 1
+            logger.error(
+                "discovery failed for %d ids (%r); retried on next run", len(arxiv_ids), exc
+            )
+            return []
     run.counters["revised_dates_incomplete"] += len(incomplete)
     for arxiv_id in missing:
         _record_not_found(run, arxiv_id)
@@ -360,6 +367,29 @@ def _retry_after_download(download: DownloadResult, default: float = 60.0) -> fl
     if download.retry_after is not None:
         return min(max(download.retry_after, 30.0), 600.0)
     return default
+
+
+def _wait_arxiv_429(
+    run: _Run,
+    *,
+    context: str,
+    rate_attempt: int,
+    response: requests.Response | None = None,
+    download: DownloadResult | None = None,
+) -> None:
+    """Sleep after arXiv 429; raise ``StopCrawl`` when the retry budget is exhausted."""
+    if rate_attempt >= _ARXIV_MAX_429_ATTEMPTS - 1:
+        raise StopCrawl(f"arXiv answered HTTP 429 {context}")
+    wait = _retry_after_download(download) if download is not None else _retry_after(response)
+    logger.warning(
+        "arXiv 429 %s; waiting %.0fs (Retry-After), attempt %d/%d",
+        context,
+        wait,
+        rate_attempt + 1,
+        _ARXIV_MAX_429_ATTEMPTS,
+    )
+    if run.stop.wait(wait):
+        raise StopCrawl(f"arXiv 429 {context} (interrupted while waiting)")
 
 
 def _store_s2(job: _S2Job, result: S2Result) -> None:

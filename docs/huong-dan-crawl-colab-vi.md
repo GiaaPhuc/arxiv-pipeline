@@ -201,7 +201,7 @@ data/
 | Triệu chứng | Việc nên làm |
 | --- | --- |
 | Thoát mã **2** | Thiếu `CRAWLER_CONTACT` hoặc lỗi đọc `id_ranges.csv` — sửa Bước 2 / 3 |
-| Thoát mã **3** | arXiv **403**, hoặc **429** sau khi đã chờ `Retry-After` và thử lại tối đa 4 lần — **dừng**, chờ thêm **30–60 phút**, **Backup**, rồi chạy lại cùng lệnh (resume). **Không** giảm delay / mở thêm tab crawl |
+| Thoát mã **3** | arXiv **403**, hoặc **429** trên API discovery hoặc `/src/` sau khi đã chờ `Retry-After` và thử lại tối đa **4 lần** cho cùng request/chunk — **dừng**, chờ thêm **30–60 phút** (Colab IP chung có thể cần lâu hơn), **Backup**, rồi chạy lại cùng lệnh (resume). **Không** giảm delay / mở thêm tab crawl |
 | `validate_corpus` / `export_data` lỗi | Corpus **chưa crawl xong** (dừng giữa chunk, thiếu S2) — bình thường; chỉ validate khi crawl hết ID |
 | S2 chậm / 429 | Cần `S2_API_KEY`; chờ backoff tự động; không spam request |
 | Session Colab chết | Khôi phục từ Drive (Bước 5), resume cùng lệnh |
