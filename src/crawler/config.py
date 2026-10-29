@@ -7,6 +7,8 @@ Environment variables:
     S2_API_KEY       Semantic Scholar key (optional locally; Colab Secrets on Colab)
     CRAWLER_DATA_DIR output directory (default: ./data)
     CRAWLER_ARXIV_MIN_INTERVAL  seconds between arXiv requests (default 3.0, min 3.0)
+    CRAWLER_BACKUP_DIR          copy ``data/`` here periodically (Colab: Drive path)
+    CRAWLER_BACKUP_EVERY_IDS    trigger backup every N base arXiv ids seen (default 0 = off)
 """
 
 from __future__ import annotations
@@ -30,6 +32,8 @@ class Config:
     max_extract_bytes: int = 2 * 1024**3  # zip-bomb guard (uncompressed total)
     request_timeout: tuple[float, float] = (30.0, 120.0)  # (connect, read) seconds per request
     discovery_batch_size: int = 50  # ids per arXiv ``id_list`` call (T0.2)
+    backup_dir: Path | None = None  # optional mirror for Colab / long runs
+    backup_every_ids: int = 0  # 0 disables automatic checkpoint backups
 
     @property
     def user_agent(self) -> str:
@@ -61,11 +65,28 @@ class Config:
             except ValueError:
                 pass
 
+        backup_dir_raw = (
+            os.environ.get("CRAWLER_BACKUP_DIR") or local_vars.get("CRAWLER_BACKUP_DIR") or ""
+        ).strip()
+        backup_every_raw = (
+            os.environ.get("CRAWLER_BACKUP_EVERY_IDS")
+            or local_vars.get("CRAWLER_BACKUP_EVERY_IDS")
+            or ""
+        )
+        backup_every_ids = 0
+        if backup_every_raw:
+            try:
+                backup_every_ids = max(int(backup_every_raw), 0)
+            except ValueError:
+                pass
+
         values = {
             "data_dir": Path(data_dir_raw),
             "contact": os.environ.get("CRAWLER_CONTACT") or local_vars.get("CRAWLER_CONTACT") or "",
             "s2_api_key": os.environ.get("S2_API_KEY") or local_vars.get("S2_API_KEY") or None,
             "arxiv_min_interval": arxiv_min_interval,
+            "backup_dir": Path(backup_dir_raw) if backup_dir_raw else None,
+            "backup_every_ids": backup_every_ids,
         }
         values.update(overrides)
         return cls(**values)

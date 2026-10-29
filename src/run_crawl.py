@@ -40,6 +40,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="only expand the ranges and print the plan (no network, no files)",
     )
+    p.add_argument(
+        "--backup-dir",
+        type=Path,
+        default=None,
+        help="mirror data/ here periodically (Colab: mounted Drive path)",
+    )
+    p.add_argument(
+        "--backup-every-ids",
+        type=int,
+        default=None,
+        metavar="N",
+        help="auto-backup after every N base arXiv ids seen (needs --backup-dir or env)",
+    )
     return p.parse_args(argv)
 
 
@@ -64,7 +77,14 @@ def _expand(ranges_path: Path, limit: int | None) -> Iterator[str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    config = Config.from_env(**({"data_dir": args.data_dir} if args.data_dir else {}))
+    overrides: dict = {}
+    if args.data_dir is not None:
+        overrides["data_dir"] = args.data_dir
+    if args.backup_dir is not None:
+        overrides["backup_dir"] = args.backup_dir
+    if args.backup_every_ids is not None:
+        overrides["backup_every_ids"] = args.backup_every_ids
+    config = Config.from_env(**overrides)
     try:
         all_ids = list(_expand(args.ranges, args.limit))
     except (OSError, ValueError) as exc:
@@ -75,7 +95,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"{len(all_ids)} ids, first {all_ids[0] if all_ids else '-'}, "
             f"last {all_ids[-1] if all_ids else '-'}; data dir {config.data_dir}; "
-            f"contact set: {bool(config.contact)}; S2 key set: {bool(config.s2_api_key)}"
+            f"contact set: {bool(config.contact)}; S2 key set: {bool(config.s2_api_key)}; "
+            f"backup: every {config.backup_every_ids} ids -> {config.backup_dir or '-'}"
         )
         return 0
     if not config.contact:

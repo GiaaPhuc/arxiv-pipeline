@@ -514,3 +514,25 @@ def test_unwritable_version_dir_is_recorded_as_failed_and_batch_continues(tmp_pa
 
     assert summary["failed"] == 1 and summary["ok"] == 3  # the other paper is unaffected
     assert not list((config.data_dir / "papers" / "2408-00002").glob(".v*"))
+
+
+@responses.activate
+def test_automatic_checkpoint_backup(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    mirror = tmp_path / "mirror"
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        backup_dir=mirror,
+        backup_every_ids=1,
+    )
+
+    pipeline.run(["2408.00001", "2408.00002", "2408.00003", "2408.00004"], config)
+
+    assert (mirror / "manifest.sqlite").is_file()
+    assert (mirror / "papers" / "2408-00004" / "v1" / "tex" / "main.tex").is_file()

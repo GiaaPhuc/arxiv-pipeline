@@ -101,6 +101,8 @@ drive.mount("/content/drive")  # dùng để sao lưu / khôi phục
 os.environ["S2_API_KEY"] = userdata.get("S2_API_KEY")
 os.environ["CRAWLER_CONTACT"] = "email-cua-ban@example.com"
 os.environ["CRAWLER_DATA_DIR"] = "/content/data"
+os.environ["CRAWLER_BACKUP_DIR"] = "/content/drive/MyDrive/arxiv-data"
+os.environ["CRAWLER_BACKUP_EVERY_IDS"] = "1000"  # tự sao lưu mỗi ~1000 ID (crawl vẫn chạy)
 ```
 
 **Lưu ý:** Dữ liệu crawl nên nằm ở **`/content/data`** (ổ đĩa tạm Colab), **không** ghi trực tiếp lên Google Drive — SQLite manifest dễ lỗi trên Drive.
@@ -143,7 +145,9 @@ Dừng tay: **Runtime → Interrupt execution** (tương đương Ctrl+C).
 
 ## Bước 5 — Sao lưu và khôi phục (quan trọng)
 
-**Sao lưu** (chạy thường xuyên, ví dụ mỗi vài giờ):
+**Sao lưu tự động (khuyến nghị):** set `CRAWLER_BACKUP_DIR` + `CRAWLER_BACKUP_EVERY_IDS=1000` (hoặc `run_crawl.py --backup-dir … --backup-every-ids 1000`). Crawler copy `data/` lên Drive sau mỗi 1000 ID cơ sở đã xử lý trong lần chạy (manifest snapshot + `papers/`). Nếu Colab chết giữa chừng, mất tối đa ~1000 ID kể từ lần backup gần nhất — không thay ô Backup tay sau Interrupt.
+
+**Sao lưu tay** (vẫn nên chạy trước khi tắt máy):
 
 ```bash
 !mkdir -p /content/drive/MyDrive/arxiv-data

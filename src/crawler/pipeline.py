@@ -44,6 +44,7 @@ from pathlib import Path
 import requests
 
 from . import metrics
+from .checkpoint import backup_data_dir
 from .config import Config
 from .discovery import discover, fetch_revised_dates
 from .http import AdaptiveRateLimiter, HostClient, make_arxiv_client, make_s2_client
@@ -87,6 +88,7 @@ class _Run:
     stop: threading.Event = field(default_factory=threading.Event)
     s2_queue: queue.Queue[_S2Job | None] = field(default_factory=queue.Queue)
     s2_disabled: bool = False
+    checkpoint_last_seen: int = 0
     counters: dict[str, int] = field(
         default_factory=lambda: {
             "papers_done": 0,
@@ -486,6 +488,23 @@ def _s2_worker(run: _Run) -> None:
 # --------------------------------------------------------------------------- entry point
 
 
+def _maybe_checkpoint(run: _Run, ids_seen: int) -> None:
+    cfg = run.config
+    if not cfg.backup_dir or cfg.backup_every_ids <= 0:
+        return
+    if ids_seen - run.checkpoint_last_seen < cfg.backup_every_ids:
+        return
+    try:
+        backup_data_dir(Path(cfg.data_dir), cfg.backup_dir)
+        run.checkpoint_last_seen = ids_seen
+    except OSError:
+        logger.exception(
+            "checkpoint backup failed (%s -> %s); crawl continues",
+            cfg.data_dir,
+            cfg.backup_dir,
+        )
+
+
 def _crawl(run: _Run, ids: list[str], started: float) -> None:
     total = len(ids)
     seen = 0
@@ -505,6 +524,7 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
             run.s2_queue.qsize(),
             time.monotonic() - started,
         )
+        _maybe_checkpoint(run, seen)
 
 
 def run(
@@ -540,6 +560,17 @@ def run(
     sampler.start()
     s2_thread = threading.Thread(target=_s2_worker, args=(state,), name="s2-worker")
     s2_thread.start()
+    if config.backup_every_ids and not config.backup_dir:
+        logger.warning(
+            "CRAWLER_BACKUP_EVERY_IDS=%d but no backup dir; automatic backup disabled",
+            config.backup_every_ids,
+        )
+    elif config.backup_dir and config.backup_every_ids:
+        logger.info(
+            "automatic backup every %d ids -> %s",
+            config.backup_every_ids,
+            config.backup_dir,
+        )
     logger.info("crawl started: %d ids, data dir %s", len(ids), data_dir)
 
     failure: BaseException | None = None
@@ -559,6 +590,11 @@ def run(
             crawl_counters=state.counters,
         )
         summary = manifest.summary()
+        if config.backup_dir and config.backup_every_ids:
+            try:
+                backup_data_dir(data_dir, config.backup_dir)
+            except OSError:
+                logger.exception("final checkpoint backup failed")
         manifest.close()
         shutil.rmtree(state.tmp_dir, ignore_errors=True)
         logger.info("crawl finished: %s | counters %s", summary, state.counters)

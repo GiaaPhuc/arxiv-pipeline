@@ -227,8 +227,8 @@ Notebook: [`src/colab_run.ipynb`](src/colab_run.ipynb)
 | 1 | Secrets: `S2_API_KEY`, set `CRAWLER_CONTACT` in notebook |
 | 2 | Mount Drive |
 | 3 | **Restore** `data/` from Drive → local disk |
-| 4 | **Crawl** (same command every time; manifest skips done work) |
-| 5 | On stop: interrupt runtime, then **backup** `data/` to Drive |
+| 4 | **Crawl** (same command every time; manifest skips done work). Optional: `CRAWLER_BACKUP_DIR` + `CRAWLER_BACKUP_EVERY_IDS=1000` for automatic Drive checkpoints |
+| 5 | On stop: interrupt runtime, then **backup** `data/` to Drive (redundant if auto-backup ran recently) |
 
 Crawl on **local Colab disk** (`/content/data`), not on Drive FUSE — SQLite and network filesystems do not mix well.
 
