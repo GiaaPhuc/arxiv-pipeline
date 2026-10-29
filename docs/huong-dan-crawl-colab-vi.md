@@ -96,7 +96,8 @@ Cả nhóm vẫn chỉ **một** corpus trên **một** máy đang crawl. Ngư�
 import os
 from google.colab import drive, userdata
 
-drive.mount("/content/drive")  # dùng để sao lưu / khôi phục
+# Mount an toàn khi reconnect — copy từ ô tương ứng trong `colab_run.ipynb`
+# (không dùng force_remount=True khi /content/drive đã có file).
 
 os.environ["S2_API_KEY"] = userdata.get("S2_API_KEY")
 os.environ["CRAWLER_CONTACT"] = "email-cua-ban@example.com"
@@ -204,6 +205,7 @@ data/
 | `validate_corpus` / `export_data` lỗi | Corpus **chưa crawl xong** (dừng giữa chunk, thiếu S2) — bình thường; chỉ validate khi crawl hết ID |
 | S2 chậm / 429 | Cần `S2_API_KEY`; chờ backoff tự động; không spam request |
 | Session Colab chết | Khôi phục từ Drive (Bước 5), resume cùng lệnh |
+| `Mountpoint must not already contain files` khi `drive.mount` | Thường do chạy lại sau disconnect với `force_remount` hoặc mount FUSE treo. **Runtime → Restart session**, chạy lại notebook từ đầu; dùng logic mount trong `colab_run.ipynb` (bỏ qua nếu Drive còn dùng được) |
 | Một vài cặp `failed` | Chạy lại cùng lệnh crawl; hoặc nhóm xử lý theo dải (T4.2) |
 
 Cảnh báo `S2_API_KEY not set`: vẫn chạy được nhưng S2 bị giới hạn rất chặt (~100 request / 5 phút).

@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T5 29/10/2026 ~10:00 (Asia/Saigon)** — checkpoint tự động: `CRAWLER_BACKUP_DIR` + `CRAWLER_BACKUP_EVERY_IDS` (Colab mặc định 1000 ID → `MyDrive/arxiv-data`). `colab_run.ipynb`: `force_remount`, env backup. — **185 passed** (chạy lại `pytest` trước merge). Trước: arXiv **429** `/src/`; **183 passed**. Trước đó: rate limit arXiv tính từ **hết** body stream. — **Phase 0 ✅ · Phase 1 ✅** (go/no-go). **Phase 2**: crawl **25.000 ID** một máy.
+> Cập nhật lần cuối: **T5 29/10/2026 ~10:05 (Asia/Saigon)** — `colab_run.ipynb`: mount Drive có điều kiện (bỏ `force_remount`; hướng dẫn Restart session nếu `/content/drive` còn file sau disconnect). Trước: checkpoint tự động Colab (`CRAWLER_BACKUP_*`). — **185 passed** (chạy lại `pytest` trước merge). Trước: arXiv **429** `/src/`; **183 passed**. Trước đó: rate limit arXiv tính từ **hết** body stream. — **Phase 0 ✅ · Phase 1 ✅** (go/no-go). **Phase 2**: crawl **25.000 ID** một máy.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
