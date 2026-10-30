@@ -146,7 +146,7 @@ Dừng tay: **Runtime → Interrupt execution** (tương đương Ctrl+C).
 
 ## Bước 5 — Sao lưu và khôi phục (quan trọng)
 
-**Sao lưu tự động (khuyến nghị):** set `CRAWLER_BACKUP_DIR` + `CRAWLER_BACKUP_EVERY_IDS=1000` (hoặc `run_crawl.py --backup-dir … --backup-every-ids 1000`). Crawler copy `data/` lên Drive sau mỗi 1000 ID cơ sở đã xử lý trong lần chạy (manifest snapshot + `papers/`). Nếu Colab chết giữa chừng, mất tối đa ~1000 ID kể từ lần backup gần nhất — không thay ô Backup tay sau Interrupt.
+**Sao lưu tự động (khuyến nghị):** set `CRAWLER_BACKUP_DIR` + `CRAWLER_BACKUP_EVERY_IDS=1000` (hoặc `run_crawl.py --backup-dir … --backup-every-ids 1000`). Crawler copy `data/` lên Drive sau mỗi **1000 ID cơ sở mới** kể từ lần backup gần nhất (khi resume, các ID đã xong ở đầu list **không** tính — tránh backup lại cả corpus sau restore). Copy tăng dần: file không đổi (size/mtime) được bỏ qua. Nếu Colab chết giữa chừng, mất tối đa ~1000 ID kể từ lần backup gần nhất — không thay ô Backup tay sau Interrupt.
 
 **Sao lưu tay** (vẫn nên chạy trước khi tắt máy):
 

@@ -335,6 +335,30 @@ def _discover_chunk(run: _Run, arxiv_ids: list[str]) -> list[PaperMeta]:
     return found
 
 
+def _arxiv_id_needs_no_work(run: _Run, arxiv_id: str) -> bool:
+    """True when resume can skip this base id (manifest + on-disk markers)."""
+    if run.manifest.status(arxiv_id, 1) is Status.NOT_FOUND:
+        return True
+    paper = _read_paper(_paper_dir(run, arxiv_id) / "paper.json")
+    if paper is None:
+        return False
+    for version in range(1, paper.num_versions + 1):
+        status = run.manifest.status(arxiv_id, version)
+        if status is None or not status.is_final:
+            return False
+    return (_paper_dir(run, arxiv_id) / S2_RAW_NAME).is_file()
+
+
+def _count_leading_done_ids(run: _Run, ids: list[str]) -> int:
+    """How many ids at the start of ``ids`` need no work (for checkpoint resume)."""
+    count = 0
+    for arxiv_id in ids:
+        if not _arxiv_id_needs_no_work(run, arxiv_id):
+            break
+        count += 1
+    return count
+
+
 def _plan_chunk(run: _Run, chunk: list[str]) -> list[PaperMeta]:
     """Papers of ``chunk`` that still need work, discovering the unknown ones first."""
     known: list[PaperMeta] = []
@@ -596,10 +620,15 @@ def run(
             config.backup_every_ids,
         )
     elif config.backup_dir and config.backup_every_ids:
+        leading_done = _count_leading_done_ids(state, ids)
+        state.checkpoint_last_seen = leading_done
         logger.info(
-            "automatic backup every %d ids -> %s",
+            "automatic backup every %d ids -> %s "
+            "(resume: %d ids already done, skip checkpoint until +%d new)",
             config.backup_every_ids,
             config.backup_dir,
+            leading_done,
+            config.backup_every_ids,
         )
     logger.info("crawl started: %d ids, data dir %s", len(ids), data_dir)
 

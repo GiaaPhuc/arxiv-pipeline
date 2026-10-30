@@ -62,6 +62,13 @@ def _copy_tree(src: Path, dest: Path) -> None:
             target.mkdir(parents=True, exist_ok=True)
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_file():
+                src_stat = path.stat()
+                dst_stat = target.stat()
+                if src_stat.st_size == dst_stat.st_size and int(src_stat.st_mtime) == int(
+                    dst_stat.st_mtime
+                ):
+                    continue
             shutil.copy2(path, target)
 
 

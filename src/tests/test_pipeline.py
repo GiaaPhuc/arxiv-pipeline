@@ -566,3 +566,57 @@ def test_automatic_checkpoint_backup(tmp_path):
 
     assert (mirror / "manifest.sqlite").is_file()
     assert (mirror / "papers" / "2408-00004" / "v1" / "tex" / "main.tex").is_file()
+
+
+@responses.activate
+def test_checkpoint_resume_skips_leading_done_ids(tmp_path, monkeypatch):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+    pipeline.run(["2408.00001"], config)
+
+    backups: list[int] = []
+
+    def record_backup(source: Path, destination: Path) -> None:
+        backups.append(1)
+
+    monkeypatch.setattr(pipeline, "backup_data_dir", record_backup)
+    mirror = tmp_path / "mirror2"
+    config2 = Config(
+        data_dir=config.data_dir,
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        backup_dir=mirror,
+        backup_every_ids=1,
+    )
+    pipeline.run(["2408.00001", "2408.00002"], config2)
+
+    # One mid-run backup (only 2408.00002 is new) + one final backup in ``finally``.
+    assert len(backups) == 2
+
+
+@responses.activate
+def test_count_leading_done_ids_after_first_paper(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+    pipeline.run(["2408.00001"], config)
+    data_dir = config.data_dir
+    from crawler.manifest import Manifest
+
+    manifest = Manifest(data_dir / "manifest.sqlite")
+    run = pipeline._Run(
+        config=config,
+        manifest=manifest,
+        arxiv=pipeline.make_arxiv_client(config),
+        s2=pipeline.make_s2_client(config),
+        papers_dir=data_dir / "papers",
+        tmp_dir=data_dir / ".tmp",
+    )
+    ids = ["2408.00001", "2408.00002", "2408.00004"]
+    assert pipeline._count_leading_done_ids(run, ids) == 1
+    manifest.close()

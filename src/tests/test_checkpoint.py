@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 from crawler.checkpoint import backup_data_dir
 from crawler.manifest import Manifest
@@ -42,3 +44,29 @@ def test_backup_data_dir_copies_manifest_and_papers(tmp_path: Path) -> None:
     ).fetchone()
     conn.close()
     assert row is not None and row[0] == Status.OK.value
+
+
+def test_backup_data_dir_skips_unchanged_files(tmp_path: Path) -> None:
+    src = tmp_path / "data"
+    dest = tmp_path / "backup"
+    tex = src / "papers" / "2408-00001" / "v1" / "tex" / "main.tex"
+    tex.parent.mkdir(parents=True)
+    tex.write_bytes(b"\\documentclass{article}\n")
+
+    manifest = Manifest(src / "manifest.sqlite")
+    manifest.register("2408.00001", 1)
+    manifest.record(
+        VersionMeta(
+            arxiv_id="2408.00001",
+            version=1,
+            status=Status.OK,
+            version_date="2024-08-01",
+            crawled_at="2024-08-01T00:00:00Z",
+        )
+    )
+    manifest.close()
+
+    backup_data_dir(src, dest)
+    with patch.object(shutil, "copy2", wraps=shutil.copy2) as copy2:
+        backup_data_dir(src, dest)
+        assert copy2.call_count == 0
