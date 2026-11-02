@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T2 02/11/2026 ~10:45 (Asia/Saigon)** — notebook Colab: backup/restore bằng **1 file tar** (`arxiv-data.tar` trên Drive) thay rsync nhiều file nhỏ, vì restore 7000 ID qua Drive mount mất >11 giờ; auto-backup 30 phút/lần; bỏ `CRAWLER_BACKUP_DIR` trong notebook (code `checkpoint.py` giữ nguyên, chưa chạy lại test). Trước đó (30/10): checkpoint không backup lại sau mỗi 1000 ID đã xong — **189 passed**. Trước: arXiv 429 discovery retry; mount Drive; `CRAWLER_BACKUP_*`. — **Phase 0 ✅ · Phase 1 ✅** (go/no-go). **Phase 2**: crawl **25.000 ID** một máy.
+> Cập nhật lần cuối: **T2 02/11/2026 ~11:28 (Asia/Saigon)** — `checkpoint.py` + `colab_run.ipynb`: chuyển backup/restore sang **1 gói nén `arxiv-data.tar.gz`** (`compresslevel=1`, ghi nguyên tử `.part` + `fsync`, chống ghi đè lùi tiến độ/rỗng, lọc sạch `*.tmp`/`.v*.part`), tích hợp lại `CRAWLER_BACKUP_DIR` mỗi **300 ID mới** + backup cuối trong `finally`, và khôi phục thư mục `arxiv-data/` cũ song song 16 luồng. — **195 passed**. — **Phase 0 ✅ · Phase 1 ✅** (go/no-go). **Phase 2**: crawl **25.000 ID** một máy.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -22,13 +22,13 @@
 | Hạng mục đề | Đề yêu cầu (rút gọn) | Hiện trạng |
 | --- | --- | --- |
 | Phạm vi crawl | Dải arXiv ID được giao; **mọi phiên bản** của từng bài. Không thu hoạch cả kho. OAI-PMH và Kaggle chỉ là hộp công cụ | ✅ `src/id_ranges.csv`: 5 dải, **25.000** ID (D8 một máy). Pilot **30 ID** đầu dải 3; crawl đủ là **Phase 2 (T4.1)** |
-| Nguồn và lịch sự | Chỉ `export.arxiv.org`, chờ ≥ 3 giây, một kết nối. Semantic Scholar ≥ 1 yêu cầu/giây (mặc định 1,1 s + thích ứng sau 429); khóa API | ✅ Pilot + Colab: arXiv 429 API discovery + `/src/` chờ `Retry-After` (≤4 lần) rồi mới exit 3; S2 batch. Colab: `CRAWLER_ARXIV_MIN_INTERVAL=3.5`, **backup mỗi 1000 ID** (`checkpoint.py`). `--s2-only` chưa code |
+| Nguồn và lịch sự | Chỉ `export.arxiv.org`, chờ ≥ 3 giây, một kết nối. Semantic Scholar ≥ 1 yêu cầu/giây (mặc định 1,1 s + thích ứng sau 429); khóa API | ✅ Pilot + Colab: arXiv 429 API discovery + `/src/` chờ `Retry-After` (≤4 lần) rồi mới exit 3; S2 batch. Colab: `CRAWLER_ARXIV_MIN_INTERVAL=3.5`, **backup mỗi 300 ID mới + khi thoát** vào `arxiv-data.tar.gz` (`checkpoint.py`). `--s2-only` chưa code |
 | Gói nguồn | Tải từng phiên bản qua `/src/{id}vN`. Chỉ giữ `.tex` và `.bib` bằng cách **trích**, không sửa nội dung. Giữ lệnh hình trong TeX. Bản không có TeX = bản ghi rỗng, không bỏ bài | ✅ Pilot: **57** cặp (paper, version), **51** `ok`, **6** `no_source` (PDF), **0** `failed`. Trích + manifest nguyên tử như thiết kế |
 | Siêu dữ liệu | Mỗi phiên bản: tiêu đề, tác giả, ngày nộp, ngày sửa, venue khi có. Mỗi tham khảo S2: tiêu đề, tác giả, ngày, arXiv ID nếu có, S2 ID. Giữ **mọi** tham khảo ở máy | ✅ Pilot: **30/30** bài có S2; **~33,6** ref/bài; **~78 %** ref đủ title/authors/date; **~50 %** ref có arXiv ID. Batch + fallback đã chạy thật; đối chiếu tay 10 ID / 5 bài (Phase 1) |
 | Hai bảng (nộp Hugging Face ở Milestone 3) | `papers`: arxiv_id, title, authors, submission_date, revised_dates, venue. `references`: chỉ tham khảo **có arXiv ID** — arxiv_id, ref_arxiv_id, ref_title, ref_authors, ref_submission_date, ref_s2_id | ✅ `export_data` trên corpus pilot → `data/stats/*.parquet` + CSV. Schema đúng `models.py` |
 | Kho làm việc | Giữ cục bộ làm đầu vào Milestone 2 và 3. Gợi ý đề: một thư mục mỗi bài | ✅ Pilot qua `validate_corpus`; bố cục `data/papers/`, manifest SQLite, resume đã kiểm trên 30 ID |
 | Báo cáo | Jupyter Book: cách thu thập, thư viện, số bài thành công, tỷ lệ thành công, kích thước trung bình trước/sau khi bỏ ảnh, số tham khảo trung bình, tỷ lệ thành công siêu dữ liệu tham khảo. Thời gian wall và RAM trên Colab chỉ CPU. Hình và bảng sinh lúc biên dịch sách | 🟡 [arxiv-book](https://github.com/GiaaPhuc/arxiv-book) + Pages; khung và workflow ✅. **E:** thay số mẫu bằng `data/stats/` pilot (T4.4 / T5.1 Phase 2) |
-| Mã nguồn | Sạch, chạy được, có chú thích; trích dẫn nếu dùng tài liệu ngoài | ✅ **186 passed**; `ruff` sạch. End-to-end pilot + review chéo Phase 1 |
+| Mã nguồn | Sạch, chạy được, có chú thích; trích dẫn nếu dùng tài liệu ngoài | ✅ **195 passed**; `ruff` sạch. End-to-end pilot + review chéo Phase 1 |
 | Chấm (5 mục) | Báo cáo, mã, khám phá và tải đủ phiên bản, dữ liệu thu được, hiệu năng so với nhóm khác | 🟡 Có số pilot; chấm đủ khi crawl 25k + sách final (Phase 2) |
 
 ### Việc đang làm — **Phase 2** (sau go/no-go 28/10)
@@ -139,7 +139,7 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | R2 | Pilot 30 ID đã chạy; rủi ro còn lại là **quy mô 25k** (định dạng lạ, S2 lệch batch). Hạn nộp 4/11 | TB | Theo dõi `failed` + `metrics.json` trong T4.1; validate mẫu 1/11 | A, B |
 | R3 | Key S2 hoạt động trên máy pilot; vẫn có **429** (pilot: 3×, 180 s chờ). Worker tắt sau 403 hoặc ~30 phút 429 liên tiếp | TB | Giữ batch + limiter; máy crawl full dùng cùng key đã pilot | B |
 | R4 | CI + pilot 30 ID; unit test vẫn không thay thế monitor crawl dài | Thấp | Log + manifest trong T4.1 | A, D |
-| R8 | Crawl dài: Windows có thể khóa file (antivirus) làm một cặp `failed`; ghi vào Drive qua FUSE không hợp với SQLite | Thấp | Pipeline ghi `failed` rồi tiếp tục, `run_crawl` chạy lại để thử lại; `colab_run.ipynb` giữ `data/` ở đĩa cục bộ và `rsync` sang Drive | A |
+| R8 | Crawl dài: Windows có thể khóa file (antivirus) làm một cặp `failed`; ghi vào Drive qua FUSE không hợp với SQLite và chậm theo số lượng file nhỏ | Thấp | Pipeline ghi `failed` rồi tiếp tục, `run_crawl` chạy lại để thử lại; `colab_run.ipynb` + `checkpoint.py` giữ `data/` ở đĩa cục bộ và đóng gói 1 file `arxiv-data.tar.gz` lên Drive | A |
 | R5 | Phiên bản thư viện chưa ghim (đang dùng khoảng phiên bản) | Thấp | Ghim sau pilot Colab | A |
 | R6 | Đề chỉ cho phép mã + `requirements.txt` + `README.md` trong repo nộp. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md` là file làm việc | TB | Gỡ ở T5.3, hoặc hỏi giảng viên trước khi nộp | Leader |
 | R7 | Bảo vệ `main` / quyền thành viên — Phase 0 đóng; kiểm tra lại trước đóng băng nộp | Thấp | Leader rà soát T5.3 | Leader |
@@ -152,6 +152,7 @@ Chỉ ghi sự kiện **đưa được vào Jupyter Book**: cách thu thập, c�
 
 | Ngày | Sự kiện |
 | --- | --- |
+| 02/11 | **Colab — nghẽn FUSE khi restore nhiều file nhỏ.** Khôi phục ~7.000 ID từ thư mục rời `MyDrive/arxiv-data/` bằng `rsync` mất **>11 giờ** chưa xong do độ trễ mở/stat từng file của Google Drive FUSE. Khắc phục trong `checkpoint.py`: đóng gói thành 1 file nén nhanh `arxiv-data.tar.gz` (`compresslevel=1`, snapshot SQLite trước rồi tar, ghi nguyên tử qua `.part` + `fsync`, chặn ghi đè lùi tiến độ), tự lưu mỗi 300 ID mới (~35 phút) và khi thoát; thư mục cũ chuyển đổi một lần bằng copy song song 16 luồng. **195 passed** |
 | 29/10 | **arXiv 429 trên API discovery.** Trước đây một 429 ở `/api/query` dừng cả crawl (exit 3) dù `/src/` đã retry; sửa: chờ `Retry-After` tối đa 4 lần/chunk discovery (cùng `/src/`). Crawl 25k trên Colab ít bị dừng sớm khi IP bị throttle ngắn — vẫn exit 3 nếu 429 kéo dài sau 4 lần |
 | 30/10 | **Colab — checkpoint sau resume.** Trước đây đếm vị trí trong list (kể ID đã backup) → mỗi ~1000 ID lại mirror cả `papers/` lên Drive (có thể >30 phút). Giờ: bỏ qua ID đã xong ở đầu list khi tính chu kỳ backup; file không đổi không copy lại |
 | 29/10 | **Colab — sao lưu định kỳ khi crawl.** `run_crawl` mirror `data/` ra `CRAWLER_BACKUP_DIR` sau mỗi N ID cơ sở **mới** (`CRAWLER_BACKUP_EVERY_IDS`, notebook gợi ý **1000**); manifest snapshot SQLite an toàn khi crawl đang chạy. Giảm mất dữ liệu khi session Colab chết (vẫn nên Interrupt + rsync trước khi tắt) |
