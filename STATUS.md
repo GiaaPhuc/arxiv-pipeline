@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T2 02/11/2026 ~11:28 (Asia/Saigon)** — `checkpoint.py` + `colab_run.ipynb`: chuyển backup/restore sang **1 gói nén `arxiv-data.tar.gz`** (`compresslevel=1`, ghi nguyên tử `.part` + `fsync`, chống ghi đè lùi tiến độ/rỗng, lọc sạch `*.tmp`/`.v*.part`), tích hợp lại `CRAWLER_BACKUP_DIR` mỗi **300 ID mới** + backup cuối trong `finally`, và khôi phục thư mục `arxiv-data/` cũ song song 16 luồng. — **195 passed**. — **Phase 0 ✅ · Phase 1 ✅** (go/no-go). **Phase 2**: crawl **25.000 ID** một máy.
+> Cập nhật lần cuối: **T2 02/11/2026 ~11:46 (Asia/Saigon)** — cập nhật `docs/huong-dan-crawl-colab-vi.md` đồng bộ toàn bộ quy trình mới: backup/restore dạng 1 file nén `arxiv-data.tar.gz`, hai kịch bản dừng/chạy tiếp (A: runtime còn sống, B: disconnect), `restore_now()`, `backup_now(unmount=True)` và di chuyển thư mục cũ. — **195 passed**. — **Phase 0 ✅ · Phase 1 ✅** (go/no-go). **Phase 2**: crawl **25.000 ID** một máy.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
