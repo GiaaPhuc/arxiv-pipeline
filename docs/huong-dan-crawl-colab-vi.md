@@ -227,4 +227,14 @@ Trên Google Drive cá nhân (`MyDrive/`):
 
 ## Tóm tắt quy trình chuẩn
 
-**Setup → Restore (`restore_now()`) → Crawl (cùng một lệnh) → Khi muốn dừng: Interrupt → `backup_now(unmount=True)` → Yên tâm đóng tab.**
+### 1. Chủ động dừng xong thời gian sau crawl tiếp (tắt máy / đóng tab)
+- **Khi muốn dừng:** Bấm **Runtime → Interrupt execution** (dừng crawl) → chạy cell Backup: `backup_now(unmount=True)`. Đợi thông báo `backup done` và `Drive flushed` là có thể yên tâm đóng tab, tắt máy.
+- **Khi muốn crawl tiếp (phiên làm việc sau):** Mở lại notebook Colab → chạy lần lượt: **Setup** → **Restore** (`restore_now()`) → **Crawl** (cùng đúng một lệnh crawl, manifest sẽ tự động bỏ qua toàn bộ bài đã xong).
+
+### 2. Bị disconnect bất ngờ giữa chừng (mất runtime / Colab tự tắt)
+- Dữ liệu đã được pipeline tự động nén lưu định kỳ mỗi 300 ID mới (~35 phút) vào `arxiv-data.tar.gz` trên Drive, bạn chỉ mất tối đa bài của đợt crawl dở dang gần nhất.
+- **Cách xử lý:** Mở lại Colab, chạy lại từ đầu: **Setup** → **Restore** (`restore_now()`) → **Crawl**. Dữ liệu sẽ được giải nén nguyên vẹn về local và tiếp tục crawl các ID còn lại.
+
+### 3. Dừng tạm nhưng runtime vẫn còn sống (chưa tắt tab, chưa disconnect)
+- Dữ liệu local tại `/content/data` vẫn còn nguyên vẹn.
+- Bạn **không cần** chạy lại Restore (nếu lỡ bấm `restore_now()`, code cũng tự phát hiện dữ liệu local đã đủ và bỏ qua); chỉ cần chạy lại cell **Crawl** để tiếp tục.
