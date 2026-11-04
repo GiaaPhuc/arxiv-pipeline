@@ -187,3 +187,10 @@ def test_restore_rejects_unsafe_tar_members(tmp_path: Path) -> None:
 
     with pytest.raises(OSError, match="unsafe"):
         restore_data_dir(bad_tar, tmp_path / "dest")
+
+
+def test_restore_rejects_zero_filled_archive(tmp_path: Path) -> None:
+    bad = tmp_path / "arxiv-data.tar.gz"
+    bad.write_bytes(bytes(4096))
+    with pytest.raises(OSError, match="not a valid gzip/tar"):
+        restore_data_dir(bad, tmp_path / "out")

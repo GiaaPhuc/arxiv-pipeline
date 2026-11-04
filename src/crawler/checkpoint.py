@@ -362,6 +362,23 @@ def _validated_member_relpath(member: tarfile.TarInfo) -> Path | None:
     return None
 
 
+def _assert_archive_header(archive_path: Path) -> None:
+    """Reject files that are not gzip/tar (e.g. all-zero files from a failed Drive write).
+
+    ``tarfile`` treats a zero-filled file as a valid *empty* tar, so restore would
+    silently "succeed" with no data; check the magic bytes first.
+    """
+    with archive_path.open("rb") as f:
+        head = f.read(512)
+    if head[:2] == b"\x1f\x8b" or head[257:262] == b"ustar":
+        return
+    raise OSError(
+        f"backup archive {archive_path} is not a valid gzip/tar file "
+        f"(size {archive_path.stat().st_size} B, starts with {head[:4].hex()}): "
+        "corrupt, truncated or zero-filled"
+    )
+
+
 def _restore_from_archive(
     archive_path: Path,
     destination: Path,
@@ -371,6 +388,7 @@ def _restore_from_archive(
     started = time.monotonic()
     files_restored = 0
     cleaned = False
+    _assert_archive_header(archive_path)
     try:
         with tarfile.open(archive_path, mode="r:*") as tf:
             for member in tf:
@@ -406,6 +424,12 @@ def _restore_from_archive(
                     files_restored += 1
     except tarfile.TarError as exc:
         raise OSError(f"corrupt or unreadable backup archive {archive_path}: {exc}") from exc
+
+    if files_restored == 0 or not (destination / "manifest.sqlite").is_file():
+        raise OSError(
+            f"backup archive {archive_path} contains no workspace data "
+            f"({files_restored} files, no manifest.sqlite): truncated or zero-filled download?"
+        )
 
     destination.mkdir(parents=True, exist_ok=True)
     for suffix in ("-wal", "-shm"):
