@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T6 06/11/2026 ~00:30 (Asia/Saigon)** — đồng bộ bảng phase M2 với timeline 06/11 · 06–12/11 · 13/11 trong `docs/plans/milestone2-phan-cong-task-B-E-vi.md` (hạn nộp **13/11/2026 23:59**). — **196 passed**. — **M1 Phase 0 ✅ · Phase 1 ✅**; **M1 Phase 2**: crawl **25.000 ID** một máy. **M2**: chưa code, chỉ kế hoạch/phân công.
+> Cập nhật lần cuối: **T6 06/11/2026 ~01:20 (Asia/Saigon)** — hoàn tất Milestone 2 Phase 0 của Leader A (`src/parsing/models.py`, `src/parsing/pipeline.py`, `src/run_parse.py`, `src/colab_parse.ipynb`, `src/tests/test_parse_pipeline.py`). — **207 passed**. — **M1 Phase 0 ✅ · Phase 1 ✅**; **M1 Phase 2**: crawl **25.000 ID** một máy. **M2 Phase 0 ✅**: đã khóa `models.py` + khung pipeline đa nhân/profiler để B–E code song song (06–12/11).
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -13,7 +13,7 @@
 
 ### Đề và phạm vi
 
-- Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. Hiện **chỉ làm Milestone 1** (thu thập). Milestone 2 (parse LaTeX thành cây, chuẩn hóa, `\bibitem` → BibTeX, bỏ trùng) và Milestone 3 (đối sánh BibTeX với bảng `references`, MRR@5, poster A2 dọc, dataset Hugging Face) **chưa bắt đầu** — không triển khai.
+- Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. Hiện đang hoàn thiện dữ liệu **Milestone 1** (thu thập 25k ID) và khởi động **Milestone 2** (Phase 0 đã xong: Leader A đã khóa hợp đồng `src/parsing/models.py` và khung `pipeline.py` / `run_parse.py` / `colab_parse.ipynb`; B–E bắt đầu code song song 06–12/11). Milestone 3 (đối sánh BibTeX với bảng `references`, MRR@5, poster A2 dọc, dataset Hugging Face) chưa bắt đầu.
 - Nộp Milestone 1 qua Moodle: link repo mã công khai + link Jupyter Book (repo sách riêng, GitHub Pages). **Không nộp dữ liệu** ở mốc này. Viết bằng tiếng Việt. Không nộp trễ.
 - Khi nộp, repo mã chỉ được chứa mã (`.py` / `.ipynb`), `requirements.txt` và `README.md`. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md`, `plans/`, `project requirements/` đang ở trong repo để làm việc — xử lý lúc đóng băng (R6, T5.3 trong Phase 2).
 
@@ -128,6 +128,17 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | T5.2 | README | 3/11 | ⬜ (có bản khởi tạo) |
 | T5.3 | Đóng băng checklist | sáng 4/11 | ⬜ |
 | T5.4 | Nộp Moodle. Hạn Book theo ảnh: 6/11/2026 23:59 | chiều 4/11 | ⬜ |
+
+### Milestone 2 — Phân tích cú pháp, chuẩn hóa & khử trùng lặp (hạn 13/11/2026 23:59)
+
+| Mã | Việc | Owner | Mốc | TT |
+| --- | --- | --- | --- | --- |
+| M2-A0 | Khóa hợp đồng `src/parsing/models.py` + `CleanerHooks` | A | 06/11 | ✅ |
+| M2-A1 | Điều phối `src/parsing/pipeline.py` + `src/run_parse.py` + `src/colab_parse.ipynb` + `test_parse_pipeline.py` | A | 06/11 (khung) · 13/11 (tích hợp) | 🟡 (khung + 11 test ✅; chờ module B–E để chạy pilot ~100 bài & full 25k) |
+| M2-C | `gathering.py`, `hierarchy.py`, unit tests, mục 1 báo cáo | C | 06–12/11 | ⬜ |
+| M2-B | `cleaner.py`, `math_normalizer.py`, `sentence_splitter.py`, unit tests, nửa đầu mục 2 báo cáo | B | 06–12/11 | ⬜ |
+| M2-D | `bib_extractor.py`, `dedup.py`, `export_m2.py`, unit tests, nửa sau mục 2 báo cáo | D | 06–12/11 | ⬜ |
+| M2-E | `validate_m2.py`, `arxiv-book/m2/*` (`03_parsing_statistics.ipynb`, `04_parser_performance.ipynb`) | E | 06–13/11 | ⬜ |
 
 ---
 
