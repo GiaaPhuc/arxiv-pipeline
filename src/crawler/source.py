@@ -80,11 +80,11 @@ def sniff_archive_type(path: Path) -> ArchiveType:
             tar_header = source.read(512)
         if len(tar_header) >= 262 and tar_header[257:262] == b"ustar":
             return ArchiveType.TAR_GZ
-        # Accept older tar variants that do not carry the ustar marker.
-        with tarfile.open(path, mode="r:gz") as archive:
-            if next(archive, None) is not None:
-                return ArchiveType.TAR_GZ
-    except (EOFError, gzip.BadGzipFile, tarfile.TarError, zlib.error):
+        # Accept older tar variants that do not carry the ustar marker (in-memory check).
+        if len(tar_header) == 512 and any(tar_header):
+            tarfile.TarInfo.frombuf(tar_header, encoding="utf-8", errors="surrogateescape")
+            return ArchiveType.TAR_GZ
+    except (EOFError, gzip.BadGzipFile, tarfile.TarError, zlib.error, ValueError):
         # Keep gzip classified as gzip so extraction can return CORRUPT with a
         # useful reason instead of treating a damaged package as an unknown type.
         return ArchiveType.GZ_SINGLE
@@ -106,6 +106,17 @@ def _retry_after_seconds(response) -> float | None:
         return None
 
 
+def _content_length_bytes(response) -> int | None:
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    try:
+        value = int(headers.get("Content-Length", ""))
+        return value if value > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def download_source(
     client: HostClient, arxiv_id: str, version: int, tmp_dir: Path
 ) -> DownloadResult:
@@ -113,6 +124,8 @@ def download_source(
 
     HostClient owns rate limiting and HTTP retries. Transient body read errors
     (e.g. ``ChunkedEncodingError``) retry within the same budget.
+    Aborts the stream early once ``%PDF`` magic bytes are detected (O5), avoiding
+    downloading multi-MB PDFs that are ``no_source``.
     """
     path = f"/src/{arxiv_id}v{version}"
     last_exc: BaseException | None = None
@@ -134,11 +147,35 @@ def download_source(
             fd, name = tempfile.mkstemp(prefix="arxiv-source-", suffix=".part", dir=tmp_dir)
             temp_path = Path(name)
             written = 0
+            header = bytearray()
+            first_chunk_checked = False
+            content_length = _content_length_bytes(response)
             with os.fdopen(fd, "wb") as output:
                 for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
-                    if chunk:
-                        output.write(chunk)
-                        written += len(chunk)
+                    if not chunk:
+                        continue
+                    if not first_chunk_checked:
+                        needed = max(512 - len(header), 0)
+                        if needed:
+                            header.extend(chunk[:needed])
+                        if len(header) >= len(_PDF_MAGIC):
+                            first_chunk_checked = True
+                            if header.startswith(_PDF_MAGIC):
+                                output.seek(0)
+                                output.truncate()
+                                output.write(bytes(header[:512]))
+                                total_seen = written + len(chunk)
+                                written = (
+                                    max(content_length, total_seen)
+                                    if content_length is not None
+                                    else total_seen
+                                )
+                                if content_length is not None and total_seen >= content_length:
+                                    for _ in response.iter_content(chunk_size=_CHUNK_SIZE):
+                                        pass
+                                break
+                    output.write(chunk)
+                    written += len(chunk)
             return DownloadResult(path=temp_path, http_status=status, raw_archive_bytes=written)
         except _STREAM_RETRY_ERRORS as exc:
             last_exc = exc
@@ -199,38 +236,43 @@ def _write_tar_members(
     seen_outputs: set[str] = set()
     member_count = 0
 
-    with tarfile.open(archive_path, mode="r|gz") as archive:
-        for member in archive:
-            member_count += 1
-            relative, relative_path = _safe_member_path(member.name)
-            if member.isdir():
-                continue
-            if relative == PurePosixPath("."):
-                raise _UnsafeArchiveError(f"regular file has an empty path: {member.name!r}")
-            if not member.isreg():
-                raise _UnsafeArchiveError(f"unsupported link/device member: {member.name!r}")
-            if member.size < 0 or raw_bytes + member.size > max_bytes:
-                raise _UnsafeArchiveError(
-                    f"uncompressed archive exceeds configured limit ({max_bytes} bytes)"
-                )
+    with gzip.open(archive_path, "rb") as gz_stream:
+        with tarfile.open(fileobj=gz_stream, mode="r|", bufsize=_CHUNK_SIZE) as archive:
+            for member in archive:
+                member_count += 1
+                relative, relative_path = _safe_member_path(member.name)
+                if member.isdir():
+                    continue
+                if relative == PurePosixPath("."):
+                    raise _UnsafeArchiveError(f"regular file has an empty path: {member.name!r}")
+                if not member.isreg():
+                    raise _UnsafeArchiveError(f"unsupported link/device member: {member.name!r}")
+                if member.size < 0 or raw_bytes + member.size > max_bytes:
+                    raise _UnsafeArchiveError(
+                        f"uncompressed archive exceeds configured limit ({max_bytes} bytes)"
+                    )
 
-            keep = _is_kept(relative)
-            output_key = relative.as_posix().casefold()
-            if keep and output_key in seen_outputs:
-                raise _UnsafeArchiveError(f"duplicate output path: {relative.as_posix()!r}")
-            if keep:
+                keep = _is_kept(relative)
+                if not keep:
+                    # 1-pass skip (O4): count uncompressed bytes from header without
+                    # extracting or hashing non-TeX/Bib members.
+                    raw_bytes += member.size
+                    continue
+
+                output_key = relative.as_posix().casefold()
+                if output_key in seen_outputs:
+                    raise _UnsafeArchiveError(f"duplicate output path: {relative.as_posix()!r}")
                 seen_outputs.add(output_key)
 
-            source = archive.extractfile(member)
-            if source is None:
-                raise tarfile.ReadError(f"cannot read regular member {member.name!r}")
+                source = archive.extractfile(member)
+                if source is None:
+                    raise tarfile.ReadError(f"cannot read regular member {member.name!r}")
 
-            target = staging / relative_path if keep else None
-            digest = hashlib.sha256()
-            member_bytes = 0
-            output = None
-            try:
-                if target is not None:
+                target = staging / relative_path
+                digest = hashlib.sha256()
+                member_bytes = 0
+                output = None
+                try:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     stage_root = staging.resolve()
                     if not target.resolve().is_relative_to(stage_root):
@@ -238,24 +280,23 @@ def _write_tar_members(
                             f"member escapes staging directory: {member.name!r}"
                         )
                     output = target.open("xb")
-                with source:
-                    while chunk := source.read(_CHUNK_SIZE):
-                        member_bytes += len(chunk)
-                        raw_bytes += len(chunk)
-                        if raw_bytes > max_bytes:
-                            raise _UnsafeArchiveError(
-                                f"uncompressed archive exceeds configured limit ({max_bytes} bytes)"
-                            )
-                        if output is not None:
+                    with source:
+                        while chunk := source.read(_CHUNK_SIZE):
+                            member_bytes += len(chunk)
+                            raw_bytes += len(chunk)
+                            if raw_bytes > max_bytes:
+                                raise _UnsafeArchiveError(
+                                    "uncompressed archive exceeds configured limit "
+                                    f"({max_bytes} bytes)"
+                                )
                             output.write(chunk)
                             digest.update(chunk)
-                if member_bytes != member.size:
-                    raise tarfile.ReadError(f"truncated member {member.name!r}")
-            finally:
-                if output is not None:
-                    output.close()
+                    if member_bytes != member.size:
+                        raise tarfile.ReadError(f"truncated member {member.name!r}")
+                finally:
+                    if output is not None:
+                        output.close()
 
-            if keep:
                 kept_bytes += member_bytes
                 entries.append(
                     FileEntry(
@@ -265,15 +306,14 @@ def _write_tar_members(
                     )
                 )
 
-    # Tar readers stop at the two zero blocks, before gzip necessarily validates
-    # its CRC/trailer. Verify the complete gzip stream separately, still bounded
-    # to member data plus a conservative allowance for tar headers and padding.
-    verification_limit = max_bytes + (member_count + 2) * 2048
-    verified_bytes = 0
-    with gzip.open(archive_path, "rb") as source:
-        while chunk := source.read(_CHUNK_SIZE):
-            verified_bytes += len(chunk)
-            if verified_bytes > verification_limit:
+        # Drain remaining tar zero-padding blocks on the same gzip stream so gzip
+        # validates its 8-byte CRC/ISIZE trailer without a second pass (O4), while
+        # still enforcing the uncompressed zip-bomb limit.
+        overhead_allowance = (member_count + 2) * 2048 + _CHUNK_SIZE
+        tail_bytes = 0
+        while chunk := gz_stream.read(_CHUNK_SIZE):
+            tail_bytes += len(chunk)
+            if raw_bytes + tail_bytes > max_bytes + overhead_allowance:
                 raise _UnsafeArchiveError(
                     "uncompressed tar stream exceeds member limit plus tar overhead"
                 )
@@ -308,11 +348,16 @@ def extract_tex_bib(
     *,
     arxiv_id: str,
     version: int,
+    raw_archive_bytes: int | None = None,
 ) -> VersionMeta:
     """Extract safe TeX/Bib members and return metadata for one arXiv version."""
     archive = Path(archive)
     dest_dir = Path(dest_dir)
-    archive_bytes = archive.stat().st_size
+    archive_bytes = (
+        raw_archive_bytes
+        if (raw_archive_bytes is not None and raw_archive_bytes > 0)
+        else archive.stat().st_size
+    )
     archive_type = sniff_archive_type(archive)
 
     if archive_type in (ArchiveType.PDF, ArchiveType.ZIP, ArchiveType.UNKNOWN):

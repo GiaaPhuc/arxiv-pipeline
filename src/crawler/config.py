@@ -26,12 +26,12 @@ class Config:
     data_dir: Path = Path("data")
     contact: str = ""
     s2_api_key: str | None = field(default=None, repr=False)  # repr=False: never log the key
-    arxiv_min_interval: float = 3.0  # seconds, measured from END of previous request
+    arxiv_min_interval: float = 3.0  # seconds, Start-to-Start interval on 1 connection
     s2_min_interval: float = 1.1  # S2 key: 1 req/s; small margin for network latency
     max_retries: int = 5
     max_extract_bytes: int = 2 * 1024**3  # zip-bomb guard (uncompressed total)
     request_timeout: tuple[float, float] = (30.0, 120.0)  # (connect, read) seconds per request
-    discovery_batch_size: int = 50  # ids per arXiv ``id_list`` call (T0.2)
+    discovery_batch_size: int = 150  # ids per arXiv ``id_list`` call (O2)
     backup_dir: Path | None = None  # optional mirror for Colab / long runs
     backup_every_ids: int = 0  # 0 disables automatic checkpoint backups
 

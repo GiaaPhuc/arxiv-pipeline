@@ -68,6 +68,55 @@ def test_arxiv_requests_are_at_least_3s_apart_from_previous_end_fake_clock():
     assert sleeps == [3.0]
 
 
+def test_start_to_start_rate_limit_subtracts_stream_download_duration():
+    now = [0.0]
+    sleeps: list[float] = []
+    starts: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(round(seconds, 4))
+        now[0] += seconds
+
+    limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep)
+    config = Config(contact="test@example.com", arxiv_min_interval=3.0)
+    client = HostClient("https://export.arxiv.org", limiter, config)
+
+    def make_stream(download_seconds: float) -> MagicMock:
+        inner = MagicMock(spec=requests.Response)
+        inner.status_code = 200
+
+        def iter_chunks(chunk_size: int = 64):
+            now[0] += download_seconds
+            yield b"payload"
+
+        inner.iter_content = MagicMock(side_effect=iter_chunks)
+        inner.close = MagicMock()
+        return inner
+
+    responses_seq = [make_stream(1.2), make_stream(3.5), make_stream(0.5)]
+
+    def fake_get(*_args, **_kwargs):
+        starts.append(round(now[0], 4))
+        return responses_seq.pop(0)
+
+    client._session.get = MagicMock(side_effect=fake_get)  # noqa: SLF001
+
+    with client.get("/src/2408.11045v1", stream=True) as r1:
+        list(r1.iter_content(chunk_size=64))
+    with client.get("/src/2408.11045v2", stream=True) as r2:
+        list(r2.iter_content(chunk_size=64))
+    with client.get("/src/2408.11045v3", stream=True) as r3:
+        list(r3.iter_content(chunk_size=64))
+
+    # r1 starts at 0.0, takes 1.2s -> sleeps 1.8s so r2 starts at 3.0s.
+    # r2 starts at 3.0s, takes 3.5s (ends at 6.5s >= 6.0s) -> sleeps 0s, r3 starts at 6.5s.
+    assert sleeps == [1.8]
+    assert starts == [0.0, 3.0, 6.5]
+
+
 def test_429_is_returned_without_client_retry():
     config = Config(contact="test@example.com", max_retries=3)
     limiter = RateLimiter(0.0)
@@ -160,3 +209,58 @@ def test_connection_errors_are_retried_within_budget_then_raised():
         else:
             raise AssertionError("must raise once the retry budget is spent")
     assert client._session.get.call_count == 3  # noqa: SLF001
+
+
+def test_single_open_stream_enforced_until_closed():
+    limiter = RateLimiter(3.0, clock=lambda: 0.0, sleep=lambda _s: None)
+    config = Config(contact="test@example.com", arxiv_min_interval=3.0)
+    client = HostClient("https://export.arxiv.org", limiter, config)
+
+    inner = MagicMock(spec=requests.Response)
+    inner.status_code = 200
+    inner.close = MagicMock()
+    client._session.get = MagicMock(return_value=inner)  # noqa: SLF001
+
+    first = client.get("/src/2408.11045v1", stream=True)
+    try:
+        client.get("/src/2408.11045v2", stream=True)
+    except RuntimeError as exc:
+        assert "closed" in str(exc)
+    else:
+        raise AssertionError("must forbid opening a second stream before closing the first")
+    finally:
+        first.close()
+
+    second = client.get("/src/2408.11045v2", stream=True)
+    second.close()
+
+
+def test_adaptive_s2_limiter_measures_end_to_start():
+    from crawler.http import AdaptiveRateLimiter
+
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    limiter = AdaptiveRateLimiter(1.1, clock=clock, sleep=fake_sleep)
+    config = Config(contact="test@example.com", s2_min_interval=1.1)
+    client = HostClient("https://api.semanticscholar.org", limiter, config)
+
+    def slow_post(*_a, **_kw):
+        now[0] += 1.5  # slow batch POST (> 1.1s)
+        ok = MagicMock(spec=requests.Response)
+        ok.status_code = 200
+        return ok
+
+    client._session.post = MagicMock(side_effect=slow_post)  # noqa: SLF001
+    client.post("/graph/v1/paper/batch")
+    client.post("/graph/v1/paper/batch")
+
+    assert len(sleeps) == 1
+    assert sleeps[0] >= 1.1

@@ -410,3 +410,79 @@ def test_network_error_without_response_propagates(tmp_path: Path) -> None:
         download_source(client, "2408.06045", 1, tmp_path)
     assert client.calls == [("/src/2408.06045v1", {"stream": True})]
     assert list(tmp_path.iterdir()) == []
+
+
+def test_download_pdf_aborts_stream_early_after_first_chunk(tmp_path: Path) -> None:
+    chunks_read = 0
+
+    class EarlyPdfResponse(FakeResponse):
+        def __init__(self) -> None:
+            super().__init__(200)
+            self.headers = {"Content-Length": "15000000"}
+
+        def iter_content(self, chunk_size: int = 1):
+            nonlocal chunks_read
+            self.iterated = True
+            for chunk in (
+                b"%PDF-1.5\n" + b"x" * 1024,
+                b"second-chunk-should-never-be-read",
+                b"third-chunk-should-never-be-read",
+            ):
+                chunks_read += 1
+                yield chunk
+
+    response = EarlyPdfResponse()
+    client = FakeClient(response)
+    result = download_source(client, "2408.01045", 1, tmp_path)
+
+    assert result.http_status == 200
+    assert result.raw_archive_bytes == 15_000_000
+    assert chunks_read == 1
+    assert response.closed
+    assert result.path is not None
+    assert result.path.stat().st_size == 512
+    assert sniff_archive_type(result.path) is ArchiveType.PDF
+
+
+def test_tar_with_large_zero_block_padding_is_accepted(tmp_path: Path) -> None:
+    import gzip
+
+    raw_tar = io.BytesIO()
+    with tarfile.open(fileobj=raw_tar, mode="w") as archive:
+        data = b"\\documentclass{article}\n"
+        info = tarfile.TarInfo("main.tex")
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+    # Simulate a tar created with a large blocking factor (+128 KiB trailing zero blocks).
+    padded = raw_tar.getvalue() + (b"\x00" * (128 * 1024))
+    archive_path = tmp_path / "padded.tar.gz"
+    archive_path.write_bytes(gzip.compress(padded))
+
+    dest = tmp_path / "padded-out"
+    meta = _extract(archive_path, dest)
+    assert meta.status is Status.OK
+    assert (dest / "main.tex").read_bytes() == b"\\documentclass{article}\n"
+
+
+def test_download_pdf_aborts_even_when_magic_split_across_tiny_chunks(tmp_path: Path) -> None:
+    chunks_read = 0
+
+    class SplitPdfResponse(FakeResponse):
+        def __init__(self) -> None:
+            super().__init__(200)
+            self.headers = {"Content-Length": "8000000"}
+
+        def iter_content(self, chunk_size: int = 1):
+            nonlocal chunks_read
+            self.iterated = True
+            for chunk in (b"%P", b"DF-1.6\n" + b"y" * 600, b"never-read"):
+                chunks_read += 1
+                yield chunk
+
+    response = SplitPdfResponse()
+    result = download_source(FakeClient(response), "2408.01045", 1, tmp_path)
+    assert result.http_status == 200
+    assert result.raw_archive_bytes == 8_000_000
+    assert chunks_read == 2
+    assert result.path is not None
+    assert sniff_archive_type(result.path) is ArchiveType.PDF
