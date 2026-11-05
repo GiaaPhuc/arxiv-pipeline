@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T4 04/11/2026 ~11:10 (Asia/Saigon)** — `checkpoint.restore_data_dir` từ chối archive không phải gzip/tar hoặc không có `manifest.sqlite` (file toàn byte 0 do tải/ghi Drive hỏng trước đây bị coi là tar rỗng nên restore ra data rỗng). — **196 passed**. — **Phase 0 ✅ · Phase 1 ✅** (go/no-go). **Phase 2**: crawl **25.000 ID** một máy.
+> Cập nhật lần cuối: **T6 06/11/2026 ~00:30 (Asia/Saigon)** — đồng bộ bảng phase M2 với timeline 06/11 · 06–12/11 · 13/11 trong `docs/plans/milestone2-phan-cong-task-B-E-vi.md` (hạn nộp **13/11/2026 23:59**). — **196 passed**. — **M1 Phase 0 ✅ · Phase 1 ✅**; **M1 Phase 2**: crawl **25.000 ID** một máy. **M2**: chưa code, chỉ kế hoạch/phân công.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -27,8 +27,8 @@
 | Siêu dữ liệu | Mỗi phiên bản: tiêu đề, tác giả, ngày nộp, ngày sửa, venue khi có. Mỗi tham khảo S2: tiêu đề, tác giả, ngày, arXiv ID nếu có, S2 ID. Giữ **mọi** tham khảo ở máy | ✅ Pilot: **30/30** bài có S2; **~33,6** ref/bài; **~78 %** ref đủ title/authors/date; **~50 %** ref có arXiv ID. Batch + fallback đã chạy thật; đối chiếu tay 10 ID / 5 bài (Phase 1) |
 | Hai bảng (nộp Hugging Face ở Milestone 3) | `papers`: arxiv_id, title, authors, submission_date, revised_dates, venue. `references`: chỉ tham khảo **có arXiv ID** — arxiv_id, ref_arxiv_id, ref_title, ref_authors, ref_submission_date, ref_s2_id | ✅ `export_data` trên corpus pilot → `data/stats/*.parquet` + CSV. Schema đúng `models.py` |
 | Kho làm việc | Giữ cục bộ làm đầu vào Milestone 2 và 3. Gợi ý đề: một thư mục mỗi bài | ✅ Pilot qua `validate_corpus`; bố cục `data/papers/`, manifest SQLite, resume đã kiểm trên 30 ID |
-| Báo cáo | Jupyter Book: cách thu thập, thư viện, số bài thành công, tỷ lệ thành công, kích thước trung bình trước/sau khi bỏ ảnh, số tham khảo trung bình, tỷ lệ thành công siêu dữ liệu tham khảo. Thời gian wall và RAM trên Colab chỉ CPU. Hình và bảng sinh lúc biên dịch sách | 🟡 [arxiv-book](https://github.com/GiaaPhuc/arxiv-book) + Pages; khung và workflow ✅. **E:** thay số mẫu bằng `data/stats/` pilot (T4.4 / T5.1 Phase 2) |
-| Mã nguồn | Sạch, chạy được, có chú thích; trích dẫn nếu dùng tài liệu ngoài | ✅ **195 passed**; `ruff` sạch. End-to-end pilot + review chéo Phase 1 |
+| Báo cáo | Jupyter Book: cách thu thập, thư viện, số bài thành công, tỷ lệ thành công, kích thước trung bình trước/sau khi bỏ ảnh, số tham khảo trung bình, tỷ lệ thành công siêu dữ liệu tham khảo. Thời gian wall và RAM trên Colab chỉ CPU. Hình và bảng sinh lúc biên dịch sách | 🟡 [arxiv-book](https://github.com/GiaaPhuc/arxiv-book) + Pages: hoàn tất 4 chương + code sinh bảng/hình tự động (`remove-input`), `jupyter-book build` xanh ✅; chờ chép 4 tệp `stats/` 25.000 ID (T4.4) và điền 6 hộp nhận xét `⏳` |
+| Mã nguồn | Sạch, chạy được, có chú thích; trích dẫn nếu dùng tài liệu ngoài | ✅ **196 passed**; `ruff` sạch. End-to-end pilot + review chéo Phase 1 |
 | Chấm (5 mục) | Báo cáo, mã, khám phá và tải đủ phiên bản, dữ liệu thu được, hiệu năng so với nhóm khác | 🟡 Có số pilot; chấm đủ khi crawl 25k + sách final (Phase 2) |
 
 ### Việc đang làm — **Phase 2** (sau go/no-go 28/10)
@@ -124,7 +124,7 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | T4.2 | Chạy lại `failed` | 1/11 | ⬜ |
 | T4.3 | Validate + đối chiếu ≥ 20 phiên bản | 1/11 | ⬜ |
 | T4.4 | `stats/` vào repo sách | 1/11 | ⬜ |
-| T5.1 | Sách (viết nháp trong lúc crawl) | 3/11 | ⬜ |
+| T5.1 | Sách (viết nháp trong lúc crawl) | 3/11 | ✅ (4 chương hoàn chỉnh, chờ chép `stats/` 25k & chốt 6 hộp `⏳`) |
 | T5.2 | README | 3/11 | ⬜ (có bản khởi tạo) |
 | T5.3 | Đóng băng checklist | sáng 4/11 | ⬜ |
 | T5.4 | Nộp Moodle. Hạn Book theo ảnh: 6/11/2026 23:59 | chiều 4/11 | ⬜ |
