@@ -620,3 +620,93 @@ def test_count_leading_done_ids_after_first_paper(tmp_path):
     ids = ["2408.00001", "2408.00002", "2408.00004"]
     assert pipeline._count_leading_done_ids(run, ids) == 1
     manifest.close()
+
+
+@responses.activate
+def test_non_blocking_checkpoint_skips_if_previous_still_running(tmp_path, monkeypatch):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+
+    gate = threading.Event()
+    calls: list[int] = []
+
+    def slow_backup(source: Path, destination: Path) -> None:
+        calls.append(1)
+        gate.wait(timeout=0.2)
+
+    monkeypatch.setattr(pipeline, "backup_data_dir", slow_backup)
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        backup_dir=tmp_path / "mirror",
+        backup_every_ids=1,
+    )
+    summary = pipeline.run(["2408.00001", "2408.00002", "2408.00004"], config)
+    gate.set()
+
+    assert summary["ok"] == 5
+    assert summary["no_source"] == 1
+    # 1 background checkpoint (while 2nd/3rd IDs skipped) + 1 final checkpoint in finally
+    assert len(calls) == 2
+
+
+@responses.activate
+def test_resume_heals_incomplete_revised_dates_and_backfills_meta(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+    pipeline.run(["2408.00004"], config)
+
+    # Simulate an earlier run that wrote paper.json without revised_dates and null version_date:
+    paper_dir = config.data_dir / "papers" / "2408-00004"
+    pjson = json.loads((paper_dir / "paper.json").read_text(encoding="utf-8"))
+    pjson["revised_dates"] = []
+    (paper_dir / "paper.json").write_text(json.dumps(pjson), encoding="utf-8")
+    for v in (2, 3):
+        mpath = paper_dir / f"v{v}" / "meta.json"
+        mjson = json.loads(mpath.read_text(encoding="utf-8"))
+        mjson["version_date"] = None
+        mpath.write_text(json.dumps(mjson), encoding="utf-8")
+
+    assert validate_corpus.validate(config.data_dir) != []
+
+    responses.calls.reset()
+    pipeline.run(["2408.00004"], config)
+
+    assert _calls(f"{ARXIV}/src/") == []  # never re-downloads archives
+    assert _read(paper_dir / "paper.json")["revised_dates"] == ["2024-08-05", "2024-08-06"]
+    assert _read(paper_dir / "v2" / "meta.json")["version_date"] == "2024-08-05"
+    assert _read(paper_dir / "v3" / "meta.json")["version_date"] == "2024-08-06"
+    assert validate_corpus.validate(config.data_dir) == []
+
+
+@responses.activate
+def test_failed_background_checkpoint_retries_on_next_chunk(tmp_path, monkeypatch):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    attempts = {"n": 0}
+
+    def flaky_backup(source: Path, destination: Path) -> None:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise OSError("transient Drive FUSE glitch")
+
+    monkeypatch.setattr(pipeline, "backup_data_dir", flaky_backup)
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        backup_dir=tmp_path / "mirror",
+        backup_every_ids=1,
+    )
+    pipeline.run(["2408.00001", "2408.00002"], config)
+    # Chunk 1 failed -> Chunk 2 retried immediately + final backup in finally = 3 calls
+    assert attempts["n"] >= 3

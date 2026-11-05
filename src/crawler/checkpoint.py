@@ -10,6 +10,7 @@ legacy folders safely, and unit tests cover both without network.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -308,6 +309,23 @@ def _has_any_clean_files(source: Path) -> bool:
     return False
 
 
+def _add_file_snapshot_to_tar(tf: tarfile.TarFile, file_path: Path, arcname: str) -> None:
+    """Add ``file_path`` from one open descriptor so concurrent ``os.replace`` is safe."""
+    try:
+        with file_path.open("rb") as f:
+            tarinfo = tf.gettarinfo(arcname=arcname, fileobj=f)
+            if not tarinfo.isreg():
+                return
+            if tarinfo.size <= 1024 * 1024:
+                data = f.read(tarinfo.size)
+                tarinfo.size = len(data)
+                tf.addfile(tarinfo, io.BytesIO(data))
+            else:
+                tf.addfile(tarinfo, f)
+    except FileNotFoundError:
+        return
+
+
 def _add_clean_tree_to_tar(tf: tarfile.TarFile, root: Path, prefix: str) -> None:
     if not root.is_dir():
         return
@@ -326,10 +344,7 @@ def _add_clean_tree_to_tar(tf: tarfile.TarFile, root: Path, prefix: str) -> None
             if fname.startswith(".") or fname.endswith(".tmp"):
                 continue
             file_path = Path(current_root) / fname
-            try:
-                tf.add(file_path, arcname=f"{arc_dir}/{fname}", recursive=False)
-            except FileNotFoundError:
-                continue
+            _add_file_snapshot_to_tar(tf, file_path, f"{arc_dir}/{fname}")
 
 
 def _clean_workspace_for_restore(destination: Path) -> None:
@@ -537,18 +552,21 @@ def _copy_tree(src: Path, dest: Path) -> None:
         if any(part.startswith(".") for part in rel.parts) or path.name.endswith(".tmp"):
             continue
         target = dest / rel
-        if path.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.is_file():
-                src_stat = path.stat()
-                dst_stat = target.stat()
-                if src_stat.st_size == dst_stat.st_size and int(src_stat.st_mtime) == int(
-                    dst_stat.st_mtime
-                ):
-                    continue
-            shutil.copy2(path, target)
+        try:
+            if path.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.is_file():
+                    src_stat = path.stat()
+                    dst_stat = target.stat()
+                    if src_stat.st_size == dst_stat.st_size and int(src_stat.st_mtime) == int(
+                        dst_stat.st_mtime
+                    ):
+                        continue
+                shutil.copy2(path, target)
+        except FileNotFoundError:
+            continue
 
 
 def prune_stale_top_level(source: Path, destination: Path) -> None:

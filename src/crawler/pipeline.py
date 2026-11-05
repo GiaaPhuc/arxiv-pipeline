@@ -1,29 +1,33 @@
-"""Orchestration: two workers (arXiv host, S2 host), resume, atomic writes.
+"""Orchestration: network producer + async extract, S2 batch, and checkpoint workers.
 
-Owner: A (B/C support their parts) | Reviewer: C | Task: T3.1
+Owner: A (B/C support their parts) | Reviewer: C | Task: T3.1 (optimised: O1-O6)
 Depends on: T2.1-T2.4.
 Done when: end-to-end on 10-20 real ids; one failing pair never stops the batch;
-re-running skips ``ok`` pairs. The two workers never call each other's host and
-only meet in the manifest. Use threads (I/O bound, only 2 workers), not asyncio.
+re-running skips ``ok`` pairs. The arXiv and S2 workers never call each other's host and
+only meet on disk / in the manifest. Uses threads (I/O bound), not asyncio.
 
 Design
 ------
-* **arXiv worker** (main thread, one connection, >= 3 s between calls): for chunks of 50
-  ids it discovers metadata, writes ``paper.json``, then for every version ``v1..vN``
-  downloads ``/src/{id}vK`` and extracts ``.tex``/``.bib``. A version is built in
-  ``.vK.part/`` and swapped into ``vK/`` with ``os.replace``; the manifest row is written
-  LAST, so a killed run never leaves a "final" row without its files.
-* **S2 worker** (one thread, >= 1.1 s between calls, adaptive after 429): batches papers
+* **arXiv network thread** (main thread, one connection, >= 3.0 s Start-to-Start): for
+  chunks of ``2 * discovery_batch_size`` (300) ids it discovers metadata in batches of 150
+  (reusing ``<updated>`` for ``vN``), writes ``paper.json``, streams ``/src/{id}vK`` into
+  ``.tmp/`` (aborting early on ``%PDF``), and hands each package to ``extract_queue``.
+* **Extract worker** (one thread, bounded ``extract_queue`` of 8): performs 1-pass tar/gz
+  extraction of ``.tex``/``.bib`` into ``.vK.part/``, swaps into ``vK/`` with ``os.replace``,
+  and commits the manifest row LAST, then queues completed papers to ``s2_queue``.
+* **S2 worker** (one thread, >= 1.1 s End-to-Start, adaptive after 429): batches papers
   (``POST /paper/batch``, up to 100 ids) once all versions are processed, writes
   ``references.json`` into every version dir and, last, ``s2_references.raw.json.gz``.
   The raw file is the "S2 done" marker, so an interrupted paper is picked up again on resume.
-* **Resume**: ids with ``paper.json`` skip discovery; pairs in a final state are skipped;
-  ``failed``/``pending`` pairs are retried on the next run (never in a loop within one
-  run); papers lacking the raw S2 file are queued for S2 again.
+* **Checkpoint worker** (background thread): snapshots SQLite and packs ``data/`` to the
+  configured backup target without blocking arXiv network downloads.
+* **Resume**: ids with ``paper.json`` skip discovery (healing ``revised_dates`` if needed);
+  pairs in a final state are skipped; ``failed``/``pending`` pairs are retried on the next
+  run (never in a loop within one run); papers lacking the raw S2 file are queued for S2 again.
 * **Stopping**: arXiv **403** stops the run. arXiv **429** waits ``Retry-After`` and retries
   the same arXiv call (discovery API or ``/src/``, up to 4 times), then ``StopCrawl``.
-  S2 429 waits and retries the batch; an S2 403
-  (bad key) or too much cumulative 429 wait without success disables the S2 worker.
+  S2 429 waits and retries the batch; an S2 403 (bad key) or too much cumulative 429 wait
+  without success disables the S2 worker.
 * A failing pair is recorded as ``failed`` with the error text and the batch continues.
 """
 
@@ -50,7 +54,7 @@ from .discovery import discover, fetch_revised_dates
 from .http import AdaptiveRateLimiter, HostClient, make_arxiv_client, make_s2_client
 from .ids import id_to_dirname, normalize_id, split_version
 from .manifest import Manifest, atomic_write
-from .models import PaperMeta, Status, VersionMeta
+from .models import FileEntry, PaperMeta, Status, VersionMeta
 from .s2 import S2_BATCH_SIZE, S2Result, fetch_references_batch
 from .source import DownloadResult, download_source, extract_tex_bib
 
@@ -78,6 +82,15 @@ class _S2Job:
 
 
 @dataclass
+class _ExtractJob:
+    paper: PaperMeta
+    version: int
+    download: DownloadResult | None = None
+    download_error: BaseException | None = None
+    is_last_for_paper: bool = False
+
+
+@dataclass
 class _Run:
     config: Config
     manifest: Manifest
@@ -86,10 +99,15 @@ class _Run:
     papers_dir: Path
     tmp_dir: Path
     stop: threading.Event = field(default_factory=threading.Event)
+    extract_queue: queue.Queue[_ExtractJob | None] = field(
+        default_factory=lambda: queue.Queue(maxsize=8)
+    )
     s2_queue: queue.Queue[_S2Job | None] = field(default_factory=queue.Queue)
     s2_disabled: bool = False
     checkpoint_last_seen: int = 0
-    counters: dict[str, int] = field(
+    checkpoint_thread: threading.Thread | None = None
+    counters_lock: threading.Lock = field(default_factory=threading.Lock)
+    counters: dict[str, int | float] = field(
         default_factory=lambda: {
             "papers_done": 0,
             "papers_not_found": 0,
@@ -106,6 +124,11 @@ class _Run:
 
 
 # --------------------------------------------------------------------------- helpers
+
+
+def _inc(run: _Run, key: str, delta: int | float = 1) -> None:
+    with run.counters_lock:
+        run.counters[key] += delta
 
 
 def _now() -> str:
@@ -163,28 +186,35 @@ def _version_date(paper: PaperMeta, version: int) -> str | None:
     return paper.revised_dates[index] if 0 <= index < len(paper.revised_dates) else None
 
 
-def _build_version(run: _Run, paper: PaperMeta, version: int, part: Path) -> VersionMeta:
-    """Download + extract into ``part``. ``StopCrawl`` on 403 or 429 after retry budget."""
+def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResult:
+    """Download ``/src/{id}vK`` into ``tmp_dir``. ``StopCrawl`` on 403 or 429 after retry budget."""
     arxiv_id = paper.arxiv_id
-    archive: Path | None = None
+    download: DownloadResult | None = None
+    for rate_attempt in range(_ARXIV_MAX_429_ATTEMPTS):
+        with metrics.stage_timer("download"):
+            download = download_source(run.arxiv, arxiv_id, version, run.tmp_dir)
+        if download.http_status == 403:
+            raise StopCrawl(f"arXiv answered HTTP 403 for {arxiv_id}v{version}")
+        if download.http_status == 429:
+            _wait_arxiv_429(
+                run,
+                context=f"for {arxiv_id}v{version}",
+                rate_attempt=rate_attempt,
+                download=download,
+            )
+            continue
+        break
+    assert download is not None
+    return download
+
+
+def _extract_version(
+    run: _Run, paper: PaperMeta, version: int, download: DownloadResult, part: Path
+) -> VersionMeta:
+    """Extract downloaded archive into ``part`` and remove temporary archive file."""
+    arxiv_id = paper.arxiv_id
+    archive = download.path
     try:
-        download: DownloadResult | None = None
-        for rate_attempt in range(_ARXIV_MAX_429_ATTEMPTS):
-            with metrics.stage_timer("download"):
-                download = download_source(run.arxiv, arxiv_id, version, run.tmp_dir)
-            if download.http_status == 403:
-                raise StopCrawl(f"arXiv answered HTTP 403 for {arxiv_id}v{version}")
-            if download.http_status == 429:
-                _wait_arxiv_429(
-                    run,
-                    context=f"for {arxiv_id}v{version}",
-                    rate_attempt=rate_attempt,
-                    download=download,
-                )
-                continue
-            break
-        assert download is not None
-        archive = download.path
         if download.http_status == 404:
             return VersionMeta(arxiv_id, version, Status.NOT_FOUND, error="HTTP 404 on /src/")
         if archive is None:
@@ -194,7 +224,12 @@ def _build_version(run: _Run, paper: PaperMeta, version: int, part: Path) -> Ver
         part.mkdir(parents=True, exist_ok=True)
         with metrics.stage_timer("extract"):
             return extract_tex_bib(
-                archive, part / "tex", run.config, arxiv_id=arxiv_id, version=version
+                archive,
+                part / "tex",
+                run.config,
+                arxiv_id=arxiv_id,
+                version=version,
+                raw_archive_bytes=download.raw_archive_bytes,
             )
     finally:
         if archive is not None:
@@ -216,8 +251,10 @@ def _install_version(final: Path, part: Path, old: Path, meta: VersionMeta) -> N
     shutil.rmtree(old, ignore_errors=True)
 
 
-def _process_version(run: _Run, paper: PaperMeta, version: int) -> Status:
-    """Build ``vK/`` atomically, then record the pair in the manifest (last step)."""
+def _consume_extract_job(run: _Run, job: _ExtractJob) -> Status:
+    """Extract, install ``vK/`` atomically, record in manifest, and queue S2 when paper done."""
+    paper = job.paper
+    version = job.version
     paper_dir = _paper_dir(run, paper.arxiv_id)
     final = paper_dir / f"v{version}"
     part = paper_dir / f".v{version}.part"
@@ -226,10 +263,10 @@ def _process_version(run: _Run, paper: PaperMeta, version: int) -> Status:
     shutil.rmtree(old, ignore_errors=True)
 
     try:
-        meta = _build_version(run, paper, version, part)
-    except StopCrawl:
-        shutil.rmtree(part, ignore_errors=True)
-        raise
+        if job.download_error is not None:
+            raise job.download_error
+        assert job.download is not None
+        meta = _extract_version(run, paper, version, job.download, part)
     except Exception as exc:  # one bad pair must never stop the batch
         logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
         shutil.rmtree(part, ignore_errors=True)
@@ -260,23 +297,75 @@ def _process_version(run: _Run, paper: PaperMeta, version: int) -> Status:
 
     run.manifest.record(meta)
     logger.info("%s v%d -> %s", paper.arxiv_id, version, meta.status.value)
+    if job.is_last_for_paper:
+        _inc(run, "papers_done")
+        if not (paper_dir / S2_RAW_NAME).is_file():
+            run.s2_queue.put(_S2Job(paper, paper_dir))
     return meta.status
+
+
+def _extract_worker(run: _Run) -> None:
+    """Consumer thread (O3): extracts downloaded packages and commits manifest rows."""
+    while True:
+        job = run.extract_queue.get()
+        try:
+            if job is None:
+                return
+            _consume_extract_job(run, job)
+        except Exception:
+            if job is not None:
+                logger.exception(
+                    "extract worker unexpected error on %s v%d",
+                    job.paper.arxiv_id,
+                    job.version,
+                )
+        finally:
+            run.extract_queue.task_done()
 
 
 def _process_paper(run: _Run, paper: PaperMeta) -> None:
     paper_dir = _paper_dir(run, paper.arxiv_id)
     _clean_stale(paper_dir)
+    pending_versions: list[int] = []
     for version in range(1, paper.num_versions + 1):
         run.manifest.register(paper.arxiv_id, version)
         status = run.manifest.status(paper.arxiv_id, version)
         if status is not None and status.is_final:
             continue
+        pending_versions.append(version)
+
+    if not pending_versions:
+        _inc(run, "papers_done")
+        if not (paper_dir / S2_RAW_NAME).is_file():
+            run.s2_queue.put(_S2Job(paper, paper_dir))
+        return
+
+    for idx, version in enumerate(pending_versions):
         if run.stop.is_set():
             return
-        _process_version(run, paper, version)
-    run.counters["papers_done"] += 1
-    if not (paper_dir / S2_RAW_NAME).is_file():
-        run.s2_queue.put(_S2Job(paper, paper_dir))
+        is_last = idx == len(pending_versions) - 1
+        try:
+            download = _download_version(run, paper, version)
+            run.extract_queue.put(
+                _ExtractJob(
+                    paper=paper,
+                    version=version,
+                    download=download,
+                    is_last_for_paper=is_last,
+                )
+            )
+        except StopCrawl:
+            raise
+        except Exception as exc:  # one bad pair must never stop the batch
+            logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
+            run.extract_queue.put(
+                _ExtractJob(
+                    paper=paper,
+                    version=version,
+                    download_error=exc,
+                    is_last_for_paper=is_last,
+                )
+            )
 
 
 # --------------------------------------------------------------------------- discovery
@@ -292,7 +381,7 @@ def _record_not_found(run: _Run, arxiv_id: str) -> None:
             error="id not returned by the arXiv API",
         )
     )
-    run.counters["papers_not_found"] += 1
+    _inc(run, "papers_not_found")
     logger.info("%s -> not_found", arxiv_id)
 
 
@@ -320,12 +409,12 @@ def _discover_chunk(run: _Run, arxiv_ids: list[str]) -> list[PaperMeta]:
                 )
                 continue
             # Not "missing": leave the ids untouched, they are retried by the next run.
-            run.counters["discovery_errors"] += 1
+            _inc(run, "discovery_errors")
             logger.error(
                 "discovery failed for %d ids (%r); retried on next run", len(arxiv_ids), exc
             )
             return []
-    run.counters["revised_dates_incomplete"] += len(incomplete)
+    _inc(run, "revised_dates_incomplete", len(incomplete))
     for arxiv_id in missing:
         _record_not_found(run, arxiv_id)
     for paper in found:
@@ -335,12 +424,78 @@ def _discover_chunk(run: _Run, arxiv_ids: list[str]) -> list[PaperMeta]:
     return found
 
 
+def _backfill_version_dates(run: _Run, paper: PaperMeta) -> None:
+    """Update ``vK/meta.json`` + manifest when ``revised_dates`` was healed on resume."""
+    paper_dir = _paper_dir(run, paper.arxiv_id)
+    for version in range(2, paper.num_versions + 1):
+        vdate = _version_date(paper, version)
+        meta_path = paper_dir / f"v{version}" / "meta.json"
+        if not vdate or not meta_path.is_file():
+            continue
+        try:
+            raw = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if raw.get("version_date") == vdate:
+            continue
+        raw["version_date"] = vdate
+        _write_json(meta_path, raw)
+        files = [FileEntry(**f) for f in raw.get("files", [])]
+        run.manifest.record(
+            VersionMeta(
+                arxiv_id=paper.arxiv_id,
+                version=version,
+                status=Status(raw["status"]),
+                schema_version=int(raw.get("schema_version", 1)),
+                version_date=vdate,
+                raw_archive_bytes=int(raw.get("raw_archive_bytes", 0)),
+                raw_uncompressed_bytes=int(raw.get("raw_uncompressed_bytes", 0)),
+                kept_bytes=int(raw.get("kept_bytes", 0)),
+                files=files,
+                crawled_at=raw.get("crawled_at"),
+                s2_scope=str(raw.get("s2_scope", "paper")),
+                error=raw.get("error"),
+            )
+        )
+
+
+def _heal_revised_dates(run: _Run, papers: list[PaperMeta]) -> None:
+    """Re-fetch missing ``revised_dates`` for resumed ``paper.json`` entries."""
+    for rate_attempt in range(_ARXIV_MAX_429_ATTEMPTS):
+        try:
+            with metrics.stage_timer("discovery"):
+                incomplete = fetch_revised_dates(papers, run.arxiv, run.config)
+            break
+        except (requests.RequestException, ValueError) as exc:
+            status = _http_status(exc)
+            if status == 403:
+                raise StopCrawl("arXiv answered HTTP 403 during revised-date recovery") from exc
+            if status == 429:
+                _wait_arxiv_429(
+                    run,
+                    context="during revised-date recovery",
+                    rate_attempt=rate_attempt,
+                    response=getattr(exc, "response", None),
+                )
+                continue
+            logger.warning("revised-date recovery failed (%r); retried on next run", exc)
+            return
+    _inc(run, "revised_dates_incomplete", len(incomplete))
+    incomplete_set = set(incomplete)
+    for paper in papers:
+        if paper.arxiv_id not in incomplete_set:
+            _write_json(_paper_dir(run, paper.arxiv_id) / "paper.json", asdict(paper))
+            _backfill_version_dates(run, paper)
+
+
 def _arxiv_id_needs_no_work(run: _Run, arxiv_id: str) -> bool:
     """True when resume can skip this base id (manifest + on-disk markers)."""
     if run.manifest.status(arxiv_id, 1) is Status.NOT_FOUND:
         return True
     paper = _read_paper(_paper_dir(run, arxiv_id) / "paper.json")
     if paper is None:
+        return False
+    if paper.num_versions >= 2 and len(paper.revised_dates) != paper.num_versions - 1:
         return False
     for version in range(1, paper.num_versions + 1):
         status = run.manifest.status(arxiv_id, version)
@@ -371,6 +526,14 @@ def _plan_chunk(run: _Run, chunk: list[str]) -> list[PaperMeta]:
             continue
         else:
             unknown.append(arxiv_id)
+    needs_dates = [
+        p
+        for p in known
+        if p.num_versions >= 2
+        and (len(p.revised_dates) != p.num_versions - 1 or not all(p.revised_dates))
+    ]
+    if needs_dates:
+        _heal_revised_dates(run, needs_dates)
     discovered = _discover_chunk(run, unknown) if unknown else []
     by_id = {p.arxiv_id: p for p in [*known, *discovered]}
     return [by_id[i] for i in chunk if i in by_id]
@@ -441,8 +604,8 @@ def _note_s2_success(run: _Run) -> None:
 def _wait_s2_429(run: _Run, response: requests.Response | None) -> bool:
     """Wait for Retry-After; return True if the run was stopped."""
     wait = _retry_after(response)
-    run.counters["s2_429"] += 1
-    run.counters["s2_retry_wait_seconds"] += wait
+    _inc(run, "s2_429")
+    _inc(run, "s2_retry_wait_seconds", wait)
     run.s2_rate_limit_wait += wait
     limiter = run.s2.limiter
     if isinstance(limiter, AdaptiveRateLimiter):
@@ -487,12 +650,12 @@ def _handle_s2_batch(run: _Run, jobs: list[_S2Job]) -> None:
                 results = fetch_references_batch(run.s2, ids)
             _note_s2_success(run)
             run.s2_rate_limit_wait = 0.0
-            run.counters["s2_batches"] += 1
+            _inc(run, "s2_batches")
             for job in jobs:
                 base = job.paper.arxiv_id
                 result = results[base]
                 _store_s2(job, result)
-                run.counters["s2_ok" if result.found else "s2_not_indexed"] += 1
+                _inc(run, "s2_ok" if result.found else "s2_not_indexed")
             return
         except requests.HTTPError as exc:
             status = _http_status(exc)
@@ -542,33 +705,50 @@ def _s2_worker(run: _Run) -> None:
 # --------------------------------------------------------------------------- entry point
 
 
+def _run_checkpoint_bg(run: _Run, data_dir: Path, backup_dir: Path, ids_seen: int) -> None:
+    try:
+        backup_data_dir(data_dir, backup_dir)
+        run.checkpoint_last_seen = ids_seen
+    except OSError:
+        logger.exception(
+            "checkpoint backup failed (%s -> %s); crawl continues",
+            data_dir,
+            backup_dir,
+        )
+
+
 def _maybe_checkpoint(run: _Run, ids_seen: int) -> None:
     cfg = run.config
     if not cfg.backup_dir or cfg.backup_every_ids <= 0:
         return
     if ids_seen - run.checkpoint_last_seen < cfg.backup_every_ids:
         return
-    try:
-        backup_data_dir(Path(cfg.data_dir), cfg.backup_dir)
-        run.checkpoint_last_seen = ids_seen
-    except OSError:
-        logger.exception(
-            "checkpoint backup failed (%s -> %s); crawl continues",
-            cfg.data_dir,
-            cfg.backup_dir,
-        )
+    if run.checkpoint_thread is not None and run.checkpoint_thread.is_alive():
+        logger.info("previous checkpoint backup still running; skipping at %d ids", ids_seen)
+        return
+    thread = threading.Thread(
+        target=_run_checkpoint_bg,
+        args=(run, Path(cfg.data_dir), cfg.backup_dir, ids_seen),
+        name="checkpoint-worker",
+    )
+    run.checkpoint_thread = thread
+    thread.start()
 
 
 def _crawl(run: _Run, ids: list[str], started: float) -> None:
     total = len(ids)
     seen = 0
-    for chunk in _chunks(ids, run.config.discovery_batch_size):
+    chunk_size = max(run.config.discovery_batch_size * 2, 1)
+    if run.config.backup_every_ids > 0:
+        chunk_size = min(chunk_size, max(run.config.backup_every_ids, 1))
+    for chunk in _chunks(ids, chunk_size):
         if run.stop.is_set():
             return
         for paper in _plan_chunk(run, chunk):
             if run.stop.is_set():
                 return
             _process_paper(run, paper)
+        run.extract_queue.join()
         seen += len(chunk)
         logger.info(
             "progress %d/%d ids | %s | s2 queue %d | %.0f s",
@@ -590,9 +770,9 @@ def run(
 ) -> dict[str, int]:
     """Crawl ``arxiv_ids``; return the manifest summary (count per status).
 
-    Raises ``StopCrawl`` (403/429 from arXiv) or ``KeyboardInterrupt`` AFTER the S2 thread,
-    the sampler and the metrics file have been finalised. Everything already written
-    stays valid; run the same command again to resume.
+    Raises ``StopCrawl`` (403/429 from arXiv) or ``KeyboardInterrupt`` AFTER the extract
+    thread, the S2 thread, the sampler and the metrics file have been finalised. Everything
+    already written stays valid; run the same command again to resume.
     """
     ids = list(dict.fromkeys(split_version(normalize_id(x))[0] for x in arxiv_ids))
     data_dir = Path(config.data_dir)
@@ -612,6 +792,8 @@ def run(
     metrics.reset()
     sampler = metrics.ResourceSampler(data_dir)
     sampler.start()
+    extract_thread = threading.Thread(target=_extract_worker, args=(state,), name="extract-worker")
+    extract_thread.start()
     s2_thread = threading.Thread(target=_s2_worker, args=(state,), name="s2-worker")
     s2_thread.start()
     if config.backup_every_ids and not config.backup_dir:
@@ -639,14 +821,25 @@ def run(
         failure = exc
         state.stop.set()
     finally:
+        while extract_thread.is_alive():
+            try:
+                state.extract_queue.put(None, timeout=0.5)
+                break
+            except queue.Full:
+                continue
+        extract_thread.join()
         state.s2_queue.put(None)
         s2_thread.join()
+        if state.checkpoint_thread is not None:
+            state.checkpoint_thread.join()
         resources = sampler.stop()
+        with state.counters_lock:
+            counters_snapshot = dict(state.counters)
         merged = metrics.save_run(
             data_dir / "logs" / "metrics.json",
             metrics.stage_seconds(),
             resources,
-            crawl_counters=state.counters,
+            crawl_counters=counters_snapshot,
         )
         summary = manifest.summary()
         if config.backup_dir and config.backup_every_ids:
@@ -656,7 +849,7 @@ def run(
                 logger.exception("final checkpoint backup failed")
         manifest.close()
         shutil.rmtree(state.tmp_dir, ignore_errors=True)
-        logger.info("crawl finished: %s | counters %s", summary, state.counters)
+        logger.info("crawl finished: %s | counters %s", summary, counters_snapshot)
         logger.info("cumulative active seconds per stage: %s", merged["stage_seconds"])
 
     if isinstance(failure, StopCrawl):

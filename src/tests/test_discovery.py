@@ -208,3 +208,85 @@ def test_incomplete_version_dates_are_reported_and_never_invented():
 
     assert incomplete == ["2310.00001"]
     assert paper.revised_dates == []
+
+
+@responses.activate
+def test_discover_populates_v2_immediately_and_queries_only_intermediate_for_v3():
+    from crawler.discovery import fetch_revised_dates
+
+    # 2310.00001 has N=2 (updated=2024-08-10), 2310.00002 has N=3 (updated=2024-09-01)
+    responses.add(
+        responses.GET,
+        "https://export.arxiv.org/api/query",
+        body=_feed(
+            _versioned("2310.00001", 2, "2024-08-10"),
+            _versioned("2310.00002", 3, "2024-09-01"),
+        ),
+    )
+    # Only 2310.00002v2 needs to be queried in fetch_revised_dates!
+    responses.add(
+        responses.GET,
+        "https://export.arxiv.org/api/query",
+        body=_feed(_versioned("2310.00002", 2, "2024-08-15")),
+    )
+
+    client = DummyClient()
+    config = Config.from_env()
+    found, missing = discover(["2310.00001", "2310.00002"], client, config)
+    assert missing == []
+    p1, p2 = found
+    # N=2 already has revised_dates right after discover()
+    assert p1.revised_dates == ["2024-08-10"]
+    assert p2.revised_dates == []
+
+    incomplete = fetch_revised_dates(found, client, config)
+    assert incomplete == []
+    assert p1.revised_dates == ["2024-08-10"]
+    assert p2.revised_dates == ["2024-08-15", "2024-09-01"]
+    assert len(responses.calls) == 2
+    assert responses.calls[1].request.params["id_list"] == "2310.00002v2"
+
+
+@responses.activate
+def test_fetch_revised_dates_rechecks_dropped_version_in_subbatch():
+    from crawler.discovery import fetch_revised_dates
+    from crawler.models import PaperMeta
+
+    # First batch drops v2, second sub-batch call returns v2.
+    responses.add(
+        responses.GET,
+        "https://export.arxiv.org/api/query",
+        body=_feed(_versioned("2310.00001", 3, "2024-09-01")),
+    )
+    responses.add(
+        responses.GET,
+        "https://export.arxiv.org/api/query",
+        body=_feed(_versioned("2310.00001", 2, "2024-08-10")),
+    )
+    paper = PaperMeta("2310.00001", "A", [], "2024-08-01", num_versions=3)
+
+    incomplete = fetch_revised_dates([paper], DummyClient(), Config.from_env())
+
+    assert incomplete == []
+    assert paper.revised_dates == ["2024-08-10", "2024-09-01"]
+    queried = [c.request.params["id_list"] for c in responses.calls]
+    assert queried == ["2310.00001v2,2310.00001v3", "2310.00001v2"]
+
+
+@responses.activate
+def test_discover_subbatch_error_entry_falls_back_to_individual_queries():
+    error_entry = (
+        "<entry><id>http://arxiv.org/api/errors#malformed</id><title>Error</title></entry>"
+    )
+    responses.add(responses.GET, "https://export.arxiv.org/api/query", body=_feed())
+    responses.add(responses.GET, "https://export.arxiv.org/api/query", body=_feed(error_entry))
+    responses.add(
+        responses.GET,
+        "https://export.arxiv.org/api/query",
+        body=_feed(_versioned("2310.00001", 1, "2024-08-01")),
+    )
+    responses.add(responses.GET, "https://export.arxiv.org/api/query", body=_feed())
+
+    found, missing = discover(["2310.00001", "2310.99999"], DummyClient(), Config.from_env())
+    assert [p.arxiv_id for p in found] == ["2310.00001"]
+    assert missing == ["2310.99999"]

@@ -2,9 +2,9 @@
 
 Owner: A | Reviewer: C | Task: T1.1
 Done when: fake-clock test proves consecutive arXiv requests are >= 3 s apart
-(measured from the END of the previous request), 403/429 are returned to the caller
-(without client retry; see CONTRIBUTING.md), transient 5xx may retry with backoff,
-and every request is logged (never log the S2 key).
+(Start-to-Start on 1 sequential connection, matching ``arxiv.py``), 403/429 are
+returned to the caller (without client retry; see CONTRIBUTING.md), transient 5xx
+may retry with backoff, and every request is logged (never log the S2 key).
 
 arXiv API and /src/ share ONE limiter (same host, export.arxiv.org, one connection).
 """
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 import time
 from collections.abc import Callable
 from typing import BinaryIO
@@ -29,7 +30,7 @@ _STOP_STATUSES = frozenset({403, 429})
 
 
 class _StreamResponse:
-    """Wrap a streaming ``requests.Response``; rate limit ends when the body is closed."""
+    """Wrap a streaming ``requests.Response``; active request slot ends when closed."""
 
     def __init__(self, inner: requests.Response, limiter: RateLimiter) -> None:
         self._inner = inner
@@ -53,12 +54,15 @@ class _StreamResponse:
     def __exit__(self, *_args: object) -> None:
         self.close()
 
+    def __del__(self) -> None:
+        self._release()
+
     def __getattr__(self, name: str):
         return getattr(self._inner, name)
 
 
 class RateLimiter:
-    """Blocks so that calls are at least ``min_interval`` seconds apart.
+    """Enforces 1 active request at a time and >= ``min_interval`` s Start-to-Start.
 
     ``clock``/``sleep`` are injectable so tests can use a fake clock.
     """
@@ -72,24 +76,45 @@ class RateLimiter:
         self._min_interval = min_interval
         self._clock = clock
         self._sleep = sleep
+        self._lock = threading.Lock()
+        self._active_thread: int | None = None
+        self._last_request_at: float | None = None
         self._last_done_at: float | None = None
 
+    def _acquire_slot(self) -> None:
+        ident = threading.get_ident()
+        if self._active_thread == ident:
+            raise RuntimeError(
+                "previous streaming response must be closed before starting a new request"
+            )
+        self._lock.acquire()
+        self._active_thread = ident
+
     def wait(self) -> None:
-        """Sleep until the next request is allowed."""
-        if self._last_done_at is None:
-            return
-        elapsed = self._clock() - self._last_done_at
-        remaining = self._min_interval - elapsed
-        if remaining > 0:
-            self._sleep(remaining)
+        """Acquire single-connection slot and sleep until Start-to-Start interval elapses."""
+        self._acquire_slot()
+        try:
+            if self._last_request_at is not None:
+                elapsed = self._clock() - self._last_request_at
+                remaining = self._min_interval - elapsed
+                if remaining > 0:
+                    self._sleep(remaining)
+            self._last_request_at = self._clock()
+        except BaseException:
+            self._active_thread = None
+            self._lock.release()
+            raise
 
     def done(self) -> None:
-        """Mark the end of a request (interval is counted from here)."""
+        """Mark the end of a request and release the single-connection slot."""
         self._last_done_at = self._clock()
+        if self._active_thread is not None:
+            self._active_thread = None
+            self._lock.release()
 
 
 class AdaptiveRateLimiter(RateLimiter):
-    """S2 limiter: slow down after 429, ease back after a streak of successes."""
+    """S2 limiter: End-to-Start interval, slow down after 429, ease back after streak."""
 
     def __init__(
         self,
@@ -107,12 +132,18 @@ class AdaptiveRateLimiter(RateLimiter):
         self._success_streak = 0
 
     def wait(self) -> None:
-        if self._last_done_at is None:
-            return
-        elapsed = self._clock() - self._last_done_at
-        remaining = self._min_interval - elapsed
-        if remaining > 0:
-            self._sleep(remaining + random.uniform(0.0, 0.05))
+        self._acquire_slot()
+        try:
+            if self._last_done_at is not None:
+                elapsed = self._clock() - self._last_done_at
+                remaining = self._min_interval - elapsed
+                if remaining > 0:
+                    self._sleep(remaining + random.uniform(0.0, 0.05))
+            self._last_request_at = self._clock()
+        except BaseException:
+            self._active_thread = None
+            self._lock.release()
+            raise
 
     def note_429(self) -> None:
         self._success_streak = 0

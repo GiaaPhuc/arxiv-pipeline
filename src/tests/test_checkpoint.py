@@ -194,3 +194,37 @@ def test_restore_rejects_zero_filled_archive(tmp_path: Path) -> None:
     bad.write_bytes(bytes(4096))
     with pytest.raises(OSError, match="not a valid gzip/tar"):
         restore_data_dir(bad, tmp_path / "out")
+
+
+def test_archive_backup_tolerates_concurrent_atomic_file_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    import os
+
+    from crawler import checkpoint
+
+    src = _make_sample_workspace(tmp_path / "data", ["2408.00001"])
+    paper_json = src / "papers" / "2408-00001" / "paper.json"
+    # Start with a longer JSON payload, then atomically replace with a shorter valid JSON
+    # right as backup opens it (previously caused tarfile "unexpected end of data").
+    paper_json.write_text(
+        json.dumps({"arxiv_id": "2408.00001", "venue": "A" * 200}), encoding="utf-8"
+    )
+    orig_add_snapshot = checkpoint._add_file_snapshot_to_tar
+
+    def swap_before_pack(tf: tarfile.TarFile, file_path: Path, arcname: str) -> None:
+        if file_path.name == "paper.json":
+            tmp_swap = file_path.with_name("paper.json.tmp")
+            tmp_swap.write_text(json.dumps({"arxiv_id": "2408.00001"}), encoding="utf-8")
+            os.replace(tmp_swap, file_path)
+        orig_add_snapshot(tf, file_path, arcname)
+
+    monkeypatch.setattr(checkpoint, "_add_file_snapshot_to_tar", swap_before_pack)
+    archive = tmp_path / "drive" / "arxiv-data.tar.gz"
+    backup_tar_archive(src, archive)
+
+    restored = tmp_path / "restored"
+    restore_data_dir(archive, restored)
+    loaded = json.loads((restored / "papers" / "2408-00001" / "paper.json").read_text("utf-8"))
+    assert loaded["arxiv_id"] == "2408.00001"
