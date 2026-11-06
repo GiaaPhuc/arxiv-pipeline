@@ -21,12 +21,15 @@ times still reports cumulative active time, and keeps the maximum of the RAM/dis
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import os
+import re
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,8 +39,102 @@ from .manifest import atomic_write
 STAGES = ("discovery", "download", "extract", "s2")
 
 _lock = threading.Lock()
+_diag_lock = threading.Lock()
 _stage_seconds: defaultdict[str, float] = defaultdict(float)
 _stage_counts: defaultdict[str, int] = defaultdict(int)
+_cached_source_hash: str | None = None
+
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)(x-api-key\s*[:=]\s*)(['\"]?)([^\s'\",;]+)\2"),
+    re.compile(r"(?i)(s2_api_key\s*[:=]\s*)(['\"]?)([^\s'\",;]+)\2"),
+    re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)([^\s'\",;]+)"),
+    re.compile(r"(?i)(bearer\s+)([A-Za-z0-9._\-]{12,})"),
+)
+
+
+def source_code_hash() -> str:
+    """Deterministic SHA-256 fingerprint of ``src/crawler/*.py`` (U5)."""
+    global _cached_source_hash
+    if _cached_source_hash is not None:
+        return _cached_source_hash
+    digest = hashlib.sha256()
+    pkg_dir = Path(__file__).resolve().parent
+    for py_file in sorted(pkg_dir.glob("*.py")):
+        try:
+            digest.update(py_file.name.encode("utf-8"))
+            digest.update(b"\x00")
+            digest.update(py_file.read_bytes())
+            digest.update(b"\x00")
+        except OSError:
+            continue
+    _cached_source_hash = digest.hexdigest()[:16]
+    return _cached_source_hash
+
+
+def redact_secrets(text: str, extra_secrets: Iterable[str] = ()) -> str:
+    """Mask API keys and Bearer tokens in log/diagnostic strings (U5)."""
+    if not text:
+        return text
+    out = str(text)
+    env_key = os.environ.get("S2_API_KEY")
+    candidates = [s for s in (*extra_secrets, env_key) if isinstance(s, str) and len(s) >= 4]
+    for secret in candidates:
+        out = out.replace(secret, "***REDACTED***")
+    out = _SECRET_PATTERNS[0].sub(r"\1\2***REDACTED***\2", out)
+    out = _SECRET_PATTERNS[1].sub(r"\1\2***REDACTED***\2", out)
+    out = _SECRET_PATTERNS[2].sub(r"\1***REDACTED***", out)
+    out = _SECRET_PATTERNS[3].sub(r"\1***REDACTED***", out)
+    return out
+
+
+class SecretRedactingFilter(logging.Filter):
+    """Logging filter that scrubs API keys from log records before emission (U5)."""
+
+    def __init__(self, extra_secrets: Iterable[str] = ()) -> None:
+        super().__init__()
+        self._secrets = tuple(s for s in extra_secrets if isinstance(s, str) and len(s) >= 4)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            rendered = record.getMessage()
+            redacted = redact_secrets(rendered, self._secrets)
+            if redacted != rendered:
+                record.msg = redacted
+                record.args = ()
+        except Exception:
+            pass
+        return True
+
+
+def log_diagnostic(
+    path: Path | None,
+    event: str,
+    *,
+    extra_secrets: Iterable[str] = (),
+    **fields: object,
+) -> dict:
+    """Append one redacted JSONL event to ``diagnostics.jsonl`` on abnormal events (U5)."""
+    entry: dict[str, object] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "event": event,
+        "source_code_hash": source_code_hash(),
+    }
+    for k, v in fields.items():
+        if isinstance(v, str):
+            entry[k] = redact_secrets(v, extra_secrets)
+        else:
+            entry[k] = v
+    if path is not None:
+        line = redact_secrets(json.dumps(entry, ensure_ascii=False, sort_keys=True), extra_secrets)
+        target = Path(path)
+        with _diag_lock:
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("a", encoding="utf-8") as handle:
+                    handle.write(line + "\n")
+            except OSError:
+                pass
+    return entry
 
 
 def reset() -> None:
@@ -258,12 +355,54 @@ def merge_with_base(
         "papers_not_indexed": int(prev_s2.get("papers_not_indexed", 0))
         + int(s2_in.get("s2_not_indexed", 0)),
     }
+    prev_arxiv = previous.get("arxiv", {})
+    merged_arxiv = {
+        "http_429": int(prev_arxiv.get("http_429", 0)) + int(s2_in.get("arxiv_429", 0)),
+        "retry_wait_seconds": float(prev_arxiv.get("retry_wait_seconds", 0.0))
+        + float(s2_in.get("arxiv_retry_wait_seconds", 0.0)),
+        "auto_resumes": int(prev_arxiv.get("auto_resumes", 0))
+        + int(s2_in.get("arxiv_auto_resumes", 0)),
+        "cooldown_seconds": float(prev_arxiv.get("cooldown_seconds", 0.0))
+        + float(s2_in.get("arxiv_cooldown_seconds", 0.0)),
+        "range_resumes": int(prev_arxiv.get("range_resumes", 0))
+        + int(s2_in.get("range_resumes", 0)),
+    }
+    active_sec = sum(merged_stages.values())
+    cooldown_retry_sec = (
+        merged_s2["retry_wait_seconds"]
+        + merged_arxiv["retry_wait_seconds"]
+        + merged_arxiv["cooldown_seconds"]
+    )
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    run_number = int(previous.get("runs", 0)) + 1
+    prev_sessions = list(previous.get("sessions", []))
+    session_active = sum(float(v) for v in stages.values())
+    session_cooldown = (
+        float(s2_in.get("s2_retry_wait_seconds", 0.0))
+        + float(s2_in.get("arxiv_retry_wait_seconds", 0.0))
+        + float(s2_in.get("arxiv_cooldown_seconds", 0.0))
+    )
+    session_entry = {
+        "run": run_number,
+        "started_at": str(s2_in.get("session_started_at") or now_iso),
+        "ended_at": now_iso,
+        "active_seconds": session_active,
+        "cooldown_retry_seconds": session_cooldown,
+        "stage_seconds": {k: float(stages.get(k, 0.0)) for k in STAGES},
+        "papers_done": int(s2_in.get("papers_done", 0)),
+        "source_code_hash": source_code_hash(),
+    }
+    sessions = [*prev_sessions, session_entry]
     return {
-        "runs": int(previous.get("runs", 0)) + 1,
-        "last_run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "runs": run_number,
+        "last_run_at": now_iso,
+        "source_code_hash": source_code_hash(),
         "stage_seconds": merged_stages,
-        "active_seconds": sum(merged_stages.values()),
+        "active_seconds": active_sec,
+        "cooldown_retry_seconds": cooldown_retry_sec,
+        "arxiv": merged_arxiv,
         "s2": merged_s2,
+        "sessions": sessions,
         "resources": {
             "ram_peak_bytes": max(
                 float(prev_res.get("ram_peak_bytes", 0.0)),
@@ -341,3 +480,113 @@ def save_run(
         resources,
         crawl_counters=crawl_counters,
     )
+
+
+def _parse_iso_seconds(value: object) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def aggregate_sessions(inputs: Iterable[dict | Path]) -> dict:
+    """Multi-Session Benchmark Aggregator (U6).
+
+    Combines one or more ``metrics.json`` documents (or file paths), deduplicates
+    overlapping session entries, excludes idle gaps between Colab disconnects/reconnects,
+    and explicitly separates ``active_wall_seconds`` from ``cooldown_retry_seconds``.
+    """
+    docs: list[dict] = []
+    for item in inputs:
+        if isinstance(item, Path) or isinstance(item, str):
+            loaded = load_saved(Path(item))
+            if loaded:
+                docs.append(loaded)
+        elif isinstance(item, dict) and item:
+            docs.append(item)
+
+    if not docs:
+        return {
+            "sessions_count": 0,
+            "active_wall_seconds": 0.0,
+            "cooldown_retry_seconds": 0.0,
+            "effective_wall_seconds": 0.0,
+            "idle_gap_seconds": 0.0,
+            "stage_seconds": {stage: 0.0 for stage in STAGES},
+            "ram_peak_bytes": 0.0,
+            "disk_peak_bytes": 0.0,
+        }
+
+    # Deduplicate session records across overlapping checkpoint snapshots by (run, started_at),
+    # keeping the latest snapshot (largest active_seconds / ended_at) for each session.
+    dedup_sessions: dict[tuple[int, str], dict] = {}
+    ram_peak = 0.0
+    disk_peak = 0.0
+    for doc in docs:
+        res = doc.get("resources") or {}
+        ram_peak = max(ram_peak, float(res.get("ram_peak_bytes", 0.0)))
+        disk_peak = max(disk_peak, float(res.get("disk_peak_bytes", 0.0)))
+        sessions = doc.get("sessions")
+        if isinstance(sessions, list) and sessions:
+            for sess in sessions:
+                if not isinstance(sess, dict):
+                    continue
+                key = (int(sess.get("run", 0)), str(sess.get("started_at", "")))
+                prev = dedup_sessions.get(key)
+                if prev is None or float(sess.get("active_seconds", 0.0)) >= float(
+                    prev.get("active_seconds", 0.0)
+                ):
+                    dedup_sessions[key] = sess
+        else:
+            # Legacy metrics.json without explicit ``sessions`` array: treat doc as 1 session
+            key = (int(doc.get("runs", 1)), str(doc.get("last_run_at", "")))
+            dedup_sessions[key] = {
+                "run": int(doc.get("runs", 1)),
+                "started_at": str(doc.get("last_run_at", "")),
+                "ended_at": str(doc.get("last_run_at", "")),
+                "active_seconds": float(doc.get("active_seconds", 0.0)),
+                "cooldown_retry_seconds": float(
+                    doc.get(
+                        "cooldown_retry_seconds",
+                        float((doc.get("s2") or {}).get("retry_wait_seconds", 0.0)),
+                    )
+                ),
+                "stage_seconds": dict(doc.get("stage_seconds") or {}),
+                "papers_done": int((doc.get("s2") or {}).get("papers_ok", 0)),
+            }
+
+    ordered = sorted(
+        dedup_sessions.values(),
+        key=lambda s: (_parse_iso_seconds(s.get("started_at")) or 0.0, int(s.get("run", 0))),
+    )
+    stage_totals = {stage: 0.0 for stage in STAGES}
+    active_total = 0.0
+    cooldown_total = 0.0
+    idle_gap_total = 0.0
+    prev_end_ts: float | None = None
+
+    for sess in ordered:
+        active_total += float(sess.get("active_seconds", 0.0))
+        cooldown_total += float(sess.get("cooldown_retry_seconds", 0.0))
+        s_stages = sess.get("stage_seconds") or {}
+        for stage in STAGES:
+            stage_totals[stage] += float(s_stages.get(stage, 0.0))
+        start_ts = _parse_iso_seconds(sess.get("started_at"))
+        end_ts = _parse_iso_seconds(sess.get("ended_at"))
+        if prev_end_ts is not None and start_ts is not None and start_ts > prev_end_ts:
+            idle_gap_total += start_ts - prev_end_ts
+        if end_ts is not None:
+            prev_end_ts = max(prev_end_ts or end_ts, end_ts)
+
+    return {
+        "sessions_count": len(ordered),
+        "active_wall_seconds": active_total,
+        "cooldown_retry_seconds": cooldown_total,
+        "effective_wall_seconds": active_total + cooldown_total,
+        "idle_gap_seconds": idle_gap_total,
+        "stage_seconds": stage_totals,
+        "ram_peak_bytes": ram_peak,
+        "disk_peak_bytes": disk_peak,
+    }

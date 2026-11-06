@@ -221,10 +221,10 @@ Bạn nắm giữ **phần thuật toán phức tạp nhất về mặt cấu tr
 
 #### 2. Các nhiệm vụ cụ thể (Mã task: `M2-D1`, `M2-D2`, `M2-D3`, `M2-D4`)
 
-- **`M2-D1` — `src/parsing/bib_extractor.py` (Trích xuất `.bib` và Chuyển đổi `\bibitem` $\rightarrow$ BibTeX):**
+- **`M2-D1` — `src/parsing/bib_extractor.py` (Trích xuất `.bib`, `.bbl` Phụ trợ và Chuyển đổi `\bibitem` $\rightarrow$ BibTeX):**
   - Viết hàm `parse_bib_file(bib_content: str, version: int) -> list[RawBibEntry]`:
-    - Bộ phân tích `.bib` đếm ngoặc nhọn cân bằng `{...}`, giải quyết `@string{...}`, trích xuất chính xác `entrytype`, `citationkey`, `title`, `authors` (tách theo `and`), `year` (`int | None`), `doi`, `journal` (fallback sang `booktitle`/`eprint`), `url` (nếu có `eprint`/`arxivid` mà chưa có `url`, tự sinh `https://arxiv.org/abs/<id>`).
-  - Viết hàm `parse_bibitems(thebibliography_blocks: list[str], version: int) -> list[RawBibEntry]`:
+    - Bộ phân tích `.bib` đếm ngoặc nhọn cân bằng `{...}`, khử comment ngoài giá trị trường nhưng bảo toàn URL mã hóa phần trăm (`%20`, `%7E`), giải quyết `@string{...}` (kèm toán tử nối chuỗi `#`), kế thừa trường `booktitle`/`year` qua `crossref` giữa mục con và mục cha, trích xuất chính xác `entrytype`, `citationkey`, `title`, `authors` (tách theo `and`), `year` (`int | None`), `doi`, `journal` (fallback sang `booktitle`/`eprint`), `url` (nếu có `eprint`/`arxivid` mà chưa có `url`, tự sinh `https://arxiv.org/abs/<id>`).
+  - Viết hàm `parse_bibitems(thebibliography_blocks: list[str], version: int) -> list[RawBibEntry]` (hỗ trợ cả khối `thebibliography` nội dòng trong `.tex` và tệp `.bbl` đã biên dịch sẵn khi gói nguồn thiếu `.bib`):
     - Tách từng mục `\bibitem[optional]{key} ...`.
     - Áp dụng **Anchor-First + 4-Template Cascade Regex**:
       1. Bắt các mỏ neo cứng trước: `DOI`, `URL`, `arXiv ID`, `Year`, và các thẻ `\bibinfo{author}{...}`, `\bibinfo{title}{...}`, `\bibinfo{journal}{...}` (do BibTeX/RevTeX sinh ra).

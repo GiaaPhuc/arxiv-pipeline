@@ -20,7 +20,7 @@ from collections.abc import Iterator
 from itertools import chain, islice
 from pathlib import Path
 
-from crawler import ids, pipeline
+from crawler import ids, metrics, pipeline
 from crawler.config import Config
 
 logger = logging.getLogger("run_crawl")
@@ -53,15 +53,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="N",
         help="auto-backup after every N base arXiv ids seen (needs --backup-dir or env)",
     )
+    p.add_argument(
+        "--auto-resume-rate-limit",
+        action="store_true",
+        help="defer 429-throttled ids, sleep cooldown, and auto-resume in-process (U1)",
+    )
+    p.add_argument(
+        "--s2-only",
+        action="store_true",
+        help="skip arXiv calls and only fetch missing Semantic Scholar references (U2)",
+    )
     return p.parse_args(argv)
 
 
-def _setup_logging(data_dir: Path) -> None:
+def _setup_logging(data_dir: Path, s2_api_key: str | None = None) -> None:
     (data_dir / "logs").mkdir(parents=True, exist_ok=True)
+    redactor = metrics.SecretRedactingFilter((s2_api_key,) if s2_api_key else ())
     handlers: list[logging.Handler] = [
         logging.StreamHandler(),
         logging.FileHandler(data_dir / "logs" / "crawl.log", encoding="utf-8"),
     ]
+    for handler in handlers:
+        handler.addFilter(redactor)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s",
@@ -84,6 +97,10 @@ def main(argv: list[str] | None = None) -> int:
         overrides["backup_dir"] = args.backup_dir
     if args.backup_every_ids is not None:
         overrides["backup_every_ids"] = args.backup_every_ids
+    if args.auto_resume_rate_limit:
+        overrides["auto_resume_rate_limit"] = True
+    if args.s2_only:
+        overrides["s2_only"] = True
     config = Config.from_env(**overrides)
     try:
         all_ids = list(_expand(args.ranges, args.limit))
@@ -106,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    _setup_logging(config.data_dir)
+    _setup_logging(config.data_dir, config.s2_api_key)
     if not config.s2_api_key:
         logger.warning("S2_API_KEY not set: Semantic Scholar will rate-limit heavily")
     try:

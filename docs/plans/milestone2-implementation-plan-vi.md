@@ -232,11 +232,13 @@ Yêu cầu đề bài:
 
 ---
 
-### 3.4. Giải pháp 4: Trích xuất Tham chiếu `\bibitem` & `.bib` (`src/parsing/bib_extractor.py`)
+### 3.4. Giải pháp 4: Trích xuất Tham chiếu `.bib`, `.bbl` Phụ trợ & `\bibitem` (`src/parsing/bib_extractor.py`)
 
-#### A. Luồng 1: Phân tích tệp `.bib` (Brace-Balanced Parser)
-- Quét các khối `@<entrytype>{<citationkey>, ...}` bằng bộ đếm ngoặc nhọn `{...}` (hoặc ngoặc tròn `@article(...)`), bỏ qua `@comment` và `@preamble`, đồng thời thu thập `@string{short = "Full Journal Name"}` để thế vào các trường `journal`/`booktitle`.
+#### A. Luồng 1: Phân tích tệp `.bib` (Brace-Balanced Parser, Bảo toàn URL & Kế thừa `crossref`)
+- **Khử comment `.bib` an toàn:** Xóa comment ngoài giá trị trường nhưng **bảo toàn ký tự `%` trong các chuỗi có ngoặc `{...}`/`"..."` và URL mã hóa phần trăm (`%20`, `%7E`)**.
+- Quét các khối `@<entrytype>{<citationkey>, ...}` bằng bộ đếm ngoặc nhọn `{...}` (hoặc ngoặc tròn `@article(...)`), bỏ qua `@comment` và `@preamble`, đồng thời thu thập `@string{short = "Full Journal Name"}` để thế vào các trường `journal`/`booktitle` (hỗ trợ cả toán tử nối chuỗi `#` của BibTeX).
 - Trích xuất các cặp `field = value` (hỗ trợ cả `{...}`, `"..."`, và số nguyên trần cho `year = 2024`).
+- **Kế thừa trường qua `crossref` (Parent–Child Inheritance):** Nếu một mục con (ví dụ `@inproceedings`) có trường `crossref = {conf_key}`, tự động kế thừa các trường còn khuyết (`booktitle`/`journal`, `year`) từ mục cha `conf_key` trong cùng tệp `.bib`.
 - Ánh xạ sang schema bảng `bibtex`:
   - `entrytype`: chuẩn hóa chữ thường (`inproceedings`, `article`, `book`, `misc`...).
   - `title`: làm sạch `{}` bảo vệ chữ hoa, giải mã dấu LaTeX, chuẩn hóa khoảng trắng.
@@ -246,8 +248,11 @@ Yêu cầu đề bài:
   - `journal`: lấy từ `journal`; nếu trống lấy từ `booktitle`, `school`, `institution`, hoặc `howpublished`.
   - `url`: lấy từ `url`; nếu trống nhưng có trường `eprint` / `arxivid` (ví dụ `2310.12345`), sinh URL chuẩn `https://arxiv.org/abs/2310.12345` (hoặc lưu vào `journal = "arXiv:2310.12345"` nếu `journal` trống).
 
-#### B. Luồng 2: Chuyển đổi `\bibitem` trong `.tex` sang BibTeX bằng Cascade 4 Tầng
-Trong môi trường `\begin{thebibliography}...\end{thebibliography}`, mỗi mục bắt đầu bằng `\bibitem[label]{key}` hoặc `\bibitem{key}`:
+#### B. Luồng 2: Khôi phục Tham chiếu từ tệp `.bbl` Phụ trợ & Chuyển đổi `\bibitem` bằng Cascade 4 Tầng
+- **Khôi phục từ tệp `.bbl` biên dịch sẵn (Compiled Bibliography Recovery):**
+  - Rất nhiều gói nguồn trên arXiv không đính kèm tệp `.bib` gốc mà chỉ nộp tệp `.bbl` đã biên dịch (ví dụ `<root>.bbl` hoặc `<bib_name>.bbl` tương ứng với lệnh `\bibliography{bib_name}`).
+  - Khi tệp `.bib` bị thiếu hoặc tập khóa trích dẫn `\cite{...}` trong văn bản chưa được bao phủ hết bởi `.bib` và môi trường `thebibliography` nội dòng, `gathering.py` và `bib_extractor.py` tự động nạp tệp `.bbl` liên quan với đường biên dịch để giải cứu toàn bộ các mục `\bibitem`.
+- Trong môi trường `\begin{thebibliography}...\end{thebibliography}` (nội dòng hoặc từ `.bbl`), mỗi mục bắt đầu bằng `\bibitem[label]{key}` hoặc `\bibitem{key}`:
 1. **Tầng 0 — Tiền xử lý & Bắt Mỏ neo Cứng (Hard Anchors Extraction):**
    - Nối các dòng trong cùng một `\bibitem`, xóa lệnh `\newblock`, `\bibinfo{...}{...}`, `\bibinfo{...}{...}` (giữ nội dung bên trong `\bibinfo{title}{...}`, `\bibinfo{author}{...}`, `\bibinfo{year}{...}` — **Mẹo cực kỳ đắt giá:** rất nhiều file `.tex` trên arXiv thực chất được dán từ file `.bbl` do `revtex`/`apsrev` sinh ra có chứa thẻ `\bibinfo{author}{...}` và `\bibinfo{title}{...}`! Bắt trực tiếp `\bibinfo` sẽ cho độ chính xác gần như 100% trên các bài Vật lý!).
    - Bắt `doi`: `10\.\d{4,9}/[-._;()/:A-Za-z0-9]+`.

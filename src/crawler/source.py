@@ -32,6 +32,8 @@ from .models import FileEntry, Status, VersionMeta
 logger = logging.getLogger(__name__)
 
 _CHUNK_SIZE = 256 * 1024
+_GIANT_CHUNK_SIZE = 512 * 1024
+_GIANT_ARCHIVE_THRESHOLD = 25 * 1024 * 1024
 _STREAM_CHUNK_SIZE = 128 * 1024
 _MAX_STREAM_ATTEMPTS = 3
 _KEEPALIVE_DRAIN_BYTES = 64 * 1024
@@ -65,6 +67,7 @@ class DownloadResult:
     raw_archive_bytes: int = 0
     retry_after: float | None = None  # seconds from Retry-After on 429
     data: bytes | bytearray | None = None  # in-memory archive bytes when <= spool_max_bytes
+    range_resumed: bool = False  # True when HTTP 206 Range resumed a broken stream (T2)
 
 
 @dataclass
@@ -82,9 +85,50 @@ class _UnsafeArchiveError(ValueError):
     """An archive member cannot safely be represented below the output root."""
 
 
+class _ZeroCopyBytesReader(io.RawIOBase):
+    """Zero-copy seekable binary reader over ``bytes`` / ``bytearray`` (T5)."""
+
+    def __init__(self, data: bytes | bytearray | memoryview) -> None:
+        self._view = memoryview(data)
+        self._pos = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._pos
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if whence == io.SEEK_SET:
+            new_pos = offset
+        elif whence == io.SEEK_CUR:
+            new_pos = self._pos + offset
+        elif whence == io.SEEK_END:
+            new_pos = len(self._view) + offset
+        else:
+            raise ValueError(f"invalid whence: {whence}")
+        if new_pos < 0:
+            raise ValueError("negative seek position")
+        self._pos = new_pos
+        return self._pos
+
+    def readinto(self, b: Any) -> int:
+        rem = len(self._view) - self._pos
+        if rem <= 0:
+            return 0
+        target = memoryview(b).cast("B")
+        n = min(len(target), rem)
+        target[:n] = self._view[self._pos : self._pos + n]
+        self._pos += n
+        return n
+
+
 def _open_gzip_reader(archive: Path | bytes | bytearray) -> gzip.GzipFile:
     if isinstance(archive, (bytes, bytearray)):
-        return gzip.GzipFile(fileobj=io.BytesIO(archive), mode="rb")
+        return gzip.GzipFile(fileobj=io.BufferedReader(_ZeroCopyBytesReader(archive)), mode="rb")
     return gzip.open(archive, "rb")
 
 
@@ -167,40 +211,99 @@ def download_source(
     """Stream one source response into memory (when ``<= spool_max_bytes``) or ``tmp_dir``.
 
     HostClient owns rate limiting and HTTP retries. Transient body read errors
-    (e.g. ``ChunkedEncodingError``) retry within the same budget.
+    (e.g. ``ChunkedEncodingError``) retry within the same budget, sending
+    ``Range: bytes={written}-`` to resume via HTTP 206 Partial Content when supported (T2).
     Aborts the stream early once ``%PDF`` or ``ZIP`` magic bytes are detected (O5/S2),
     draining tiny remainders (``<= 64 KiB``) so keep-alive TLS sockets stay warm.
     """
     path = f"/src/{arxiv_id}v{version}"
     last_exc: BaseException | None = None
-    for attempt in range(_stream_attempts(client)):
-        response = client.get(path, stream=True)
-        temp_path: Path | None = None
-        disk_out: BinaryIO | None = None
+    tmp_dir = Path(tmp_dir)
+    mem_buf = bytearray()
+    temp_path: Path | None = None
+    disk_out: BinaryIO | None = None
+    written = 0
+    header = bytearray()
+    first_chunk_checked = False
+    range_resumed = False
+    max_attempts = _stream_attempts(client)
+
+    def _cleanup_partial() -> None:
+        nonlocal disk_out, temp_path
+        if disk_out is not None:
+            disk_out.close()
+            disk_out = None
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+            temp_path = None
+        mem_buf.clear()
+
+    for attempt in range(max_attempts):
+        req_kwargs: dict[str, Any] = {"stream": True}
+        if attempt > 0 and written > 0:
+            req_kwargs["headers"] = {"Range": f"bytes={written}-"}
+        try:
+            response = client.get(path, **req_kwargs)
+        except BaseException:
+            _cleanup_partial()
+            raise
         try:
             status = response.status_code
             if status == 404:
+                _cleanup_partial()
                 return DownloadResult(path=None, http_status=status)
             if status in (403, 429):
+                _cleanup_partial()
                 retry_after = _retry_after_seconds(response) if status == 429 else None
                 return DownloadResult(path=None, http_status=status, retry_after=retry_after)
+            if status == 416 and written > 0:
+                # Server rejected byte range; reset buffer and retry full object if attempts remain.
+                _cleanup_partial()
+                written = 0
+                header.clear()
+                first_chunk_checked = False
+                if attempt < max_attempts - 1:
+                    continue
+                return DownloadResult(path=None, http_status=status)
             if not 200 <= status < 300:
+                _cleanup_partial()
                 return DownloadResult(path=None, http_status=status)
 
-            tmp_dir = Path(tmp_dir)
-            mem_buf = bytearray()
-            if spool_max_bytes <= 0:
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                fd, name = tempfile.mkstemp(prefix="arxiv-source-", suffix=".part", dir=tmp_dir)
-                temp_path = Path(name)
-                disk_out = os.fdopen(fd, "wb")
+            if status == 206 and written > 0:
+                range_resumed = True
+                if temp_path is not None and disk_out is None:
+                    disk_out = temp_path.open("ab")
+            else:
+                # Server answered 200 OK (full body from byte 0): reset any partial state.
+                if written > 0:
+                    mem_buf.clear()
+                    written = 0
+                    header.clear()
+                    first_chunk_checked = False
+                    if disk_out is not None:
+                        disk_out.seek(0)
+                        disk_out.truncate()
+                    elif temp_path is not None:
+                        disk_out = temp_path.open("wb")
+                if spool_max_bytes <= 0 and disk_out is None:
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    fd, name = tempfile.mkstemp(prefix="arxiv-source-", suffix=".part", dir=tmp_dir)
+                    temp_path = Path(name)
+                    disk_out = os.fdopen(fd, "wb")
 
-            written = 0
-            header = bytearray()
-            first_chunk_checked = False
             content_length = _content_length_bytes(response)
+            expected_total = (
+                (written + content_length if status == 206 else content_length)
+                if content_length is not None
+                else None
+            )
+            read_chunk_size = (
+                _GIANT_CHUNK_SIZE
+                if (expected_total is not None and expected_total >= _GIANT_ARCHIVE_THRESHOLD)
+                else _CHUNK_SIZE
+            )
 
-            for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
+            for chunk in response.iter_content(chunk_size=read_chunk_size):
                 if not chunk:
                     continue
                 if not first_chunk_checked:
@@ -213,15 +316,15 @@ def download_source(
                             stub = bytes(header[:512])
                             total_seen = written + len(chunk)
                             written = (
-                                max(content_length, total_seen)
-                                if content_length is not None
+                                max(expected_total, total_seen)
+                                if expected_total is not None
                                 else total_seen
                             )
                             if (
-                                content_length is not None
-                                and content_length - total_seen <= _KEEPALIVE_DRAIN_BYTES
+                                expected_total is not None
+                                and expected_total - total_seen <= _KEEPALIVE_DRAIN_BYTES
                             ):
-                                for _ in response.iter_content(chunk_size=_CHUNK_SIZE):
+                                for _ in response.iter_content(chunk_size=read_chunk_size):
                                     pass
                             if disk_out is not None:
                                 disk_out.seek(0)
@@ -231,14 +334,16 @@ def download_source(
                                 disk_out = None
                                 return DownloadResult(
                                     path=temp_path,
-                                    http_status=status,
+                                    http_status=200,
                                     raw_archive_bytes=written,
+                                    range_resumed=range_resumed,
                                 )
                             return DownloadResult(
                                 path=None,
-                                http_status=status,
+                                http_status=200,
                                 raw_archive_bytes=written,
                                 data=stub,
+                                range_resumed=range_resumed,
                             )
 
                 if disk_out is None and written + len(chunk) > spool_max_bytes:
@@ -259,40 +364,45 @@ def download_source(
             if disk_out is not None:
                 disk_out.close()
                 disk_out = None
-                return DownloadResult(path=temp_path, http_status=status, raw_archive_bytes=written)
+                return DownloadResult(
+                    path=temp_path,
+                    http_status=200,
+                    raw_archive_bytes=written,
+                    range_resumed=range_resumed,
+                )
             return DownloadResult(
                 path=None,
-                http_status=status,
+                http_status=200,
                 raw_archive_bytes=written,
                 data=mem_buf,
+                range_resumed=range_resumed,
             )
         except _STREAM_RETRY_ERRORS as exc:
             last_exc = exc
             if disk_out is not None:
+                disk_out.flush()
                 disk_out.close()
                 disk_out = None
-            if temp_path is not None:
-                temp_path.unlink(missing_ok=True)
-            if attempt >= _stream_attempts(client) - 1:
+            if attempt >= max_attempts - 1:
+                _cleanup_partial()
                 raise
             logger.warning(
-                "stream %sv%d failed (%s); retry %d",
+                "stream %sv%d failed at %d bytes (%s); retry %d",
                 arxiv_id,
                 version,
+                written,
                 type(exc).__name__,
                 attempt + 1,
             )
         except BaseException:
-            if disk_out is not None:
-                disk_out.close()
-                disk_out = None
-            if temp_path is not None:
-                temp_path.unlink(missing_ok=True)
+            _cleanup_partial()
             raise
         finally:
             if disk_out is not None:
                 disk_out.close()
+                disk_out = None
             response.close()
+    _cleanup_partial()
     assert last_exc is not None
     raise last_exc
 
@@ -319,7 +429,7 @@ def _safe_member_path(name: str) -> tuple[PurePosixPath, Path]:
 
 
 def _is_kept(relative: PurePosixPath) -> bool:
-    return relative.suffix.lower() in {".tex", ".bib"}
+    return relative.suffix.lower() in {".tex", ".bib", ".bbl"}
 
 
 class _CountingChunkStream:

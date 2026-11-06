@@ -88,8 +88,8 @@ def _check_version_tree(version_dir: Path, data_dir: Path) -> list[str]:
     for file_path in tex_dir.rglob("*"):
         if not file_path.is_file():
             continue
-        if file_path.suffix.lower() not in (".tex", ".bib"):
-            problems.append(f"{_rel(file_path, data_dir)}: only .tex/.bib allowed under tex/")
+        if file_path.suffix.lower() not in (".tex", ".bib", ".bbl"):
+            problems.append(f"{_rel(file_path, data_dir)}: only .tex/.bib/.bbl allowed under tex/")
     return problems
 
 

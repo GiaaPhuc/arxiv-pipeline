@@ -290,3 +290,11 @@ def test_discover_subbatch_error_entry_falls_back_to_individual_queries():
     found, missing = discover(["2310.00001", "2310.99999"], DummyClient(), Config.from_env())
     assert [p.arxiv_id for p in found] == ["2310.00001"]
     assert missing == ["2310.99999"]
+
+
+def test_high_density_discovery_defaults_250_batch_and_50_confirm():
+    from crawler.discovery import _CONFIRM_BATCH_SIZE
+
+    cfg = Config()
+    assert cfg.discovery_batch_size == 250
+    assert _CONFIRM_BATCH_SIZE == 50

@@ -279,17 +279,79 @@ def test_arxiv_rate_limiter_adapts_above_3s_floor_on_429_and_recovers():
 
     limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep)
     limiter.note_429()
-    assert limiter._min_interval == 3.5  # noqa: SLF001
+    assert limiter._min_interval == 3.15  # noqa: SLF001
+    limiter.note_429()
+    limiter.note_429()
+    assert limiter._min_interval == 3.30  # T1 cap: floor + 0.30s = 3.30s  # noqa: SLF001
 
     limiter.wait()
     limiter.done()
     limiter.wait()
     limiter.done()
-    assert sleeps == [3.5]
+    assert sleeps == [3.3]
 
-    for _ in range(80):
+    # Recover -0.15s after 5 successes, back to 3.0s after 10 successes:
+    for _ in range(5):
+        limiter.note_success()
+    assert limiter._min_interval == 3.15  # noqa: SLF001
+    for _ in range(5):
         limiter.note_success()
     assert limiter._min_interval == 3.0  # never drops below configured 3.0s floor  # noqa: SLF001
+
+    limiter.note_429()
+    assert limiter._min_interval == 3.15  # noqa: SLF001
+    limiter.reset_interval()
+    assert limiter._min_interval == 3.0  # noqa: SLF001
+
+
+def test_unified_retry_clock_does_not_stack_retry_sleep_and_rate_limiter():
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(round(seconds, 4))
+        now[0] += seconds
+
+    limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep)
+    config = Config(contact="test@example.com", arxiv_min_interval=3.0, max_retries=3)
+    client = HostClient("https://export.arxiv.org", limiter, config)
+
+    s503 = MagicMock(spec=requests.Response)
+    s503.status_code = 503
+    s503.close = MagicMock()
+    ok = MagicMock(spec=requests.Response)
+    ok.status_code = 200
+    client._session.get = MagicMock(side_effect=[s503, s503, s503, ok])  # noqa: SLF001
+
+    assert client.get("/api/query?id_list=1").status_code == 200
+    # Attempt 0 -> 1: max(3.0, 2^0=1.0) = 3.0s
+    # Attempt 1 -> 2: max(3.0, 2^1=2.0) = 3.0s
+    # Attempt 2 -> 3: max(3.0, 2^2=4.0) = 4.0s (NOT 3.0 + 4.0 = 7.0s)
+    assert sleeps == [3.0, 3.0, 4.0]
+
+
+def test_persistent_rate_state_roundtrip_and_cooldown_wait(tmp_path):
+    from crawler.http import load_rate_state, save_rate_state
+
+    state_file = tmp_path / "logs" / "rate_state.json"
+    saved = save_rate_state(state_file, arxiv_cooldown_until=105.0, s2_cooldown_until=102.0)
+    assert saved == {"arxiv_cooldown_until": 105.0, "s2_cooldown_until": 102.0}
+    assert load_rate_state(state_file) == saved
+
+    now = [0.0]
+    sleeps: list[float] = []
+    limiter = RateLimiter(
+        3.0,
+        clock=lambda: now[0],
+        sleep=lambda s: sleeps.append(round(s, 4)) or now.__setitem__(0, now[0] + s),
+    )
+    limiter.set_cooldown_until(112.5, wall_clock=lambda: 100.0)
+    limiter.wait()
+    limiter.done()
+    assert sleeps == [12.5]
 
 
 def test_arxiv_src_sets_identity_accept_encoding():

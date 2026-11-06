@@ -653,3 +653,56 @@ def test_inflight_stream_retries_mid_tar_network_drop_instead_of_marking_corrupt
     assert res.meta is not None and res.meta.status is Status.OK
     assert (dest / "main.tex").is_file()
     assert not list((tmp_path / "retry").glob(".tex-staging-*"))
+
+
+def test_tar_gz_keeps_supplementary_bbl_files_alongside_tex_and_bib(tmp_path: Path) -> None:
+    import validate_corpus
+
+    archive_path = _write_tar(
+        tmp_path / "with-bbl.tar.gz",
+        [
+            ("main.tex", b"\\documentclass{article}\\input{main.bbl}\n"),
+            ("main.bbl", b"\\begin{thebibliography}{1}\\bibitem{a} Ref.\\end{thebibliography}\n"),
+            ("refs.bib", b"@article{a, title={Ref}}\n"),
+            ("fig.pdf", b"%PDF-1.4 ignored figure\n"),
+        ],
+    )
+    dest = tmp_path / "data" / "papers" / "2408-06045" / "v1" / "tex"
+    meta = _extract(archive_path, dest)
+    assert meta.status is Status.OK
+    assert {e.path for e in meta.files} == {"main.tex", "main.bbl", "refs.bib"}
+    assert (dest / "main.bbl").is_file()
+    assert not (dest / "fig.pdf").exists()
+    assert validate_corpus._check_version_tree(dest.parent, tmp_path / "data") == []
+
+
+def test_download_source_resumes_with_http_206_byte_range_on_mid_stream_drop(
+    tar_gz_source: Path,
+    tmp_path: Path,
+) -> None:
+    payload = tar_gz_source.read_bytes()
+    split_at = len(payload) // 2
+    part1 = FakeResponse(
+        200,
+        [payload[:split_at]],
+        requests.exceptions.ChunkedEncodingError("dropped at 50%"),
+    )
+    part2 = FakeResponse(206, [payload[split_at:]])
+    client = _RetryFakeClient([part1, part2])
+
+    res = download_source(
+        client,
+        "2408.06045",
+        1,
+        tmp_path / ".tmp",
+        spool_max_bytes=len(payload) + 1024,
+    )
+    assert res.http_status == 200
+    assert res.range_resumed is True
+    assert res.raw_archive_bytes == len(payload)
+    assert bytes(res.data or b"") == payload
+    assert client.calls[0] == ("/src/2408.06045v1", {"stream": True})
+    assert client.calls[1] == (
+        "/src/2408.06045v1",
+        {"stream": True, "headers": {"Range": f"bytes={split_at}-"}},
+    )
