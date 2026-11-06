@@ -153,3 +153,32 @@ def test_flush_run_is_idempotent_within_one_session_and_accumulates_across_sessi
     assert snap3["stage_seconds"]["download"] == 30.0
     assert snap3["s2"]["papers_ok"] == 25
     assert snap3["resources"]["ram_peak_bytes"] == 150.0
+
+
+def test_save_run_with_base_previous_and_flush_live_avoid_double_counting(tmp_path: Path):
+    path = tmp_path / "logs" / "metrics.json"
+    metrics.add_stage_seconds("download", 1.25)
+    metrics.add_stage_seconds("extract", 0.75)
+    assert metrics.stage_seconds()["download"] == pytest.approx(1.25)
+    assert metrics.stage_seconds()["extract"] == pytest.approx(0.75)
+
+    base = metrics.load_saved(path)
+    live = metrics.flush_live(
+        path,
+        base,
+        metrics.stage_seconds(),
+        {"ram_peak_bytes": 64.0, "ram_mean_bytes": 48.0, "ram_samples": 2.0},
+    )
+    assert live["runs"] == 1
+    assert live["active_seconds"] == pytest.approx(2.0)
+
+    metrics.add_stage_seconds("download", 0.5)
+    final = metrics.save_run(
+        path,
+        metrics.stage_seconds(),
+        {"ram_peak_bytes": 80.0, "ram_mean_bytes": 56.0, "ram_samples": 4.0},
+        base_previous=base,
+    )
+    assert final["runs"] == 1
+    assert final["stage_seconds"]["download"] == pytest.approx(1.75)
+    assert final["active_seconds"] == pytest.approx(2.5)

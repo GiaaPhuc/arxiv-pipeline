@@ -10,11 +10,12 @@ Design
 ------
 * **arXiv network thread** (main thread, one connection, >= 3.0 s Start-to-Start): for
   chunks of ``2 * discovery_batch_size`` (300) ids it discovers metadata in batches of 150
-  (reusing ``<updated>`` for ``vN``), writes ``paper.json``, streams ``/src/{id}vK`` into
-  ``.tmp/`` (aborting early on ``%PDF``), and hands each package to ``extract_queue``.
-* **Extract worker** (one thread, bounded ``extract_queue`` of 8): performs 1-pass tar/gz
-  extraction of ``.tex``/``.bib`` into ``.vK.part/``, swaps into ``vK/`` with ``os.replace``,
-  and commits the manifest row LAST, then queues completed papers to ``s2_queue``.
+  (reusing ``<updated>`` for ``vN``), writes ``paper.json``, cut-through streams
+  ``/src/{id}vK`` directly into ``.vK.part/tex/`` (0 temp-file I/O, aborting at 512 B on
+  ``%PDF``/``ZIP``), and hands each ``VersionMeta`` to ``extract_queue``.
+* **Extract worker** (one thread, bounded ``extract_queue`` of 6): writes ``meta.json`` into
+  ``.vK.part/``, swaps into ``vK/`` with ``os.replace``, and commits the manifest row LAST,
+  then queues completed papers to ``s2_queue``.
 * **S2 worker** (one thread, >= 1.1 s End-to-Start, adaptive after 429): batches papers
   (``POST /paper/batch``, up to 100 ids) once all versions are processed, writes
   ``references.json`` into every version dir and, last, ``s2_references.raw.json.gz``.
@@ -56,7 +57,12 @@ from .ids import id_to_dirname, normalize_id, split_version
 from .manifest import Manifest, atomic_write
 from .models import FileEntry, PaperMeta, Status, VersionMeta
 from .s2 import S2_BATCH_SIZE, S2Result, fetch_references_batch
-from .source import DownloadResult, download_source, extract_tex_bib
+from .source import (
+    DownloadResult,
+    InFlightResult,
+    download_and_extract_source,
+    extract_tex_bib,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +91,7 @@ class _S2Job:
 class _ExtractJob:
     paper: PaperMeta
     version: int
+    meta: VersionMeta | None = None
     download: DownloadResult | None = None
     download_error: BaseException | None = None
     is_last_for_paper: bool = False
@@ -189,34 +196,42 @@ def _version_date(paper: PaperMeta, version: int) -> str | None:
     return paper.revised_dates[index] if 0 <= index < len(paper.revised_dates) else None
 
 
-def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResult:
-    """Download ``/src/{id}vK`` (spooled in RAM when ``<= spool_max_bytes``)."""
+def _stream_extract_version(run: _Run, paper: PaperMeta, version: int, part: Path) -> VersionMeta:
+    """Cut-through stream ``/src/{id}vK`` directly into ``part / 'tex'`` (zero ``.tmp/`` I/O)."""
     arxiv_id = paper.arxiv_id
-    download: DownloadResult | None = None
+    result: InFlightResult | None = None
     for rate_attempt in range(_ARXIV_MAX_429_ATTEMPTS):
-        with metrics.stage_timer("download"):
-            download = download_source(
+        shutil.rmtree(part, ignore_errors=True)
+        started = time.perf_counter()
+        try:
+            result = download_and_extract_source(
                 run.arxiv,
                 arxiv_id,
                 version,
-                run.tmp_dir,
-                spool_max_bytes=run.config.spool_max_bytes,
+                part / "tex",
+                run.config,
             )
-        if download.http_status == 403:
+        except BaseException:
+            metrics.add_stage_seconds("download", time.perf_counter() - started)
+            raise
+        metrics.add_stage_seconds("download", max(result.network_seconds, 1e-6))
+        if result.extract_seconds > 0:
+            metrics.add_stage_seconds("extract", result.extract_seconds)
+        if result.http_status == 403:
             raise StopCrawl(f"arXiv answered HTTP 403 for {arxiv_id}v{version}")
-        if download.http_status == 429:
+        if result.http_status == 429:
             _wait_arxiv_429(
                 run,
                 context=f"for {arxiv_id}v{version}",
                 rate_attempt=rate_attempt,
-                download=download,
+                download=result,
             )
             continue
-        if 200 <= download.http_status < 300:
+        if 200 <= result.http_status < 300:
             run.arxiv.limiter.note_success()
         break
-    assert download is not None
-    return download
+    assert result is not None and result.meta is not None
+    return result.meta
 
 
 def _extract_version(
@@ -267,21 +282,25 @@ def _install_version(final: Path, part: Path, old: Path, meta: VersionMeta) -> N
 
 
 def _consume_extract_job(run: _Run, job: _ExtractJob) -> Status:
-    """Extract, install ``vK/`` atomically, record in manifest, and queue S2 when paper done."""
+    """Install ``vK/`` atomically, record in manifest, and queue S2 when paper done."""
     paper = job.paper
     version = job.version
     paper_dir = _paper_dir(run, paper.arxiv_id)
     final = paper_dir / f"v{version}"
     part = paper_dir / f".v{version}.part"
     old = paper_dir / f".v{version}.old"
-    shutil.rmtree(part, ignore_errors=True)
     shutil.rmtree(old, ignore_errors=True)
+    if job.meta is None:
+        shutil.rmtree(part, ignore_errors=True)
 
     try:
         if job.download_error is not None:
             raise job.download_error
-        assert job.download is not None
-        meta = _extract_version(run, paper, version, job.download, part)
+        if job.meta is not None:
+            meta = job.meta
+        else:
+            assert job.download is not None
+            meta = _extract_version(run, paper, version, job.download, part)
     except Exception as exc:  # one bad pair must never stop the batch
         logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
         shutil.rmtree(part, ignore_errors=True)
@@ -294,7 +313,8 @@ def _consume_extract_job(run: _Run, job: _ExtractJob) -> Status:
     meta.s2_scope = "paper"
 
     try:
-        _install_version(final, part, old, meta)
+        with metrics.stage_timer("extract"):
+            _install_version(final, part, old, meta)
     except OSError as exc:  # e.g. antivirus lock or full disk: do not stop the batch
         logger.error("%s v%d: cannot write the version dir: %r", paper.arxiv_id, version, exc)
         shutil.rmtree(part, ignore_errors=True)
@@ -320,7 +340,7 @@ def _consume_extract_job(run: _Run, job: _ExtractJob) -> Status:
 
 
 def _extract_worker(run: _Run) -> None:
-    """Consumer thread (O3): extracts downloaded packages and commits manifest rows."""
+    """Consumer thread (O3): installs extracted version dirs and commits manifest rows."""
     while True:
         job = run.extract_queue.get()
         try:
@@ -359,20 +379,23 @@ def _process_paper(run: _Run, paper: PaperMeta) -> None:
         if run.stop.is_set():
             return
         is_last = idx == len(pending_versions) - 1
+        part = paper_dir / f".v{version}.part"
         try:
-            download = _download_version(run, paper, version)
+            meta = _stream_extract_version(run, paper, version, part)
             run.extract_queue.put(
                 _ExtractJob(
                     paper=paper,
                     version=version,
-                    download=download,
+                    meta=meta,
                     is_last_for_paper=is_last,
                 )
             )
         except StopCrawl:
+            shutil.rmtree(part, ignore_errors=True)
             raise
         except Exception as exc:  # one bad pair must never stop the batch
             logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
+            shutil.rmtree(part, ignore_errors=True)
             run.extract_queue.put(
                 _ExtractJob(
                     paper=paper,
@@ -565,7 +588,9 @@ def _retry_after(response: requests.Response | None, default: float = 60.0) -> f
     return min(max(value, 30.0), 600.0)
 
 
-def _retry_after_download(download: DownloadResult, default: float = 60.0) -> float:
+def _retry_after_download(
+    download: DownloadResult | InFlightResult, default: float = 60.0
+) -> float:
     if download.retry_after is not None:
         return min(max(download.retry_after, 30.0), 600.0)
     return default
@@ -577,7 +602,7 @@ def _wait_arxiv_429(
     context: str,
     rate_attempt: int,
     response: requests.Response | None = None,
-    download: DownloadResult | None = None,
+    download: DownloadResult | InFlightResult | None = None,
 ) -> None:
     """Sleep after arXiv 429; raise ``StopCrawl`` when the retry budget is exhausted."""
     run.arxiv.limiter.note_429()
@@ -793,16 +818,17 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
             if run.stop.is_set():
                 return
             _process_paper(run, paper)
+            now_paper = time.monotonic()
+            if now_paper - last_metrics_flush >= 15.0:
+                _flush_metrics(run)
+                last_metrics_flush = now_paper
         seen += len(chunk)
         ckpt_due = _checkpoint_due(run, seen)
-        now = time.monotonic()
         if ckpt_due:
             run.extract_queue.join()
-            _flush_metrics(run)
-            last_metrics_flush = now
-        elif now - last_metrics_flush >= 15.0:
-            _flush_metrics(run)
-            last_metrics_flush = now
+        now = time.monotonic()
+        _flush_metrics(run)
+        last_metrics_flush = now
         logger.info(
             "progress %d/%d ids | %s | s2 queue %d | %.0f s",
             seen,
@@ -846,7 +872,6 @@ def run(
         base_metrics=base_metrics,
         sampler=sampler,
     )
-    state.tmp_dir.mkdir(parents=True, exist_ok=True)
 
     metrics.reset()
     sampler.start()

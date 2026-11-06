@@ -187,10 +187,11 @@ class HostClient:
         self.limiter = limiter
         self._config = config
         self._session = requests.Session()
-        adapter = HTTPAdapter(pool_connections=1, pool_maxsize=1)
+        adapter = HTTPAdapter(pool_connections=1, pool_maxsize=1, pool_block=True)
         self._session.mount("https://", adapter)
         self._session.mount("http://", adapter)
         self._session.headers["User-Agent"] = config.user_agent
+        self._session.headers["Connection"] = "keep-alive"
         self._is_s2 = S2_API_HOST in base_url
         if self._is_s2 and config.s2_api_key:
             self._session.headers["x-api-key"] = config.s2_api_key
