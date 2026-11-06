@@ -11,11 +11,14 @@ arXiv API and /src/ share ONE limiter (same host, export.arxiv.org, one connecti
 
 from __future__ import annotations
 
+import json
 import logging
 import random
+import socket
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import BinaryIO
 from urllib.parse import urljoin, urlsplit
 
@@ -23,11 +26,33 @@ import requests
 from requests.adapters import HTTPAdapter
 
 from .config import ARXIV_API_HOST, S2_API_HOST, Config
+from .manifest import atomic_write
 
 logger = logging.getLogger(__name__)
 
 # Rate-limit / block responses: stop the run; caller notifies the team (CONTRIBUTING.md).
 _STOP_STATUSES = frozenset({403, 429})
+
+
+def _default_sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+class _SingleConnAdapter(HTTPAdapter):
+    """Single-connection HTTPAdapter with tuned TCP socket options for large /src/ streams (T5)."""
+
+    def init_poolmanager(self, connections: int, maxsize: int, block: bool = False, **pool_kwargs):
+        sock_opts = list(
+            getattr(
+                HTTPAdapter,
+                "DEFAULT_SOCKET_OPTIONS",
+                [(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)],
+            )
+        )
+        if hasattr(socket, "SO_RCVBUF"):
+            sock_opts.append((socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024))
+        pool_kwargs.setdefault("socket_options", sock_opts)
+        super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
 
 
 class _StreamResponse:
@@ -72,14 +97,19 @@ class RateLimiter:
         self,
         min_interval: float,
         clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], None] = _default_sleep,
     ) -> None:
         self._base_floor = min_interval
         self._min_interval = min_interval
-        # Cap at floor + 1 s: a sustained throttle (429 every ~20 requests, measured in
-        # crawl.log) pinned the old 6 s cap and halved throughput without avoiding 429.
-        self._max_adaptive_interval = min_interval + 1.0 if min_interval > 0 else 0.0
+        # T1 (v3.2): after sleeping Retry-After, upstream rate-limit window has already reset;
+        # nudge only +0.15 s (capped at floor + 0.30 s = 3.30 s) and recover after 5 successes.
+        self._adaptive_step = 0.15
+        self._max_adaptive_interval = round(min_interval + 0.30, 4) if min_interval > 0 else 0.0
+        self._recover_streak = 5
         self._adaptive_streak = 0
+        self._retry_backoff = 0.0
+        self._cooldown_until = 0.0
+        self._wall_clock: Callable[[], float] = time.time
         self._clock = clock
         self._sleep = sleep
         self._lock = threading.Lock()
@@ -96,15 +126,43 @@ class RateLimiter:
         self._lock.acquire()
         self._active_thread = ident
 
+    def schedule_retry_backoff(self, delay: float) -> None:
+        """Schedule unified retry delay so ``wait()`` sleeps ``max(min_interval, delay)`` (T4)."""
+        self._retry_backoff = max(self._retry_backoff, max(float(delay), 0.0))
+
+    def set_cooldown_until(
+        self,
+        epoch_until: float,
+        *,
+        wall_clock: Callable[[], float] = time.time,
+    ) -> None:
+        """Honor a persistent cross-process cooldown deadline before the next request (U3)."""
+        self._wall_clock = wall_clock
+        self._cooldown_until = max(self._cooldown_until, float(epoch_until))
+
+    def _consume_cooldown_remaining(self) -> float:
+        if self._cooldown_until <= 0.0:
+            return 0.0
+        rem = self._cooldown_until - self._wall_clock()
+        self._cooldown_until = 0.0
+        return max(0.0, rem)
+
     def wait(self) -> None:
         """Acquire single-connection slot and sleep until Start-to-Start interval elapses."""
         self._acquire_slot()
         try:
+            effective_interval = max(self._min_interval, self._retry_backoff)
+            self._retry_backoff = 0.0
+            cooldown_rem = self._consume_cooldown_remaining()
+            remaining = 0.0
             if self._last_request_at is not None:
                 elapsed = self._clock() - self._last_request_at
-                remaining = self._min_interval - elapsed
-                if remaining > 0:
-                    self._sleep(remaining)
+                remaining = max(0.0, effective_interval - elapsed)
+            elif effective_interval > self._min_interval:
+                remaining = effective_interval
+            remaining = max(remaining, cooldown_rem)
+            if remaining > 0:
+                self._sleep(remaining)
             self._last_request_at = self._clock()
         except BaseException:
             self._active_thread = None
@@ -119,18 +177,29 @@ class RateLimiter:
             self._lock.release()
 
     def note_429(self) -> None:
-        """Gently widen the Start-to-Start interval above floor on upstream 429."""
+        """Gently widen the Start-to-Start interval (+0.15 s, cap floor + 0.30 s) on 429 (T1)."""
         self._adaptive_streak = 0
-        self._min_interval = min(self._min_interval + 0.5, self._max_adaptive_interval)
+        if self._max_adaptive_interval > 0:
+            self._min_interval = round(
+                min(self._min_interval + self._adaptive_step, self._max_adaptive_interval), 4
+            )
 
     def note_success(self) -> None:
-        """Ease adaptive penalty back down toward ``_base_floor`` (>= 3.0 s on arXiv)."""
+        """Ease adaptive penalty back down toward ``_base_floor`` (>= 3.0 s on arXiv) (T1)."""
         if self._min_interval <= self._base_floor:
             return
         self._adaptive_streak += 1
-        if self._adaptive_streak >= 10:
-            self._min_interval = max(self._base_floor, self._min_interval - 0.5)
+        if self._adaptive_streak >= self._recover_streak:
+            self._min_interval = round(
+                max(self._base_floor, self._min_interval - self._adaptive_step), 4
+            )
             self._adaptive_streak = 0
+
+    def reset_interval(self) -> None:
+        """Reset adaptive interval back to ``_base_floor`` after a full cooldown (U1)."""
+        self._min_interval = self._base_floor
+        self._adaptive_streak = 0
+        self._retry_backoff = 0.0
 
 
 class AdaptiveRateLimiter(RateLimiter):
@@ -143,7 +212,7 @@ class AdaptiveRateLimiter(RateLimiter):
         max_interval: float = 5.0,
         success_streak_to_recover: int = 50,
         clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], None] = _default_sleep,
     ) -> None:
         super().__init__(min_interval, clock=clock, sleep=sleep)
         self._base_interval = min_interval
@@ -154,11 +223,20 @@ class AdaptiveRateLimiter(RateLimiter):
     def wait(self) -> None:
         self._acquire_slot()
         try:
+            effective_interval = max(self._min_interval, self._retry_backoff)
+            self._retry_backoff = 0.0
+            cooldown_rem = self._consume_cooldown_remaining()
+            remaining = 0.0
             if self._last_done_at is not None:
                 elapsed = self._clock() - self._last_done_at
-                remaining = self._min_interval - elapsed
+                remaining = max(0.0, effective_interval - elapsed)
                 if remaining > 0:
-                    self._sleep(remaining + random.uniform(0.0, 0.05))
+                    remaining += random.uniform(0.0, 0.05)
+            elif effective_interval > self._min_interval:
+                remaining = effective_interval
+            remaining = max(remaining, cooldown_rem)
+            if remaining > 0:
+                self._sleep(remaining)
             self._last_request_at = self._clock()
         except BaseException:
             self._active_thread = None
@@ -189,7 +267,7 @@ class HostClient:
         self.limiter = limiter
         self._config = config
         self._session = requests.Session()
-        adapter = HTTPAdapter(pool_connections=1, pool_maxsize=1)
+        adapter = _SingleConnAdapter(pool_connections=1, pool_maxsize=1)
         self._session.mount("https://", adapter)
         self._session.mount("http://", adapter)
         self._session.headers["User-Agent"] = config.user_agent
@@ -213,8 +291,8 @@ class HostClient:
         return 500 <= status < 600
 
     def _sleep_for_retry(self, attempt: int) -> None:
-        delay = min(2**attempt, 60.0)
-        time.sleep(delay)
+        delay = min(float(2**attempt), 60.0)
+        self.limiter.schedule_retry_backoff(delay)
 
     def get(self, path: str, **kwargs) -> requests.Response:
         url = self._full_url(path)
@@ -324,6 +402,38 @@ class HostClient:
             finally:
                 self.limiter.done()
         return written
+
+
+def load_rate_state(path: Path) -> dict[str, float]:
+    """Read persisted cross-process cooldown timestamps from ``rate_state.json`` (U3)."""
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            k: float(v)
+            for k, v in raw.items()
+            if k in {"arxiv_cooldown_until", "s2_cooldown_until"} and isinstance(v, (int, float))
+        }
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def save_rate_state(
+    path: Path,
+    *,
+    arxiv_cooldown_until: float | None = None,
+    s2_cooldown_until: float | None = None,
+) -> dict[str, float]:
+    """Atomically persist cooldown timestamps to ``data/logs/rate_state.json`` (U3)."""
+    state = load_rate_state(path)
+    if arxiv_cooldown_until is not None:
+        state["arxiv_cooldown_until"] = float(arxiv_cooldown_until)
+    if s2_cooldown_until is not None:
+        state["s2_cooldown_until"] = float(s2_cooldown_until)
+    with atomic_write(Path(path)) as tmp:
+        tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+    return state
 
 
 def make_arxiv_client(config: Config) -> HostClient:

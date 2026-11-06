@@ -9,6 +9,7 @@ Environment variables:
     CRAWLER_ARXIV_MIN_INTERVAL  seconds between arXiv requests (default 3.0, min 3.0)
     CRAWLER_BACKUP_DIR          copy ``data/`` here periodically (Colab: Drive path)
     CRAWLER_BACKUP_EVERY_IDS    trigger backup every N base arXiv ids seen (default 0 = off)
+    CRAWLER_AUTO_RESUME_RATE_LIMIT  1/true to defer 429-throttled ids and auto-resume after cooldown
 """
 
 from __future__ import annotations
@@ -32,9 +33,12 @@ class Config:
     max_extract_bytes: int = 2 * 1024**3  # zip-bomb guard (uncompressed total)
     spool_max_bytes: int = 96 * 1024 * 1024  # keep archives <= 96 MiB in RAM (skip .tmp disk I/O)
     request_timeout: tuple[float, float] = (30.0, 120.0)  # (connect, read) seconds per request
-    discovery_batch_size: int = 150  # ids per arXiv ``id_list`` call (O2)
+    discovery_batch_size: int = 250  # ids per arXiv ``id_list`` call (O2 / T3)
     backup_dir: Path | None = None  # optional mirror for Colab / long runs
     backup_every_ids: int = 0  # 0 disables automatic checkpoint backups
+    auto_resume_rate_limit: bool = False  # U1: defer rate-limited chunk & sleep cooldown
+    rate_limit_cooldown_seconds: float = 180.0  # U1: cooldown window (180s - 600s) before resume
+    s2_only: bool = False  # U2: skip arXiv network calls and only backfill S2 references
 
     @property
     def user_agent(self) -> str:
@@ -81,6 +85,13 @@ class Config:
             except ValueError:
                 pass
 
+        auto_resume_raw = (
+            os.environ.get("CRAWLER_AUTO_RESUME_RATE_LIMIT")
+            or local_vars.get("CRAWLER_AUTO_RESUME_RATE_LIMIT")
+            or ""
+        ).strip()
+        auto_resume_rate_limit = auto_resume_raw.lower() in {"1", "true", "yes", "on"}
+
         values = {
             "data_dir": Path(data_dir_raw),
             "contact": os.environ.get("CRAWLER_CONTACT") or local_vars.get("CRAWLER_CONTACT") or "",
@@ -88,6 +99,7 @@ class Config:
             "arxiv_min_interval": arxiv_min_interval,
             "backup_dir": Path(backup_dir_raw) if backup_dir_raw else None,
             "backup_every_ids": backup_every_ids,
+            "auto_resume_rate_limit": auto_resume_rate_limit,
         }
         values.update(overrides)
         return cls(**values)

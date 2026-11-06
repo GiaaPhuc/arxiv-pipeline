@@ -791,3 +791,84 @@ def test_inflight_pipeline_never_creates_tmp_dir_and_records_stage_metrics(tmp_p
     metrics_doc = _read(config.data_dir / "logs" / "metrics.json")
     assert metrics_doc["stage_seconds"]["download"] > 0
     assert metrics_doc["stage_seconds"]["extract"] > 0
+
+
+@responses.activate
+def test_auto_resume_rate_limit_defers_throttled_paper_and_completes_after_cooldown(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    # 2408.00004v1 succeeds; v2 hits four 429s on pass 1, then succeeds on deferred pass:
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v1", body=archive)
+    for _ in range(4):
+        responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", status=429)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v3", body=archive)
+    _mock_s2()
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        auto_resume_rate_limit=True,
+        rate_limit_cooldown_seconds=0.01,
+    )
+    with _mock_fast_429_wait():
+        summary = pipeline.run(["2408.00004", "2408.00002"], config)
+
+    assert summary["ok"] == 4
+    src_calls = _calls(f"{ARXIV}/src/")
+    # 2408.00002v1 is crawled right after cooldown, BEFORE the deferred retry of 2408.00004v2:
+    idx_00002 = src_calls.index(f"{ARXIV}/src/2408.00002v1")
+    idx_00004_v3 = src_calls.index(f"{ARXIV}/src/2408.00004v3")
+    assert idx_00002 < idx_00004_v3
+    metrics_doc = _read(config.data_dir / "logs" / "metrics.json")
+    assert metrics_doc["arxiv"]["auto_resumes"] == 1
+    assert (config.data_dir / "logs" / "diagnostics.jsonl").is_file()
+
+
+@responses.activate
+def test_s2_only_mode_backfills_missing_s2_without_calling_arxiv(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    responses.add(responses.POST, f"{S2}/graph/v1/paper/batch", status=403)
+    config = _config(tmp_path)
+    ids = ["2408.00001", "2408.00002"]
+    pipeline.run(ids, config)
+
+    root = config.data_dir / "papers" / "2408-00001"
+    assert not (root / pipeline.S2_RAW_NAME).exists()
+
+    responses.reset()
+    _mock_s2()
+    s2_only_cfg = Config(
+        data_dir=config.data_dir,
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        s2_only=True,
+    )
+    pipeline.run(ids, s2_only_cfg)
+
+    assert _calls(f"{ARXIV}/") == []
+    assert (root / pipeline.S2_RAW_NAME).is_file()
+    assert validate_corpus.validate(config.data_dir) == []
+
+
+def test_workspace_mutex_blocks_concurrent_process_lock_and_stepped_429_backoff(tmp_path):
+    from crawler.source import DownloadResult
+
+    # T1 stepped 429 backoff (15s -> 30s -> 60s when no Retry-After header is present):
+    dl = DownloadResult(path=None, http_status=429, retry_after=None)
+    assert pipeline._retry_after_download(dl, rate_attempt=0) == 15.0
+    assert pipeline._retry_after_download(dl, rate_attempt=1) == 30.0
+    assert pipeline._retry_after_download(dl, rate_attempt=2) == 60.0
+
+    # U3 local OS workspace mutex:
+    with pipeline._acquire_workspace_lock(tmp_path / "data"):
+        with pytest.raises(RuntimeError, match="already running"):
+            with pipeline._acquire_workspace_lock(tmp_path / "data"):
+                pass

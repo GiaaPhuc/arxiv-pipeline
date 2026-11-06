@@ -182,3 +182,92 @@ def test_save_run_with_base_previous_and_flush_live_avoid_double_counting(tmp_pa
     assert final["runs"] == 1
     assert final["stage_seconds"]["download"] == pytest.approx(1.75)
     assert final["active_seconds"] == pytest.approx(2.5)
+
+
+def test_redact_secrets_and_diagnostics_jsonl_mask_keys(tmp_path: Path):
+    diag_path = tmp_path / "logs" / "diagnostics.jsonl"
+    raw_msg = "Failed calling S2 with x-api-key: secret-key-9999 and Bearer tok_abcdef123456"
+    cleaned = metrics.redact_secrets(raw_msg, extra_secrets=("custom-secret-777",))
+    assert "secret-key-9999" not in cleaned
+    assert "tok_abcdef123456" not in cleaned
+    assert "***REDACTED***" in cleaned
+
+    metrics.log_diagnostic(
+        diag_path,
+        "s2_429",
+        extra_secrets=("my-s2-secret-key",),
+        detail="header key=my-s2-secret-key",
+        wait_seconds=15.0,
+    )
+    lines = diag_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert "my-s2-secret-key" not in lines[0]
+    row = json.loads(lines[0])
+    assert row["event"] == "s2_429"
+    assert row["source_code_hash"] == metrics.source_code_hash()
+    assert "***REDACTED***" in row["detail"]
+
+
+def test_aggregate_sessions_deduplicates_and_strips_idle_colab_gaps():
+    doc1 = {
+        "runs": 1,
+        "resources": {"ram_peak_bytes": 100.0, "disk_peak_bytes": 500.0},
+        "sessions": [
+            {
+                "run": 1,
+                "started_at": "2026-11-06T00:00:00+00:00",
+                "ended_at": "2026-11-06T01:00:00+00:00",
+                "active_seconds": 1800.0,
+                "cooldown_retry_seconds": 120.0,
+                "stage_seconds": {
+                    "discovery": 20.0,
+                    "download": 1700.0,
+                    "extract": 50.0,
+                    "s2": 30.0,
+                },
+                "papers_done": 500,
+            }
+        ],
+    }
+    doc2 = {
+        "runs": 2,
+        "resources": {"ram_peak_bytes": 140.0, "disk_peak_bytes": 900.0},
+        "sessions": [
+            {
+                "run": 1,
+                "started_at": "2026-11-06T00:00:00+00:00",
+                "ended_at": "2026-11-06T02:00:00+00:00",
+                "active_seconds": 3500.0,
+                "cooldown_retry_seconds": 120.0,
+                "stage_seconds": {
+                    "discovery": 40.0,
+                    "download": 3300.0,
+                    "extract": 100.0,
+                    "s2": 60.0,
+                },
+                "papers_done": 1000,
+            },
+            {
+                "run": 2,
+                "started_at": "2026-11-06T04:00:00+00:00",
+                "ended_at": "2026-11-06T06:00:00+00:00",
+                "active_seconds": 3600.0,
+                "cooldown_retry_seconds": 30.0,
+                "stage_seconds": {
+                    "discovery": 40.0,
+                    "download": 3400.0,
+                    "extract": 100.0,
+                    "s2": 60.0,
+                },
+                "papers_done": 1000,
+            },
+        ],
+    }
+    agg = metrics.aggregate_sessions([doc1, doc2])
+    assert agg["sessions_count"] == 2
+    assert agg["active_wall_seconds"] == pytest.approx(7100.0)
+    assert agg["cooldown_retry_seconds"] == pytest.approx(150.0)
+    assert agg["effective_wall_seconds"] == pytest.approx(7250.0)
+    assert agg["idle_gap_seconds"] == pytest.approx(7200.0)
+    assert agg["ram_peak_bytes"] == 140.0
+    assert agg["disk_peak_bytes"] == 900.0

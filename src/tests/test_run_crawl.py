@@ -93,3 +93,28 @@ def test_successful_run_passes_ids_and_config_to_pipeline(monkeypatch, tmp_path)
     assert seen["ids"] == ["2408.11045", "2408.11046"]
     assert seen["data_dir"] == tmp_path / "d"
     assert (tmp_path / "d" / "logs" / "crawl.log").is_file()
+
+
+def test_cli_forwards_s2_only_and_auto_resume_rate_limit_flags(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRAWLER_CONTACT", "me@example.com")
+    seen = {}
+
+    def fake_run(all_ids, config):
+        seen["s2_only"] = config.s2_only
+        seen["auto_resume"] = config.auto_resume_rate_limit
+        return {"ok": 1}
+
+    monkeypatch.setattr(pipeline, "run", fake_run)
+    args = [
+        "--ranges",
+        str(RANGES),
+        "--limit",
+        "1",
+        "--data-dir",
+        str(tmp_path / "d"),
+        "--s2-only",
+        "--auto-resume-rate-limit",
+    ]
+    assert run_crawl.main(args) == 0
+    assert seen["s2_only"] is True
+    assert seen["auto_resume"] is True

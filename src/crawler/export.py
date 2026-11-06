@@ -19,6 +19,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from corpus import Corpus
+from crawler import metrics
 from crawler.ids import id_to_dirname
 from crawler.models import Status
 from crawler.pipeline import S2_RAW_NAME
@@ -345,6 +346,10 @@ def export_stats(data_dir: Path, out_dir: Path) -> dict:
     )
     metrics_file = data_dir / "logs" / "metrics.json"
     if metrics_file.is_file():
+        summary["benchmark_summary"] = metrics.aggregate_sessions([metrics_file])
+        (out_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
         (out_dir / "performance.json").write_text(
             metrics_file.read_text(encoding="utf-8"), encoding="utf-8"
         )

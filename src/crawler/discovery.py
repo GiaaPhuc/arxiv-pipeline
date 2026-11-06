@@ -6,15 +6,15 @@ calls and ``/src/`` downloads share ONE limiter on ``export.arxiv.org`` (>= 3 s,
 connection). The Atom feed is parsed here.
 
 Flow:
-  1. ``discover``: batches of ``config.discovery_batch_size`` (150) base ids. The id of
+  1. ``discover``: batches of ``config.discovery_batch_size`` (250) base ids. The id of
      the entry is ``...idvN`` for the latest version, so ``N`` = number of versions.
      ``published`` = date of v1; ``updated`` = date of ``vN`` (used directly for ``v2``
      when ``N == 2`` and for ``vN`` when ``N >= 3``).
-  2. Ids absent from a batch are re-checked in sub-batches of 20 (falling back to 1-by-1
+  2. Ids absent from a batch are re-checked in sub-batches of 50 (falling back to 1-by-1
      if an ``/api/errors`` entry appears); still absent -> missing.
   3. ``fetch_revised_dates``: for papers with ``N >= 3`` (or incomplete ``N == 2``),
      queries intermediate ``idv2..idv{N-1}`` in batches (re-checking any dropped version
-     id in sub-batches of 20); the ``updated`` field of each entry is that version's date.
+     id in sub-batches of 50); the ``updated`` field of each entry is that version's date.
 
 Done when: for 10 sample ids, N versions and dates match the arXiv web pages.
 Ids that do not exist are reported as such (-> ``not_found``), not as errors.
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 _ATOM = "{http://www.w3.org/2005/Atom}"
 _ARXIV = "{http://arxiv.org/schemas/atom}"
 _QUERY_PATH = "/api/query"
-_CONFIRM_BATCH_SIZE = 20  # sub-batch size when re-checking absent IDs (O2)
+_CONFIRM_BATCH_SIZE = 50  # sub-batch size when re-checking absent IDs (O2 / T3)
 
 
 def _text(node: ET.Element, tag: str) -> str:

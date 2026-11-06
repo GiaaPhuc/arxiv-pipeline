@@ -37,12 +37,15 @@ Design
 
 from __future__ import annotations
 
+import contextlib
 import gzip
+import hashlib
 import json
 import logging
 import os
 import queue
 import shutil
+import tempfile
 import threading
 import time
 from collections.abc import Iterable, Iterator
@@ -56,7 +59,14 @@ from . import metrics
 from .checkpoint import backup_data_dir
 from .config import Config
 from .discovery import discover, fetch_revised_dates
-from .http import AdaptiveRateLimiter, HostClient, make_arxiv_client, make_s2_client
+from .http import (
+    AdaptiveRateLimiter,
+    HostClient,
+    load_rate_state,
+    make_arxiv_client,
+    make_s2_client,
+    save_rate_state,
+)
 from .ids import id_to_dirname, normalize_id, split_version
 from .manifest import Manifest, atomic_write
 from .models import FileEntry, PaperMeta, Status, VersionMeta
@@ -74,6 +84,8 @@ _S2_MAX_BATCH_ATTEMPTS = 4  # per batch, only consumed by HTTP 429
 _S2_MAX_RATE_LIMIT_WAIT = 30 * 60  # cumulative 429 wait without a success → stop S2 worker
 _S2_BATCH_FLUSH_SECONDS = 0.35  # wait briefly so nearby papers share one batch POST
 _ARXIV_MAX_429_ATTEMPTS = 4  # wait Retry-After between attempts; then StopCrawl
+_STEPPED_429_BACKOFF = (15.0, 30.0, 60.0)  # T1: stepped backoff when Retry-After header is absent
+_GIANT_DIAGNOSTIC_BYTES = 50 * 1024 * 1024  # U5: log packages >= 50 MiB to diagnostics.jsonl
 
 
 class StopCrawl(Exception):
@@ -82,6 +94,64 @@ class StopCrawl(Exception):
     def __init__(self, message: str, summary: dict[str, int] | None = None) -> None:
         super().__init__(message)
         self.summary = summary or {}
+
+
+class _DeferRateLimit(Exception):
+    """Internal signal (U1): defer the rate-limited paper/chunk and sleep cooldown."""
+
+
+@contextlib.contextmanager
+def _acquire_workspace_lock(data_dir: Path) -> Iterator[Path]:
+    """Local OS mutex in system temp dir so 2 processes never corrupt one workspace (U3)."""
+    resolved = str(Path(data_dir).resolve()).casefold()
+    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:16]
+    lock_path = Path(tempfile.gettempdir()) / f"arxiv-crawler-{digest}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    locked = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.write(fd, f"{os.getpid()}\n".encode("ascii"))
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                locked = True
+            except OSError as exc:
+                raise RuntimeError(
+                    f"another crawler process is already running on {data_dir} ({lock_path})"
+                ) from exc
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except OSError as exc:
+                raise RuntimeError(
+                    f"another crawler process is already running on {data_dir} ({lock_path})"
+                ) from exc
+        yield lock_path
+    finally:
+        if locked:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 @dataclass
@@ -116,16 +186,25 @@ class _Run:
     checkpoint_last_seen: int = 0
     checkpoint_thread: threading.Thread | None = None
     metrics_path: Path | None = None
+    diagnostics_path: Path | None = None
+    rate_state_path: Path | None = None
     base_metrics: dict = field(default_factory=dict)
     sampler: metrics.ResourceSampler | None = None
     metrics_flush_lock: threading.Lock = field(default_factory=threading.Lock)
     counters_lock: threading.Lock = field(default_factory=threading.Lock)
-    counters: dict[str, int | float] = field(
+    in_deferred_pass: bool = False
+    counters: dict[str, int | float | str] = field(
         default_factory=lambda: {
+            "session_started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "papers_done": 0,
             "papers_not_found": 0,
             "discovery_errors": 0,
             "revised_dates_incomplete": 0,
+            "arxiv_429": 0,
+            "arxiv_retry_wait_seconds": 0.0,
+            "arxiv_auto_resumes": 0,
+            "arxiv_cooldown_seconds": 0.0,
+            "range_resumes": 0,
             "s2_ok": 0,
             "s2_not_indexed": 0,
             "s2_batches": 0,
@@ -141,7 +220,14 @@ class _Run:
 
 def _inc(run: _Run, key: str, delta: int | float = 1) -> None:
     with run.counters_lock:
-        run.counters[key] += delta
+        current = run.counters.get(key, 0)
+        if isinstance(current, (int, float)):
+            run.counters[key] = current + delta
+
+
+def _diag(run: _Run, event: str, **fields: object) -> None:
+    secrets = (run.config.s2_api_key,) if run.config.s2_api_key else ()
+    metrics.log_diagnostic(run.diagnostics_path, event, extra_secrets=secrets, **fields)
 
 
 def _now() -> str:
@@ -232,6 +318,7 @@ def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResu
             if download.path is not None:
                 download.path.unlink(missing_ok=True)
             download.data = None
+            _diag(run, "arxiv_403", arxiv_id=arxiv_id, version=version)
             raise StopCrawl(f"arXiv answered HTTP 403 for {arxiv_id}v{version}")
         if download.http_status == 429:
             if download.path is not None:
@@ -246,6 +333,23 @@ def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResu
             continue
         if 200 <= download.http_status < 300:
             run.arxiv.limiter.note_success()
+            if download.range_resumed:
+                _inc(run, "range_resumes")
+                _diag(
+                    run,
+                    "range_resume_206",
+                    arxiv_id=arxiv_id,
+                    version=version,
+                    raw_archive_bytes=download.raw_archive_bytes,
+                )
+            if download.raw_archive_bytes >= _GIANT_DIAGNOSTIC_BYTES:
+                _diag(
+                    run,
+                    "giant_archive",
+                    arxiv_id=arxiv_id,
+                    version=version,
+                    raw_archive_bytes=download.raw_archive_bytes,
+                )
         break
     assert download is not None
     return download
@@ -407,7 +511,7 @@ def _process_paper(run: _Run, paper: PaperMeta) -> None:
                     is_last_for_paper=is_last,
                 )
             )
-        except StopCrawl:
+        except (StopCrawl, _DeferRateLimit):
             raise
         except Exception as exc:  # one bad pair must never stop the batch
             logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
@@ -595,18 +699,36 @@ def _plan_chunk(run: _Run, chunk: list[str]) -> list[PaperMeta]:
 # --------------------------------------------------------------------------- S2 worker
 
 
-def _retry_after(response: requests.Response | None, default: float = 60.0) -> float:
-    try:
-        value = float(response.headers.get("Retry-After", default)) if response else default
-    except (TypeError, ValueError):
-        value = default
-    return min(max(value, 30.0), 600.0)
+def _retry_after(
+    response: requests.Response | None,
+    default: float | None = None,
+    *,
+    rate_attempt: int = 0,
+) -> float:
+    """Parse ``Retry-After`` or use stepped backoff ``15s -> 30s -> 60s`` (T1)."""
+    stepped = _STEPPED_429_BACKOFF[min(max(rate_attempt, 0), len(_STEPPED_429_BACKOFF) - 1)]
+    fallback = default if default is not None else stepped
+    if response is not None and getattr(response, "headers", None):
+        raw = response.headers.get("Retry-After")
+        if raw is not None:
+            try:
+                return min(max(float(raw), 15.0), 600.0)
+            except (TypeError, ValueError):
+                pass
+    return min(max(fallback, 15.0), 600.0)
 
 
-def _retry_after_download(download: DownloadResult, default: float = 60.0) -> float:
+def _retry_after_download(
+    download: DownloadResult,
+    default: float | None = None,
+    *,
+    rate_attempt: int = 0,
+) -> float:
     if download.retry_after is not None:
-        return min(max(download.retry_after, 30.0), 600.0)
-    return default
+        return min(max(download.retry_after, 15.0), 600.0)
+    stepped = _STEPPED_429_BACKOFF[min(max(rate_attempt, 0), len(_STEPPED_429_BACKOFF) - 1)]
+    fallback = default if default is not None else stepped
+    return min(max(fallback, 15.0), 600.0)
 
 
 def _wait_arxiv_429(
@@ -617,11 +739,35 @@ def _wait_arxiv_429(
     response: requests.Response | None = None,
     download: DownloadResult | None = None,
 ) -> None:
-    """Sleep after arXiv 429; raise ``StopCrawl`` when the retry budget is exhausted."""
+    """Sleep after arXiv 429; defer (U1) or raise ``StopCrawl`` when retry budget exhausted."""
+    _inc(run, "arxiv_429")
     run.arxiv.limiter.note_429()
     if rate_attempt >= _ARXIV_MAX_429_ATTEMPTS - 1:
+        _diag(
+            run,
+            "arxiv_429_exhausted",
+            context=context,
+            attempts=_ARXIV_MAX_429_ATTEMPTS,
+            auto_resume=bool(run.config.auto_resume_rate_limit and not run.in_deferred_pass),
+        )
+        if run.config.auto_resume_rate_limit and not run.in_deferred_pass:
+            raise _DeferRateLimit(f"arXiv answered HTTP 429 {context}")
         raise StopCrawl(f"arXiv answered HTTP 429 {context}")
-    wait = _retry_after_download(download) if download is not None else _retry_after(response)
+    wait = (
+        _retry_after_download(download, rate_attempt=rate_attempt)
+        if download is not None
+        else _retry_after(response, rate_attempt=rate_attempt)
+    )
+    _inc(run, "arxiv_retry_wait_seconds", wait)
+    _diag(
+        run,
+        "arxiv_429",
+        context=context,
+        attempt=rate_attempt + 1,
+        wait_seconds=wait,
+    )
+    if run.rate_state_path is not None and wait > 0:
+        save_rate_state(run.rate_state_path, arxiv_cooldown_until=time.time() + wait)
     logger.warning(
         "arXiv 429 %s; waiting %.0fs (Retry-After), attempt %d/%d",
         context,
@@ -629,8 +775,54 @@ def _wait_arxiv_429(
         rate_attempt + 1,
         _ARXIV_MAX_429_ATTEMPTS,
     )
-    if run.stop.wait(wait):
-        raise StopCrawl(f"arXiv 429 {context} (interrupted while waiting)")
+    try:
+        if run.stop.wait(wait):
+            raise StopCrawl(f"arXiv 429 {context} (interrupted while waiting)")
+    finally:
+        if run.rate_state_path is not None:
+            save_rate_state(run.rate_state_path, arxiv_cooldown_until=0.0)
+
+
+def _handle_auto_resume_cooldown(run: _Run, context: str, deferred_count: int) -> None:
+    """U1: Drain extract queue, flush metrics + backup, sleep cooldown, reset limiter to 3.0s."""
+    run.extract_queue.join()
+    _flush_metrics(run)
+    if run.config.backup_dir is not None:
+        try:
+            backup_data_dir(Path(run.config.data_dir), run.config.backup_dir)
+        except OSError:
+            logger.exception("auto-resume pre-cooldown backup failed; continuing cooldown")
+    cooldown = min(max(float(run.config.rate_limit_cooldown_seconds), 0.0), 600.0)
+    _inc(run, "arxiv_auto_resumes")
+    _inc(run, "arxiv_cooldown_seconds", cooldown)
+    _diag(
+        run,
+        "auto_resume_cooldown",
+        context=context,
+        cooldown_seconds=cooldown,
+        deferred_ids=deferred_count,
+    )
+    if run.rate_state_path is not None and cooldown > 0:
+        save_rate_state(run.rate_state_path, arxiv_cooldown_until=time.time() + cooldown)
+    logger.warning(
+        "auto-resume rate-limit (U1) %s: deferred %d id(s); sleeping cooldown %.0fs",
+        context,
+        deferred_count,
+        cooldown,
+    )
+    try:
+        remaining = cooldown
+        while remaining > 0:
+            step = min(15.0, remaining)
+            if run.stop.wait(step):
+                raise StopCrawl(f"arXiv 429 cooldown {context} (interrupted while waiting)")
+            remaining -= step
+            if remaining > 0:
+                logger.info("auto-resume cooldown: %.0fs remaining...", remaining)
+    finally:
+        if run.rate_state_path is not None:
+            save_rate_state(run.rate_state_path, arxiv_cooldown_until=0.0)
+    run.arxiv.limiter.reset_interval()
 
 
 def _store_s2(job: _S2Job, result: S2Result) -> None:
@@ -664,8 +856,15 @@ def _wait_s2_429(run: _Run, response: requests.Response | None) -> bool:
     limiter = run.s2.limiter
     if isinstance(limiter, AdaptiveRateLimiter):
         limiter.note_429()
+    _diag(run, "s2_429", wait_seconds=wait)
+    if run.rate_state_path is not None and wait > 0:
+        save_rate_state(run.rate_state_path, s2_cooldown_until=time.time() + wait)
     logger.warning("S2 429; waiting %.0fs (Retry-After)", wait)
-    return run.stop.wait(wait)
+    try:
+        return run.stop.wait(wait)
+    finally:
+        if run.rate_state_path is not None:
+            save_rate_state(run.rate_state_path, s2_cooldown_until=0.0)
 
 
 def _collect_s2_batch(q: queue.Queue[_S2Job | None]) -> list[_S2Job] | None:
@@ -818,33 +1017,93 @@ def _maybe_checkpoint(run: _Run, ids_seen: int) -> None:
     thread.start()
 
 
+def _paper_needs_s2(paper: PaperMeta, paper_dir: Path) -> bool:
+    """Return True when a discovered paper is missing S2 raw data or version references (U2)."""
+    if not (paper_dir / S2_RAW_NAME).is_file():
+        return True
+    for version in range(1, paper.num_versions + 1):
+        version_dir = paper_dir / f"v{version}"
+        if version_dir.is_dir() and not (version_dir / "references.json").is_file():
+            return True
+    return False
+
+
+def _crawl_s2_only(run: _Run, ids: list[str], started: float) -> None:
+    """U2 (``--s2-only``): Skip all arXiv network calls; only backfill missing S2 references."""
+    queued = 0
+    for arxiv_id in ids:
+        if run.stop.is_set():
+            return
+        paper_dir = _paper_dir(run, arxiv_id)
+        paper = _read_paper(paper_dir / "paper.json")
+        if paper is None:
+            continue
+        _clean_stale(paper_dir)
+        if _paper_needs_s2(paper, paper_dir):
+            run.s2_queue.put(_S2Job(paper, paper_dir))
+            queued += 1
+    logger.info(
+        "s2-only mode: queued %d/%d discovered papers for Semantic Scholar in %.1f s",
+        queued,
+        len(ids),
+        time.monotonic() - started,
+    )
+
+
 def _crawl(run: _Run, ids: list[str], started: float) -> None:
+    if run.config.s2_only:
+        _crawl_s2_only(run, ids, started)
+        return
     total = len(ids)
     seen = 0
     chunk_size = max(run.config.discovery_batch_size * 2, 1)
     if run.config.backup_every_ids > 0:
         chunk_size = min(chunk_size, max(run.config.backup_every_ids, 1))
-    for chunk in _chunks(ids, chunk_size):
-        if run.stop.is_set():
-            return
-        for paper in _plan_chunk(run, chunk):
+    deferred_ids: list[str] = []
+
+    def _run_chunks(target_ids: list[str], *, is_deferred: bool = False) -> None:
+        nonlocal seen
+        run.in_deferred_pass = is_deferred
+        for chunk in _chunks(target_ids, chunk_size):
             if run.stop.is_set():
                 return
-            _process_paper(run, paper)
-        seen += len(chunk)
-        ckpt_due = _checkpoint_due(run, seen)
-        if ckpt_due:
-            run.extract_queue.join()
-        _flush_metrics(run)
-        logger.info(
-            "progress %d/%d ids | %s | s2 queue %d | %.0f s",
-            seen,
-            total,
-            run.manifest.summary(),
-            run.s2_queue.qsize(),
-            time.monotonic() - started,
-        )
-        _maybe_checkpoint(run, seen)
+            try:
+                planned = _plan_chunk(run, chunk)
+            except _DeferRateLimit as exc:
+                deferred_ids.extend(chunk)
+                _handle_auto_resume_cooldown(run, str(exc), len(chunk))
+                continue
+            for paper in planned:
+                if run.stop.is_set():
+                    return
+                try:
+                    _process_paper(run, paper)
+                except _DeferRateLimit as exc:
+                    deferred_ids.append(paper.arxiv_id)
+                    _handle_auto_resume_cooldown(run, str(exc), 1)
+                    continue
+            if not is_deferred:
+                seen += len(chunk)
+            ckpt_due = _checkpoint_due(run, seen)
+            if ckpt_due:
+                run.extract_queue.join()
+            _flush_metrics(run)
+            logger.info(
+                "progress %d/%d ids | %s | s2 queue %d | %.0f s",
+                seen,
+                total,
+                run.manifest.summary(),
+                run.s2_queue.qsize(),
+                time.monotonic() - started,
+            )
+            _maybe_checkpoint(run, seen)
+
+    _run_chunks(ids, is_deferred=False)
+    if deferred_ids and not run.stop.is_set():
+        retry_list = list(dict.fromkeys(deferred_ids))
+        deferred_ids.clear()
+        logger.info("running deferred auto-resume pass for %d id(s)", len(retry_list))
+        _run_chunks(retry_list, is_deferred=True)
 
 
 def run(
@@ -865,89 +1124,105 @@ def run(
     (data_dir / "papers").mkdir(parents=True, exist_ok=True)
     (data_dir / "logs").mkdir(parents=True, exist_ok=True)
     metrics_path = data_dir / "logs" / "metrics.json"
-    base_metrics = metrics.load_saved(metrics_path)
-    manifest = Manifest(data_dir / "manifest.sqlite")
-    sampler = metrics.ResourceSampler(data_dir)
-    state = _Run(
-        config=config,
-        manifest=manifest,
-        arxiv=arxiv_client or make_arxiv_client(config),
-        s2=s2_client or make_s2_client(config),
-        papers_dir=data_dir / "papers",
-        tmp_dir=data_dir / ".tmp",
-        metrics_path=metrics_path,
-        base_metrics=base_metrics,
-        sampler=sampler,
-    )
+    diagnostics_path = data_dir / "logs" / "diagnostics.jsonl"
+    rate_state_path = data_dir / "logs" / "rate_state.json"
 
-    metrics.reset()
-    sampler.start()
-    extract_thread = threading.Thread(target=_extract_worker, args=(state,), name="extract-worker")
-    extract_thread.start()
-    s2_thread = threading.Thread(target=_s2_worker, args=(state,), name="s2-worker")
-    s2_thread.start()
-    if config.backup_every_ids and not config.backup_dir:
-        logger.warning(
-            "CRAWLER_BACKUP_EVERY_IDS=%d but no backup dir; automatic backup disabled",
-            config.backup_every_ids,
-        )
-    elif config.backup_dir and config.backup_every_ids:
-        leading_done = _count_leading_done_ids(state, ids)
-        state.checkpoint_last_seen = leading_done
-        logger.info(
-            "automatic backup every %d ids -> %s "
-            "(resume: %d ids already done, skip checkpoint until +%d new)",
-            config.backup_every_ids,
-            config.backup_dir,
-            leading_done,
-            config.backup_every_ids,
-        )
-    logger.info("crawl started: %d ids, data dir %s", len(ids), data_dir)
+    with _acquire_workspace_lock(data_dir):
+        base_metrics = metrics.load_saved(metrics_path)
+        manifest = Manifest(data_dir / "manifest.sqlite")
+        sampler = metrics.ResourceSampler(data_dir)
+        arxiv_cli = arxiv_client or make_arxiv_client(config)
+        s2_cli = s2_client or make_s2_client(config)
+        persisted_rate = load_rate_state(rate_state_path)
+        if persisted_rate.get("arxiv_cooldown_until", 0.0) > 0:
+            arxiv_cli.limiter.set_cooldown_until(persisted_rate["arxiv_cooldown_until"])
+        if persisted_rate.get("s2_cooldown_until", 0.0) > 0:
+            s2_cli.limiter.set_cooldown_until(persisted_rate["s2_cooldown_until"])
 
-    failure: BaseException | None = None
-    try:
-        _crawl(state, ids, time.monotonic())
-    except BaseException as exc:  # StopCrawl, KeyboardInterrupt, programming errors
-        failure = exc
-        state.stop.set()
-    finally:
-        while extract_thread.is_alive():
-            try:
-                state.extract_queue.put(None, timeout=0.5)
-                break
-            except queue.Full:
-                continue
+        state = _Run(
+            config=config,
+            manifest=manifest,
+            arxiv=arxiv_cli,
+            s2=s2_cli,
+            papers_dir=data_dir / "papers",
+            tmp_dir=data_dir / ".tmp",
+            metrics_path=metrics_path,
+            diagnostics_path=diagnostics_path,
+            rate_state_path=rate_state_path,
+            base_metrics=base_metrics,
+            sampler=sampler,
+        )
+
+        metrics.reset()
+        sampler.start()
+        extract_thread = threading.Thread(
+            target=_extract_worker, args=(state,), name="extract-worker"
+        )
+        extract_thread.start()
+        s2_thread = threading.Thread(target=_s2_worker, args=(state,), name="s2-worker")
+        s2_thread.start()
+        if config.backup_every_ids and not config.backup_dir:
+            logger.warning(
+                "CRAWLER_BACKUP_EVERY_IDS=%d but no backup dir; automatic backup disabled",
+                config.backup_every_ids,
+            )
+        elif config.backup_dir and config.backup_every_ids:
+            leading_done = _count_leading_done_ids(state, ids)
+            state.checkpoint_last_seen = leading_done
+            logger.info(
+                "automatic backup every %d ids -> %s "
+                "(resume: %d ids already done, skip checkpoint until +%d new)",
+                config.backup_every_ids,
+                config.backup_dir,
+                leading_done,
+                config.backup_every_ids,
+            )
+        logger.info("crawl started: %d ids, data dir %s", len(ids), data_dir)
+
+        failure: BaseException | None = None
         try:
-            extract_thread.join()
-        except RuntimeError:
-            pass
-        state.s2_queue.put(None)
-        try:
-            s2_thread.join()
-        except RuntimeError:
-            pass
-        if state.checkpoint_thread is not None:
+            _crawl(state, ids, time.monotonic())
+        except BaseException as exc:  # StopCrawl, KeyboardInterrupt, programming errors
+            failure = exc
+            state.stop.set()
+        finally:
+            while extract_thread.is_alive():
+                try:
+                    state.extract_queue.put(None, timeout=0.5)
+                    break
+                except queue.Full:
+                    continue
             try:
-                state.checkpoint_thread.join()
+                extract_thread.join()
             except RuntimeError:
                 pass
-        resources = sampler.stop()
-        with state.counters_lock:
-            counters_snapshot = dict(state.counters)
-        merged = _flush_metrics(state, final_resources=resources)
-        summary = manifest.summary()
-        if config.backup_dir and config.backup_every_ids:
+            state.s2_queue.put(None)
             try:
-                backup_data_dir(data_dir, config.backup_dir)
-            except OSError:
-                logger.exception("final checkpoint backup failed")
-        manifest.close()
-        shutil.rmtree(state.tmp_dir, ignore_errors=True)
-        logger.info("crawl finished: %s | counters %s", summary, counters_snapshot)
-        logger.info("cumulative active seconds per stage: %s", merged["stage_seconds"])
+                s2_thread.join()
+            except RuntimeError:
+                pass
+            if state.checkpoint_thread is not None:
+                try:
+                    state.checkpoint_thread.join()
+                except RuntimeError:
+                    pass
+            resources = sampler.stop()
+            with state.counters_lock:
+                counters_snapshot = dict(state.counters)
+            merged = _flush_metrics(state, final_resources=resources)
+            summary = manifest.summary()
+            if config.backup_dir and config.backup_every_ids:
+                try:
+                    backup_data_dir(data_dir, config.backup_dir)
+                except OSError:
+                    logger.exception("final checkpoint backup failed")
+            manifest.close()
+            shutil.rmtree(state.tmp_dir, ignore_errors=True)
+            logger.info("crawl finished: %s | counters %s", summary, counters_snapshot)
+            logger.info("cumulative active seconds per stage: %s", merged["stage_seconds"])
 
-    if isinstance(failure, StopCrawl):
-        failure.summary = summary
-    if failure is not None:
-        raise failure
-    return summary
+        if isinstance(failure, StopCrawl):
+            failure.summary = summary
+        if failure is not None:
+            raise failure
+        return summary
