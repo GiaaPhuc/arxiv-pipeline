@@ -12,6 +12,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -45,7 +46,14 @@ def atomic_write(target: Path, *, suffix: str = ".tmp"):
     tmp = target.parent / f"{target.name}{suffix}"
     try:
         yield tmp
-        os.replace(tmp, target)
+        for attempt in range(5):
+            try:
+                os.replace(tmp, target)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise

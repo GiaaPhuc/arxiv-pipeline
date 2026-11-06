@@ -313,6 +313,18 @@ def test_failed_pair_is_retried_on_next_run_but_ok_pairs_are_not(tmp_path):
     assert validate_corpus.validate(config.data_dir) == []
 
 
+_orig_event_wait = threading.Event.wait
+
+
+def _mock_fast_429_wait():
+    def _wait_wrapper(self: threading.Event, timeout: float | None = None) -> bool:
+        if timeout is None:
+            return _orig_event_wait(self)
+        return self.is_set()
+
+    return patch.object(threading.Event, "wait", _wait_wrapper)
+
+
 @responses.activate
 def test_arxiv_429_stops_the_run_and_resume_continues(tmp_path):
     responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
@@ -328,7 +340,7 @@ def test_arxiv_429_stops_the_run_and_resume_continues(tmp_path):
     _mock_s2()
     config = _config(tmp_path)
 
-    with patch.object(threading.Event, "wait", return_value=False):
+    with _mock_fast_429_wait():
         with pytest.raises(pipeline.StopCrawl) as stopped:
             pipeline.run(["2408.00004", "2408.00002"], config)
 
@@ -362,7 +374,7 @@ def test_arxiv_429_on_src_waits_and_retries_then_continues(tmp_path):
     _mock_s2()
     config = _config(tmp_path)
 
-    with patch.object(threading.Event, "wait", return_value=False):
+    with _mock_fast_429_wait():
         summary = pipeline.run(["2408.00004"], config)
 
     assert summary["ok"] == 3
@@ -378,7 +390,7 @@ def test_arxiv_429_in_discovery_stops_after_retry_budget(tmp_path):
             status=429,
             headers={"Retry-After": "1"},
         )
-    with patch.object(threading.Event, "wait", return_value=False):
+    with _mock_fast_429_wait():
         with pytest.raises(pipeline.StopCrawl):
             pipeline.run(["2408.00001"], _config(tmp_path))
     assert len(_calls(f"{ARXIV}/api/query")) == 4
@@ -399,7 +411,7 @@ def test_arxiv_429_in_discovery_waits_and_retries_then_continues(tmp_path):
     _mock_s2()
     config = _config(tmp_path)
 
-    with patch.object(threading.Event, "wait", return_value=False):
+    with _mock_fast_429_wait():
         summary = pipeline.run(["2408.00002"], config)
 
     assert summary["ok"] >= 1
