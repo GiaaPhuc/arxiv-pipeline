@@ -710,3 +710,39 @@ def test_failed_background_checkpoint_retries_on_next_chunk(tmp_path, monkeypatc
     pipeline.run(["2408.00001", "2408.00002"], config)
     # Chunk 1 failed -> Chunk 2 retried immediately + final backup in finally = 3 calls
     assert attempts["n"] >= 3
+
+
+@responses.activate
+def test_mid_run_checkpoint_flushes_metrics_without_double_counting(tmp_path, monkeypatch):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    mid_snapshots: list[dict] = []
+    real_backup = pipeline.backup_data_dir
+
+    def capture_backup(source: Path, destination: Path) -> None:
+        real_backup(source, destination)
+        metrics_in_backup = destination / "logs" / "metrics.json"
+        if metrics_in_backup.is_file():
+            mid_snapshots.append(json.loads(metrics_in_backup.read_text(encoding="utf-8")))
+
+    monkeypatch.setattr(pipeline, "backup_data_dir", capture_backup)
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        backup_dir=tmp_path / "mirror",
+        backup_every_ids=1,
+    )
+    pipeline.run(["2408.00001", "2408.00002", "2408.00004"], config)
+
+    # Every mid-run checkpoint already contains non-zero metrics for this session,
+    # and repeated flushes keep runs == 1 (no double-counting).
+    assert len(mid_snapshots) >= 2
+    assert all(snap["runs"] == 1 for snap in mid_snapshots)
+    assert mid_snapshots[0]["active_seconds"] > 0
+    final_metrics = _read(config.data_dir / "logs" / "metrics.json")
+    assert final_metrics["runs"] == 1
+    assert final_metrics["active_seconds"] >= mid_snapshots[0]["active_seconds"]

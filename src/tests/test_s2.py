@@ -217,6 +217,7 @@ def test_batch_falls_back_when_reference_count_exceeds_embedded_list():
         json=[
             {
                 "paperId": "p-big",
+                "venue": "NeurIPS 2024",
                 "referenceCount": 50,
                 "references": [{"paperId": "only-one", "title": "One", "authors": []}],
             }
@@ -244,5 +245,6 @@ def test_batch_falls_back_when_reference_count_exceeds_embedded_list():
     out = fetch_references_batch(client, ["2310.12345"])
     result = out["2310.12345"]
     assert result.found is True
+    assert result.venue == "NeurIPS 2024"
     assert result.references[0].ref_title == "From pagination"
     assert result.raw["source"] == "references"

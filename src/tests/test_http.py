@@ -264,3 +264,46 @@ def test_adaptive_s2_limiter_measures_end_to_start():
 
     assert len(sleeps) == 1
     assert sleeps[0] >= 1.1
+
+
+def test_arxiv_rate_limiter_adapts_above_3s_floor_on_429_and_recovers():
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(round(seconds, 4))
+        now[0] += seconds
+
+    limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep)
+    limiter.note_429()
+    assert limiter._min_interval == 4.0  # noqa: SLF001
+
+    limiter.wait()
+    limiter.done()
+    limiter.wait()
+    limiter.done()
+    assert sleeps == [4.0]
+
+    for _ in range(80):
+        limiter.note_success()
+    assert limiter._min_interval == 3.0  # never drops below configured 3.0s floor  # noqa: SLF001
+
+
+def test_arxiv_src_sets_identity_accept_encoding():
+    config = Config(contact="test@example.com", arxiv_min_interval=0.0)
+    client = HostClient("https://export.arxiv.org", RateLimiter(0.0), config)
+    inner = MagicMock(spec=requests.Response)
+    inner.status_code = 200
+    inner.close = MagicMock()
+    client._session.get = MagicMock(return_value=inner)  # noqa: SLF001
+
+    with client.get("/src/2408.11045v1", stream=True):
+        pass
+    client.get("/api/query?id_list=2408.11045")
+
+    src_call, api_call = client._session.get.call_args_list  # noqa: SLF001
+    assert src_call.kwargs["headers"]["Accept-Encoding"] == "identity"
+    assert "headers" not in api_call.kwargs

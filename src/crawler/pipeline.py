@@ -100,12 +100,15 @@ class _Run:
     tmp_dir: Path
     stop: threading.Event = field(default_factory=threading.Event)
     extract_queue: queue.Queue[_ExtractJob | None] = field(
-        default_factory=lambda: queue.Queue(maxsize=8)
+        default_factory=lambda: queue.Queue(maxsize=6)
     )
     s2_queue: queue.Queue[_S2Job | None] = field(default_factory=queue.Queue)
     s2_disabled: bool = False
     checkpoint_last_seen: int = 0
     checkpoint_thread: threading.Thread | None = None
+    metrics_path: Path | None = None
+    base_metrics: dict = field(default_factory=dict)
+    sampler: metrics.ResourceSampler | None = None
     counters_lock: threading.Lock = field(default_factory=threading.Lock)
     counters: dict[str, int | float] = field(
         default_factory=lambda: {
@@ -187,12 +190,18 @@ def _version_date(paper: PaperMeta, version: int) -> str | None:
 
 
 def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResult:
-    """Download ``/src/{id}vK`` into ``tmp_dir``. ``StopCrawl`` on 403 or 429 after retry budget."""
+    """Download ``/src/{id}vK`` (spooled in RAM when ``<= spool_max_bytes``)."""
     arxiv_id = paper.arxiv_id
     download: DownloadResult | None = None
     for rate_attempt in range(_ARXIV_MAX_429_ATTEMPTS):
         with metrics.stage_timer("download"):
-            download = download_source(run.arxiv, arxiv_id, version, run.tmp_dir)
+            download = download_source(
+                run.arxiv,
+                arxiv_id,
+                version,
+                run.tmp_dir,
+                spool_max_bytes=run.config.spool_max_bytes,
+            )
         if download.http_status == 403:
             raise StopCrawl(f"arXiv answered HTTP 403 for {arxiv_id}v{version}")
         if download.http_status == 429:
@@ -203,6 +212,8 @@ def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResu
                 download=download,
             )
             continue
+        if 200 <= download.http_status < 300:
+            run.arxiv.limiter.note_success()
         break
     assert download is not None
     return download
@@ -211,20 +222,23 @@ def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResu
 def _extract_version(
     run: _Run, paper: PaperMeta, version: int, download: DownloadResult, part: Path
 ) -> VersionMeta:
-    """Extract downloaded archive into ``part`` and remove temporary archive file."""
+    """Extract downloaded archive into ``part`` and release temporary buffer/file."""
     arxiv_id = paper.arxiv_id
-    archive = download.path
+    archive_file = download.path
+    archive_source: Path | bytes | None = (
+        download.data if download.data is not None else archive_file
+    )
     try:
         if download.http_status == 404:
             return VersionMeta(arxiv_id, version, Status.NOT_FOUND, error="HTTP 404 on /src/")
-        if archive is None:
+        if archive_source is None:
             return VersionMeta(
                 arxiv_id, version, Status.FAILED, error=f"HTTP {download.http_status} on /src/"
             )
         part.mkdir(parents=True, exist_ok=True)
         with metrics.stage_timer("extract"):
             return extract_tex_bib(
-                archive,
+                archive_source,
                 part / "tex",
                 run.config,
                 arxiv_id=arxiv_id,
@@ -232,8 +246,9 @@ def _extract_version(
                 raw_archive_bytes=download.raw_archive_bytes,
             )
     finally:
-        if archive is not None:
-            archive.unlink(missing_ok=True)
+        if archive_file is not None:
+            archive_file.unlink(missing_ok=True)
+        download.data = None
 
 
 def _install_version(final: Path, part: Path, old: Path, meta: VersionMeta) -> None:
@@ -565,6 +580,7 @@ def _wait_arxiv_429(
     download: DownloadResult | None = None,
 ) -> None:
     """Sleep after arXiv 429; raise ``StopCrawl`` when the retry budget is exhausted."""
+    run.arxiv.limiter.note_429()
     if rate_attempt >= _ARXIV_MAX_429_ATTEMPTS - 1:
         raise StopCrawl(f"arXiv answered HTTP 429 {context}")
     wait = _retry_after_download(download) if download is not None else _retry_after(response)
@@ -717,12 +733,40 @@ def _run_checkpoint_bg(run: _Run, data_dir: Path, backup_dir: Path, ids_seen: in
         )
 
 
+def _flush_metrics(run: _Run, *, final_resources: dict[str, float] | None = None) -> dict:
+    """Flush cumulative session metrics to ``logs/metrics.json`` (safe before checkpoints)."""
+    if run.metrics_path is None:
+        return {}
+    resources = (
+        final_resources
+        if final_resources is not None
+        else (run.sampler.snapshot() if run.sampler is not None else {})
+    )
+    with run.counters_lock:
+        counters_snapshot = dict(run.counters)
+    return metrics.flush_run(
+        run.metrics_path,
+        run.base_metrics,
+        metrics.stage_seconds(),
+        resources,
+        crawl_counters=counters_snapshot,
+    )
+
+
+def _checkpoint_due(run: _Run, ids_seen: int) -> bool:
+    cfg = run.config
+    return bool(
+        cfg.backup_dir
+        and cfg.backup_every_ids > 0
+        and ids_seen - run.checkpoint_last_seen >= cfg.backup_every_ids
+    )
+
+
 def _maybe_checkpoint(run: _Run, ids_seen: int) -> None:
     cfg = run.config
-    if not cfg.backup_dir or cfg.backup_every_ids <= 0:
+    if not _checkpoint_due(run, ids_seen):
         return
-    if ids_seen - run.checkpoint_last_seen < cfg.backup_every_ids:
-        return
+    assert cfg.backup_dir is not None
     if run.checkpoint_thread is not None and run.checkpoint_thread.is_alive():
         logger.info("previous checkpoint backup still running; skipping at %d ids", ids_seen)
         return
@@ -738,6 +782,7 @@ def _maybe_checkpoint(run: _Run, ids_seen: int) -> None:
 def _crawl(run: _Run, ids: list[str], started: float) -> None:
     total = len(ids)
     seen = 0
+    last_metrics_flush = started
     chunk_size = max(run.config.discovery_batch_size * 2, 1)
     if run.config.backup_every_ids > 0:
         chunk_size = min(chunk_size, max(run.config.backup_every_ids, 1))
@@ -748,15 +793,23 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
             if run.stop.is_set():
                 return
             _process_paper(run, paper)
-        run.extract_queue.join()
         seen += len(chunk)
+        ckpt_due = _checkpoint_due(run, seen)
+        now = time.monotonic()
+        if ckpt_due:
+            run.extract_queue.join()
+            _flush_metrics(run)
+            last_metrics_flush = now
+        elif now - last_metrics_flush >= 15.0:
+            _flush_metrics(run)
+            last_metrics_flush = now
         logger.info(
             "progress %d/%d ids | %s | s2 queue %d | %.0f s",
             seen,
             total,
             run.manifest.summary(),
             run.s2_queue.qsize(),
-            time.monotonic() - started,
+            now - started,
         )
         _maybe_checkpoint(run, seen)
 
@@ -778,7 +831,10 @@ def run(
     data_dir = Path(config.data_dir)
     (data_dir / "papers").mkdir(parents=True, exist_ok=True)
     (data_dir / "logs").mkdir(parents=True, exist_ok=True)
+    metrics_path = data_dir / "logs" / "metrics.json"
+    base_metrics = metrics.load_saved(metrics_path)
     manifest = Manifest(data_dir / "manifest.sqlite")
+    sampler = metrics.ResourceSampler(data_dir)
     state = _Run(
         config=config,
         manifest=manifest,
@@ -786,11 +842,13 @@ def run(
         s2=s2_client or make_s2_client(config),
         papers_dir=data_dir / "papers",
         tmp_dir=data_dir / ".tmp",
+        metrics_path=metrics_path,
+        base_metrics=base_metrics,
+        sampler=sampler,
     )
     state.tmp_dir.mkdir(parents=True, exist_ok=True)
 
     metrics.reset()
-    sampler = metrics.ResourceSampler(data_dir)
     sampler.start()
     extract_thread = threading.Thread(target=_extract_worker, args=(state,), name="extract-worker")
     extract_thread.start()
@@ -835,12 +893,7 @@ def run(
         resources = sampler.stop()
         with state.counters_lock:
             counters_snapshot = dict(state.counters)
-        merged = metrics.save_run(
-            data_dir / "logs" / "metrics.json",
-            metrics.stage_seconds(),
-            resources,
-            crawl_counters=counters_snapshot,
-        )
+        merged = _flush_metrics(state, final_resources=resources)
         summary = manifest.summary()
         if config.backup_dir and config.backup_every_ids:
             try:

@@ -17,9 +17,10 @@ import threading
 import time
 from collections.abc import Callable
 from typing import BinaryIO
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from .config import ARXIV_API_HOST, S2_API_HOST, Config
 
@@ -73,7 +74,10 @@ class RateLimiter:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        self._base_floor = min_interval
         self._min_interval = min_interval
+        self._max_adaptive_interval = max(min_interval * 2.0, 6.0)
+        self._adaptive_streak = 0
         self._clock = clock
         self._sleep = sleep
         self._lock = threading.Lock()
@@ -111,6 +115,20 @@ class RateLimiter:
         if self._active_thread is not None:
             self._active_thread = None
             self._lock.release()
+
+    def note_429(self) -> None:
+        """Gently widen the Start-to-Start interval above floor on upstream 429."""
+        self._adaptive_streak = 0
+        self._min_interval = min(self._min_interval + 1.0, self._max_adaptive_interval)
+
+    def note_success(self) -> None:
+        """Ease adaptive penalty back down toward ``_base_floor`` (>= 3.0 s on arXiv)."""
+        if self._min_interval <= self._base_floor:
+            return
+        self._adaptive_streak += 1
+        if self._adaptive_streak >= 40:
+            self._min_interval = max(self._base_floor, self._min_interval - 0.5)
+            self._adaptive_streak = 0
 
 
 class AdaptiveRateLimiter(RateLimiter):
@@ -169,6 +187,9 @@ class HostClient:
         self.limiter = limiter
         self._config = config
         self._session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=1, pool_maxsize=1)
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
         self._session.headers["User-Agent"] = config.user_agent
         self._is_s2 = S2_API_HOST in base_url
         if self._is_s2 and config.s2_api_key:
@@ -196,6 +217,10 @@ class HostClient:
     def get(self, path: str, **kwargs) -> requests.Response:
         url = self._full_url(path)
         kwargs.setdefault("timeout", self._config.request_timeout)  # never hang forever
+        if not self._is_s2 and urlsplit(url).path.startswith("/src/"):
+            headers = dict(kwargs.get("headers") or {})
+            headers.setdefault("Accept-Encoding", "identity")
+            kwargs["headers"] = headers
         stream = bool(kwargs.get("stream"))
         response: requests.Response | None = None
         for attempt in range(self._config.max_retries + 1):

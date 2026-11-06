@@ -30,6 +30,7 @@ class Config:
     s2_min_interval: float = 1.1  # S2 key: 1 req/s; small margin for network latency
     max_retries: int = 5
     max_extract_bytes: int = 2 * 1024**3  # zip-bomb guard (uncompressed total)
+    spool_max_bytes: int = 32 * 1024 * 1024  # keep archives <= 32 MiB in RAM (skip .tmp disk I/O)
     request_timeout: tuple[float, float] = (30.0, 120.0)  # (connect, read) seconds per request
     discovery_batch_size: int = 150  # ids per arXiv ``id_list`` call (O2)
     backup_dir: Path | None = None  # optional mirror for Colab / long runs

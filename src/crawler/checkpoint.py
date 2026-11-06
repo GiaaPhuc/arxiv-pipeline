@@ -10,12 +10,14 @@ legacy folders safely, and unit tests cover both without network.
 
 from __future__ import annotations
 
+import gzip
 import io
 import json
 import logging
 import os
 import shutil
 import sqlite3
+import stat
 import tarfile
 import tempfile
 import time
@@ -185,34 +187,47 @@ def backup_tar_archive(
                     "run restore first or pass allow_shrink=True"
                 )
 
-        staging_tar = tmp_dir / ("backup.tar.gz" if use_gzip else "backup.tar")
-        try:
-            tar_kwargs: dict[str, object] = {"compresslevel": 1} if use_gzip else {}
-            mode = "w:gz" if use_gzip else "w"
-            with tarfile.open(staging_tar, mode, **tar_kwargs) as tf:  # type: ignore[call-overload]
-                if snap_db.is_file():
-                    tf.add(snap_db, arcname="manifest.sqlite", recursive=False)
-                for top_name in _DATA_SUBDIRS:
-                    _add_clean_tree_to_tar(tf, source / top_name, top_name)
-        except tarfile.TarError as exc:
-            raise OSError(f"failed to create backup archive for {source}: {exc}") from exc
-
-        archive_bytes = staging_tar.stat().st_size
-        if destination.is_file() and not allow_shrink and prev_meta is None:
-            prev_size = destination.stat().st_size
-            if prev_size >= 1024 * 1024 and archive_bytes < prev_size // 2:
-                raise OSError(
-                    f"refusing to overwrite {destination} ({prev_size} B) with much smaller "
-                    f"archive ({archive_bytes} B); run restore first or pass allow_shrink=True"
-                )
-
         destination.parent.mkdir(parents=True, exist_ok=True)
         part_path = destination.with_name(f"{destination.name}.part")
         try:
-            with staging_tar.open("rb") as fsrc, part_path.open("wb") as fdst:
-                shutil.copyfileobj(fsrc, fdst, length=_COPY_BUFFER_BYTES)
-                fdst.flush()
-                os.fsync(fdst.fileno())
+            try:
+                with part_path.open("wb", buffering=_COPY_BUFFER_BYTES) as fdst:
+                    if use_gzip:
+                        with (
+                            gzip.GzipFile(fileobj=fdst, mode="wb", compresslevel=1) as gz_out,
+                            tarfile.open(
+                                fileobj=gz_out,
+                                mode="w|",
+                                bufsize=_COPY_BUFFER_BYTES,
+                            ) as tf,
+                        ):
+                            if snap_db.is_file():
+                                _add_file_snapshot_to_tar(tf, snap_db, "manifest.sqlite")
+                            for top_name in _DATA_SUBDIRS:
+                                _add_clean_tree_to_tar(tf, source / top_name, top_name)
+                    else:
+                        with tarfile.open(
+                            fileobj=fdst,
+                            mode="w|",
+                            bufsize=_COPY_BUFFER_BYTES,
+                        ) as tf:
+                            if snap_db.is_file():
+                                _add_file_snapshot_to_tar(tf, snap_db, "manifest.sqlite")
+                            for top_name in _DATA_SUBDIRS:
+                                _add_clean_tree_to_tar(tf, source / top_name, top_name)
+                    fdst.flush()
+                    os.fsync(fdst.fileno())
+            except tarfile.TarError as exc:
+                raise OSError(f"failed to create backup archive for {source}: {exc}") from exc
+
+            archive_bytes = part_path.stat().st_size
+            if destination.is_file() and not allow_shrink and prev_meta is None:
+                prev_size = destination.stat().st_size
+                if prev_size >= 1024 * 1024 and archive_bytes < prev_size // 2:
+                    raise OSError(
+                        f"refusing to overwrite {destination} ({prev_size} B) with much smaller "
+                        f"archive ({archive_bytes} B); run restore first or pass allow_shrink=True"
+                    )
             os.replace(part_path, destination)
         except BaseException:
             part_path.unlink(missing_ok=True)
@@ -309,18 +324,31 @@ def _has_any_clean_files(source: Path) -> bool:
     return False
 
 
+def _make_dir_tarinfo(arcname: str) -> tarfile.TarInfo:
+    info = tarfile.TarInfo(name=arcname)
+    info.type = tarfile.DIRTYPE
+    info.mode = 0o755
+    info.size = 0
+    return info
+
+
 def _add_file_snapshot_to_tar(tf: tarfile.TarFile, file_path: Path, arcname: str) -> None:
     """Add ``file_path`` from one open descriptor so concurrent ``os.replace`` is safe."""
     try:
         with file_path.open("rb") as f:
-            tarinfo = tf.gettarinfo(arcname=arcname, fileobj=f)
-            if not tarinfo.isreg():
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode):
                 return
-            if tarinfo.size <= 1024 * 1024:
-                data = f.read(tarinfo.size)
+            tarinfo = tarfile.TarInfo(name=arcname)
+            tarinfo.type = tarfile.REGTYPE
+            tarinfo.mode = 0o644
+            tarinfo.mtime = int(st.st_mtime)
+            if st.st_size <= 1024 * 1024:
+                data = f.read(st.st_size + 1)
                 tarinfo.size = len(data)
                 tf.addfile(tarinfo, io.BytesIO(data))
             else:
+                tarinfo.size = st.st_size
                 tf.addfile(tarinfo, f)
     except FileNotFoundError:
         return
@@ -329,17 +357,14 @@ def _add_file_snapshot_to_tar(tf: tarfile.TarFile, file_path: Path, arcname: str
 def _add_clean_tree_to_tar(tf: tarfile.TarFile, root: Path, prefix: str) -> None:
     if not root.is_dir():
         return
-    tf.add(root, arcname=prefix, recursive=False)
+    tf.addfile(_make_dir_tarinfo(prefix))
     for current_root, dirs, files in os.walk(root):
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         rel_dir = Path(current_root).relative_to(root).as_posix()
         arc_dir = prefix if rel_dir == "." else f"{prefix}/{rel_dir}"
         for dname in dirs:
-            dir_path = Path(current_root) / dname
-            try:
-                tf.add(dir_path, arcname=f"{arc_dir}/{dname}", recursive=False)
-            except FileNotFoundError:
-                continue
+            if (Path(current_root) / dname).is_dir():
+                tf.addfile(_make_dir_tarinfo(f"{arc_dir}/{dname}"))
         for fname in sorted(files):
             if fname.startswith(".") or fname.endswith(".tmp"):
                 continue
@@ -405,7 +430,10 @@ def _restore_from_archive(
     cleaned = False
     _assert_archive_header(archive_path)
     try:
-        with tarfile.open(archive_path, mode="r:*") as tf:
+        with (
+            archive_path.open("rb", buffering=_COPY_BUFFER_BYTES) as raw_in,
+            tarfile.open(fileobj=raw_in, mode="r|*", bufsize=_COPY_BUFFER_BYTES) as tf,
+        ):
             for member in tf:
                 if not cleaned:
                     destination.mkdir(parents=True, exist_ok=True)
