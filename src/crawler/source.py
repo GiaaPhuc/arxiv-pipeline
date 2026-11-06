@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 _CHUNK_SIZE = 256 * 1024
 _STREAM_CHUNK_SIZE = 128 * 1024
+_MAX_STREAM_ATTEMPTS = 3
 _KEEPALIVE_DRAIN_BYTES = 64 * 1024
 _STREAM_RETRY_ERRORS = (ChunkedEncodingError, ConnectionError, Timeout)
 _GZIP_MAGIC = b"\x1f\x8b"
@@ -129,7 +130,9 @@ def sniff_archive_type(path: Path | bytes | bytearray) -> ArchiveType:
 
 def _stream_attempts(client: HostClient) -> int:
     config = getattr(client, "_config", None)
-    return (config.max_retries + 1) if config is not None else 1
+    # Cap body-stream retries: each retry costs another >= 3 s arXiv request, and a pair
+    # that keeps breaking is recorded ``failed`` and retried on the next run instead.
+    return min(config.max_retries + 1, _MAX_STREAM_ATTEMPTS) if config is not None else 1
 
 
 def _retry_after_seconds(response) -> float | None:

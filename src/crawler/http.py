@@ -76,7 +76,9 @@ class RateLimiter:
     ) -> None:
         self._base_floor = min_interval
         self._min_interval = min_interval
-        self._max_adaptive_interval = max(min_interval * 2.0, 6.0)
+        # Cap at floor + 1 s: a sustained throttle (429 every ~20 requests, measured in
+        # crawl.log) pinned the old 6 s cap and halved throughput without avoiding 429.
+        self._max_adaptive_interval = min_interval + 1.0 if min_interval > 0 else 0.0
         self._adaptive_streak = 0
         self._clock = clock
         self._sleep = sleep
@@ -119,14 +121,14 @@ class RateLimiter:
     def note_429(self) -> None:
         """Gently widen the Start-to-Start interval above floor on upstream 429."""
         self._adaptive_streak = 0
-        self._min_interval = min(self._min_interval + 1.0, self._max_adaptive_interval)
+        self._min_interval = min(self._min_interval + 0.5, self._max_adaptive_interval)
 
     def note_success(self) -> None:
         """Ease adaptive penalty back down toward ``_base_floor`` (>= 3.0 s on arXiv)."""
         if self._min_interval <= self._base_floor:
             return
         self._adaptive_streak += 1
-        if self._adaptive_streak >= 40:
+        if self._adaptive_streak >= 10:
             self._min_interval = max(self._base_floor, self._min_interval - 0.5)
             self._adaptive_streak = 0
 

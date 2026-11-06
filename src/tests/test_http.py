@@ -279,13 +279,13 @@ def test_arxiv_rate_limiter_adapts_above_3s_floor_on_429_and_recovers():
 
     limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep)
     limiter.note_429()
-    assert limiter._min_interval == 4.0  # noqa: SLF001
+    assert limiter._min_interval == 3.5  # noqa: SLF001
 
     limiter.wait()
     limiter.done()
     limiter.wait()
     limiter.done()
-    assert sleeps == [4.0]
+    assert sleeps == [3.5]
 
     for _ in range(80):
         limiter.note_success()
