@@ -917,11 +917,20 @@ def run(
                 break
             except queue.Full:
                 continue
-        extract_thread.join()
+        try:
+            extract_thread.join()
+        except RuntimeError:
+            pass
         state.s2_queue.put(None)
-        s2_thread.join()
+        try:
+            s2_thread.join()
+        except RuntimeError:
+            pass
         if state.checkpoint_thread is not None:
-            state.checkpoint_thread.join()
+            try:
+                state.checkpoint_thread.join()
+            except RuntimeError:
+                pass
         resources = sampler.stop()
         with state.counters_lock:
             counters_snapshot = dict(state.counters)
