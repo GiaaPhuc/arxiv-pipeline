@@ -176,8 +176,11 @@ class ResourceSampler:
         self._thread.start()
 
     def snapshot(self) -> dict[str, float]:
-        """Live non-blocking snapshot of RAM and disk peaks while sampling continues."""
-        self._sample_ram()
+        """Live O(1) non-blocking snapshot of RAM and disk peaks while sampling continues."""
+        with self._sample_lock:
+            has_samples = self._ram_samples > 0
+        if not has_samples:
+            self._sample_ram()
         with self._sample_lock:
             mean = self._ram_sum / self._ram_samples if self._ram_samples else 0.0
             return {

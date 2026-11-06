@@ -63,7 +63,7 @@ class DownloadResult:
     http_status: int
     raw_archive_bytes: int = 0
     retry_after: float | None = None  # seconds from Retry-After on 429
-    data: bytes | None = None  # in-memory archive bytes when <= spool_max_bytes
+    data: bytes | bytearray | None = None  # in-memory archive bytes when <= spool_max_bytes
 
 
 @dataclass
@@ -81,8 +81,8 @@ class _UnsafeArchiveError(ValueError):
     """An archive member cannot safely be represented below the output root."""
 
 
-def _open_gzip_reader(archive: Path | bytes) -> gzip.GzipFile:
-    if isinstance(archive, bytes):
+def _open_gzip_reader(archive: Path | bytes | bytearray) -> gzip.GzipFile:
+    if isinstance(archive, (bytes, bytearray)):
         return gzip.GzipFile(fileobj=io.BytesIO(archive), mode="rb")
     return gzip.open(archive, "rb")
 
@@ -100,10 +100,10 @@ def _looks_like_tar_header(tar_header: bytes) -> bool:
     return False
 
 
-def sniff_archive_type(path: Path | bytes) -> ArchiveType:
+def sniff_archive_type(path: Path | bytes | bytearray) -> ArchiveType:
     """Identify a source package from its magic bytes and decompressed tar header."""
-    if isinstance(path, bytes):
-        prefix = path[:512]
+    if isinstance(path, (bytes, bytearray)):
+        prefix = bytes(path[:512])
     else:
         with Path(path).open("rb") as source:
             prefix = source.read(512)
@@ -185,7 +185,7 @@ def download_source(
                 return DownloadResult(path=None, http_status=status)
 
             tmp_dir = Path(tmp_dir)
-            mem_chunks: list[bytes] = []
+            mem_buf = bytearray()
             if spool_max_bytes <= 0:
                 tmp_dir.mkdir(parents=True, exist_ok=True)
                 fd, name = tempfile.mkstemp(prefix="arxiv-source-", suffix=".part", dir=tmp_dir)
@@ -243,14 +243,14 @@ def download_source(
                     fd, name = tempfile.mkstemp(prefix="arxiv-source-", suffix=".part", dir=tmp_dir)
                     temp_path = Path(name)
                     disk_out = os.fdopen(fd, "wb")
-                    for buffered in mem_chunks:
-                        disk_out.write(buffered)
-                    mem_chunks.clear()
+                    if mem_buf:
+                        disk_out.write(mem_buf)
+                        mem_buf.clear()
 
                 if disk_out is not None:
                     disk_out.write(chunk)
                 else:
-                    mem_chunks.append(chunk)
+                    mem_buf.extend(chunk)
                 written += len(chunk)
 
             if disk_out is not None:
@@ -261,7 +261,7 @@ def download_source(
                 path=None,
                 http_status=status,
                 raw_archive_bytes=written,
-                data=b"".join(mem_chunks),
+                data=mem_buf,
             )
         except _STREAM_RETRY_ERRORS as exc:
             last_exc = exc
@@ -443,6 +443,7 @@ def _write_tar_members_from_stream(
     entries: list[FileEntry] = []
     seen_outputs: dict[str, tuple[int, Path]] = {}
     member_count = 0
+    stage_root = staging.resolve()
 
     with tarfile.open(fileobj=gz_stream, mode="r|", bufsize=_CHUNK_SIZE) as archive:
         for member in archive:
@@ -479,7 +480,6 @@ def _write_tar_members_from_stream(
             output = None
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                stage_root = staging.resolve()
                 if not target.resolve().is_relative_to(stage_root):
                     raise _UnsafeArchiveError(f"member escapes staging directory: {member.name!r}")
                 if prev_record is not None:
@@ -775,7 +775,7 @@ def download_and_extract_source(
 
 
 def extract_tex_bib(
-    archive: Path | bytes,
+    archive: Path | bytes | bytearray,
     dest_dir: Path,
     config: Config,
     *,
@@ -784,17 +784,28 @@ def extract_tex_bib(
     raw_archive_bytes: int | None = None,
 ) -> VersionMeta:
     """Extract safe TeX/Bib members and return metadata for one arXiv version."""
-    archive_source: Path | bytes = archive if isinstance(archive, bytes) else Path(archive)
+    archive_source: Path | bytes | bytearray = (
+        archive if isinstance(archive, (bytes, bytearray)) else Path(archive)
+    )
     dest_dir = Path(dest_dir)
     if raw_archive_bytes is not None and raw_archive_bytes > 0:
         archive_bytes = raw_archive_bytes
-    elif isinstance(archive_source, bytes):
+    elif isinstance(archive_source, (bytes, bytearray)):
         archive_bytes = len(archive_source)
     else:
         archive_bytes = archive_source.stat().st_size
-    archive_type = sniff_archive_type(archive_source)
 
-    if archive_type in (ArchiveType.PDF, ArchiveType.ZIP, ArchiveType.UNKNOWN):
+    if isinstance(archive_source, (bytes, bytearray)):
+        prefix = bytes(archive_source[:512])
+    else:
+        with archive_source.open("rb") as handle:
+            prefix = handle.read(512)
+
+    if (
+        prefix.startswith(_PDF_MAGIC)
+        or prefix.startswith(_ZIP_MAGICS)
+        or not prefix.startswith(_GZIP_MAGIC)
+    ):
         return VersionMeta(
             arxiv_id=arxiv_id,
             version=version,
@@ -808,14 +819,23 @@ def extract_tex_bib(
     staging = Path(tempfile.mkdtemp(prefix=f".{dest_dir.name}-staging-", dir=dest_dir.parent))
     raw_bytes = 0
     try:
-        if archive_type is ArchiveType.TAR_GZ:
-            raw_bytes, kept_bytes, entries = _write_tar_members(
-                archive_source, staging, config.max_extract_bytes
-            )
-        else:
-            raw_bytes, kept_bytes, entries = _write_single_gzip(
-                archive_source, staging, config.max_extract_bytes
-            )
+        with _open_gzip_reader(archive_source) as gz_stream:
+            first_block = bytearray()
+            while len(first_block) < 512:
+                piece = gz_stream.read(512 - len(first_block))
+                if not piece:
+                    break
+                first_block.extend(piece)
+            tar_header = bytes(first_block)
+            combined = _PrefixedReader(tar_header, gz_stream)
+            if _looks_like_tar_header(tar_header):
+                raw_bytes, kept_bytes, entries = _write_tar_members_from_stream(
+                    combined, staging, config.max_extract_bytes
+                )
+            else:
+                raw_bytes, kept_bytes, entries = _write_single_gzip_from_stream(
+                    combined, staging, config.max_extract_bytes
+                )
 
         os.replace(staging, dest_dir)
         status = Status.OK if entries else Status.OK_NO_TEX

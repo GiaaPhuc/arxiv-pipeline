@@ -755,18 +755,27 @@ def test_inflight_pipeline_never_creates_tmp_dir_and_records_stage_metrics(tmp_p
     _mock_s2()
     config = _config(tmp_path)
     tmp_seen_during_install: list[bool] = []
+    extract_threads: list[str] = []
     real_install = pipeline._install_version
+    real_extract = pipeline.extract_tex_bib
 
     def check_no_tmp(final, part, old, meta):
         tmp_seen_during_install.append((config.data_dir / ".tmp").exists())
         real_install(final, part, old, meta)
 
+    def track_extract_thread(*args, **kwargs):
+        extract_threads.append(threading.current_thread().name)
+        return real_extract(*args, **kwargs)
+
     monkeypatch.setattr(pipeline, "_install_version", check_no_tmp)
+    monkeypatch.setattr(pipeline, "extract_tex_bib", track_extract_thread)
     summary = pipeline.run(["2408.00001", "2408.00004"], config)
 
     assert summary["ok"] == 4 and summary["no_source"] == 1
     assert tmp_seen_during_install and not any(tmp_seen_during_install)
     assert not (config.data_dir / ".tmp").exists()
+    # Extraction runs strictly off the main network thread on extract-worker.
+    assert extract_threads and all(name == "extract-worker" for name in extract_threads)
     metrics_doc = _read(config.data_dir / "logs" / "metrics.json")
     assert metrics_doc["stage_seconds"]["download"] > 0
     assert metrics_doc["stage_seconds"]["extract"] > 0

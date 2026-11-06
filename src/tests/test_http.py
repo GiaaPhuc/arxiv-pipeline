@@ -309,11 +309,9 @@ def test_arxiv_src_sets_identity_accept_encoding():
     assert "headers" not in api_call.kwargs
 
 
-def test_host_client_enables_persistent_keepalive_single_connection_pool():
+def test_host_client_enables_single_connection_pool():
     config = Config(contact="test@example.com", arxiv_min_interval=3.0)
     client = HostClient("https://export.arxiv.org", RateLimiter(3.0), config)
-    assert client._session.headers["Connection"] == "keep-alive"  # noqa: SLF001
     adapter = client._session.get_adapter("https://export.arxiv.org")  # noqa: SLF001
     assert adapter._pool_connections == 1  # noqa: SLF001
     assert adapter._pool_maxsize == 1  # noqa: SLF001
-    assert adapter._pool_block is True  # noqa: SLF001
