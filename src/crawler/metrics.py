@@ -64,6 +64,13 @@ def stage_timer(stage: str) -> AbstractContextManager[None]:
     return _timer(stage)
 
 
+def add_stage_seconds(stage: str, elapsed: float, *, count: int = 1) -> None:
+    """Add pre-measured active seconds to ``stage`` (used by cut-through streaming)."""
+    with _lock:
+        _stage_seconds[stage] += max(float(elapsed), 0.0)
+        _stage_counts[stage] += count
+
+
 def stage_seconds() -> dict[str, float]:
     """Cumulative active seconds per stage in this process (all known stages present)."""
     with _lock:
@@ -290,22 +297,43 @@ def flush_run(
     return merged
 
 
+def flush_live(
+    path: Path,
+    base_previous: dict,
+    stages: dict[str, float],
+    resources: dict[str, float],
+    *,
+    crawl_counters: dict[str, float | int] | None = None,
+) -> dict:
+    """Live checkpoint alias for ``flush_run`` (idempotent within a crawl session)."""
+    return flush_run(
+        path,
+        base_previous,
+        stages,
+        resources,
+        crawl_counters=crawl_counters,
+    )
+
+
 def save_run(
     path: Path,
     stages: dict[str, float],
     resources: dict[str, float],
     *,
     crawl_counters: dict[str, float | int] | None = None,
+    base_previous: dict | None = None,
 ) -> dict:
     """Merge this run into the cumulative metrics file and return the merged document.
 
     ``stage_seconds`` are summed over runs (active time, honest under resume); RAM and
     disk peaks keep the maximum; ``runs`` counts invocations; the mean RAM is the mean
-    of the per-run means weighted by their sample counts.
+    of the per-run means weighted by their sample counts. Pass ``base_previous`` to
+    flush multiple times within the same session without double-counting ``runs``.
     """
+    base = load_saved(path) if base_previous is None else base_previous
     return flush_run(
         path,
-        load_saved(path),
+        base,
         stages,
         resources,
         crawl_counters=crawl_counters,

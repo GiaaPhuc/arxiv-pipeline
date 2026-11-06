@@ -746,3 +746,27 @@ def test_mid_run_checkpoint_flushes_metrics_without_double_counting(tmp_path, mo
     final_metrics = _read(config.data_dir / "logs" / "metrics.json")
     assert final_metrics["runs"] == 1
     assert final_metrics["active_seconds"] >= mid_snapshots[0]["active_seconds"]
+
+
+@responses.activate
+def test_inflight_pipeline_never_creates_tmp_dir_and_records_stage_metrics(tmp_path, monkeypatch):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+    tmp_seen_during_install: list[bool] = []
+    real_install = pipeline._install_version
+
+    def check_no_tmp(final, part, old, meta):
+        tmp_seen_during_install.append((config.data_dir / ".tmp").exists())
+        real_install(final, part, old, meta)
+
+    monkeypatch.setattr(pipeline, "_install_version", check_no_tmp)
+    summary = pipeline.run(["2408.00001", "2408.00004"], config)
+
+    assert summary["ok"] == 4 and summary["no_source"] == 1
+    assert tmp_seen_during_install and not any(tmp_seen_during_install)
+    assert not (config.data_dir / ".tmp").exists()
+    metrics_doc = _read(config.data_dir / "logs" / "metrics.json")
+    assert metrics_doc["stage_seconds"]["download"] > 0
+    assert metrics_doc["stage_seconds"]["extract"] > 0

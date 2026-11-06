@@ -190,3 +190,53 @@ def test_cli_writes_tables_and_stats_into_data_stats_and_validator_accepts_it(
 def test_cli_refuses_a_directory_without_papers(tmp_path: Path, capsys):
     assert export_data.main(["--data-dir", str(tmp_path)]) == 2
     assert "no papers directory" in capsys.readouterr().err
+
+
+def test_cross_version_dedup_reports_unchanged_revisions_and_duplicate_sha256(
+    data_dir: Path, tmp_path: Path
+):
+    v1 = {
+        "status": "ok",
+        "raw_archive_bytes": 1000,
+        "raw_uncompressed_bytes": 5000,
+        "kept_bytes": 300,
+        "files": [
+            {"path": "main.tex", "size": 200, "sha256": "aaa"},
+            {"path": "refs.bib", "size": 100, "sha256": "bbb"},
+        ],
+    }
+    # v2 is 100% identical in .tex/.bib (only figures/PDF changed on arXiv):
+    v2 = {
+        "status": "ok",
+        "raw_archive_bytes": 1200,
+        "raw_uncompressed_bytes": 6000,
+        "kept_bytes": 300,
+        "files": [
+            {"path": "main.tex", "size": 200, "sha256": "aaa"},
+            {"path": "refs.bib", "size": 100, "sha256": "bbb"},
+        ],
+    }
+    # v3 edits main.tex ("ccc") while refs.bib ("bbb") stays identical:
+    v3 = {
+        "status": "ok",
+        "raw_archive_bytes": 1300,
+        "raw_uncompressed_bytes": 6200,
+        "kept_bytes": 350,
+        "files": [
+            {"path": "main.tex", "size": 250, "sha256": "ccc"},
+            {"path": "refs.bib", "size": 100, "sha256": "bbb"},
+        ],
+    }
+    _paper(data_dir, "2408.00100", [v1, v2, v3], refs=[FULL_REF])
+    manifest = Manifest(data_dir / "manifest.sqlite")
+    for ver in (1, 2, 3):
+        manifest.record(VersionMeta("2408.00100", ver, Status.OK))
+    manifest.close()
+
+    summary = export_stats(data_dir, tmp_path / "out")
+    dedup = summary["cross_version_dedup"]
+    assert dedup["multi_version_papers_with_source"] == 1
+    assert dedup["unchanged_revision_pairs"] == 1  # v1 -> v2 identical
+    assert dedup["duplicate_files_across_versions"] == 3  # 2 in v2 + 1 (refs.bib) in v3
+    assert dedup["duplicate_bytes_across_versions"] == 200 + 100 + 100  # 400 bytes
+    assert dedup["dedup_byte_ratio"] == pytest.approx(400 / (300 + 300 + 350))

@@ -183,6 +183,11 @@ def export_stats(data_dir: Path, out_dir: Path) -> dict:
     refs_total = refs_arxiv_total = 0
     complete_ratio_sum, complete_ratio_n = 0.0, 0
     extracted = {"n": 0, "archive": 0, "raw": 0, "kept": 0}
+    dedup_multi_papers = 0
+    unchanged_revision_pairs = 0
+    dup_files = 0
+    dup_bytes = 0
+    dedup_multi_kept_bytes = 0
 
     papers = sorted(corpus.papers(), key=lambda p: p.arxiv_id)
     for paper in papers:
@@ -209,6 +214,27 @@ def export_stats(data_dir: Path, out_dir: Path) -> dict:
             complete_ratio_n += 1
 
         versions_per_paper[paper.num_versions] += 1
+        extracted_versions = [
+            v
+            for v in sorted(versions, key=lambda item: item.version)
+            if v.status in (Status.OK, Status.OK_NO_TEX)
+        ]
+        if len(extracted_versions) >= 2:
+            dedup_multi_papers += 1
+            dedup_multi_kept_bytes += sum(v.kept_bytes for v in extracted_versions)
+            seen_hashes = {f.sha256 for f in extracted_versions[0].files if f.sha256}
+            prev_sig = {(f.path, f.sha256) for f in extracted_versions[0].files}
+            for v_next in extracted_versions[1:]:
+                curr_sig = {(f.path, f.sha256) for f in v_next.files}
+                if curr_sig == prev_sig:
+                    unchanged_revision_pairs += 1
+                prev_sig = curr_sig
+                for entry in v_next.files:
+                    if entry.sha256 and entry.sha256 in seen_hashes:
+                        dup_files += 1
+                        dup_bytes += entry.size
+                    elif entry.sha256:
+                        seen_hashes.add(entry.sha256)
         for v in versions:
             status_counts[v.status.value] += 1
             if v.status in (Status.FAILED, Status.CORRUPT) and v.error:
@@ -288,6 +314,13 @@ def export_stats(data_dir: Path, out_dir: Path) -> dict:
         "refs_total": refs_total,
         "refs_with_arxiv_id": refs_arxiv_total,
         "share_refs_with_arxiv_id": _mean(refs_arxiv_total, refs_total),  # (c)
+        "cross_version_dedup": {
+            "multi_version_papers_with_source": dedup_multi_papers,
+            "unchanged_revision_pairs": unchanged_revision_pairs,
+            "duplicate_files_across_versions": dup_files,
+            "duplicate_bytes_across_versions": dup_bytes,
+            "dedup_byte_ratio": _mean(dup_bytes, dedup_multi_kept_bytes),
+        },
         "top_errors": [[message, n] for message, n in errors.most_common(10)],
         "definitions": {
             "papers_success": "every version has status ok, ok_no_tex or no_source",
@@ -299,6 +332,8 @@ def export_stats(data_dir: Path, out_dir: Path) -> dict:
             "mean_refs_complete_ratio": "(b) mean per paper of the share of references with "
             "title, authors and date (papers with at least one reference)",
             "share_refs_with_arxiv_id": "(c) share of all references that carry an arXiv id",
+            "cross_version_dedup": "sha256-level overlap of kept .tex/.bib files across v1..vN "
+            "among papers with >= 2 extracted versions (feeds Milestone 2 deduplication)",
         },
     }
 

@@ -15,6 +15,7 @@ from crawler.models import Status
 from crawler.source import (
     ArchiveType,
     DownloadResult,
+    download_and_extract_source,
     download_source,
     extract_tex_bib,
     sniff_archive_type,
@@ -545,3 +546,110 @@ def test_in_memory_spool_skips_temp_file_below_threshold_and_spills_above(
     )
     assert res_spill.data is None
     assert res_spill.path is not None and res_spill.path.read_bytes() == payload
+
+
+def test_inflight_stream_extracts_tar_gz_even_when_images_precede_main_tex(tmp_path: Path) -> None:
+    archive_path = _write_tar(
+        tmp_path / "figs-first.tar.gz",
+        [
+            ("figs/heavy.png", b"\x89PNG" + b"x" * 20_000),
+            ("JSSC.bib", b"@article{old}\n"),
+            ("jssc.bib", b"@article{new}\n"),
+            ("main.tex", b"\\documentclass{article}\n\\begin{document}Hi\\end{document}\n"),
+        ],
+    )
+    payload = archive_path.read_bytes()
+    # Stream in small 19-byte chunks to stress _CountingChunkStream & _PrefixedReader boundaries:
+    chunks = [payload[i : i + 19] for i in range(0, len(payload), 19)]
+    dest = tmp_path / "v1" / "tex"
+
+    res = download_and_extract_source(
+        FakeClient(FakeResponse(200, chunks)),
+        "2408.06045",
+        1,
+        dest,
+        Config(max_extract_bytes=1_000_000),
+    )
+
+    assert res.http_status == 200
+    assert res.meta is not None
+    assert res.meta.status is Status.OK
+    assert res.meta.raw_archive_bytes == len(payload)
+    assert not (dest / "figs" / "heavy.png").exists()
+    assert (dest / "main.tex").read_bytes().startswith(b"\\documentclass{article}")
+    assert {e.path for e in res.meta.files} == {"jssc.bib", "main.tex"}
+    assert not list((tmp_path / "v1").glob(".tex-staging-*"))
+
+
+def test_inflight_stream_supports_single_gzip_and_early_pdf_zip_abort(
+    single_gz_source: Path,
+    source_members: dict[str, bytes],
+    tmp_path: Path,
+) -> None:
+    gz_bytes = single_gz_source.read_bytes()
+    single_dest = tmp_path / "single" / "tex"
+    res_gz = download_and_extract_source(
+        FakeClient(FakeResponse(200, [gz_bytes[:5], gz_bytes[5:]])),
+        "2408.06045",
+        1,
+        single_dest,
+        Config(max_extract_bytes=1_000_000),
+    )
+    assert res_gz.meta is not None and res_gz.meta.status is Status.OK
+    assert (single_dest / "main.tex").read_bytes() == source_members["main.tex"]
+
+    chunks_read = 0
+
+    class BigZipResponse(FakeResponse):
+        def __init__(self) -> None:
+            super().__init__(200)
+            self.headers = {"Content-Length": "25000000"}
+
+        def iter_content(self, chunk_size: int = 1):
+            nonlocal chunks_read
+            self.iterated = True
+            for chunk in (b"PK\x03\x04" + b"z" * 600, b"never-fetched"):
+                chunks_read += 1
+                yield chunk
+
+    zip_dest = tmp_path / "zip" / "tex"
+    res_zip = download_and_extract_source(
+        FakeClient(BigZipResponse()),
+        "2408.06045",
+        1,
+        zip_dest,
+        Config(max_extract_bytes=1_000_000),
+    )
+    assert chunks_read == 1
+    assert res_zip.meta is not None and res_zip.meta.status is Status.NO_SOURCE
+    assert res_zip.meta.raw_archive_bytes == 25_000_000
+    assert not zip_dest.exists()
+
+
+def test_inflight_stream_retries_mid_tar_network_drop_instead_of_marking_corrupt(
+    tar_gz_source: Path,
+    tmp_path: Path,
+) -> None:
+    payload = tar_gz_source.read_bytes()
+    half = len(payload) // 2
+    dropped = FakeResponse(
+        200,
+        [payload[:half]],
+        requests.exceptions.ChunkedEncodingError("connection reset mid-tar"),
+    )
+    recovered = FakeResponse(200, [payload[:100], payload[100:]])
+    client = _RetryFakeClient([dropped, recovered])
+    dest = tmp_path / "retry" / "tex"
+
+    res = download_and_extract_source(
+        client,
+        "2408.06045",
+        1,
+        dest,
+        Config(max_extract_bytes=1_000_000),
+    )
+
+    assert len(client.calls) == 2
+    assert res.meta is not None and res.meta.status is Status.OK
+    assert (dest / "main.tex").is_file()
+    assert not list((tmp_path / "retry").glob(".tex-staging-*"))
