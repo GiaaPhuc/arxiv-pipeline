@@ -163,7 +163,9 @@ def fetch_references_batch(client: HostClient, arxiv_ids: list[str]) -> dict[str
         if not isinstance(item, dict):
             raise ValueError(f"Unexpected batch element for {base}")
         if _references_truncated(item):
-            out[base] = fetch_references(client, base)
+            fallback = fetch_references(client, base)
+            fallback.venue = _clean_venue(item.get("venue"))
+            out[base] = fallback
             continue
         refs = item.get("references") or []
         parsed = [_parse_ref(x) for x in refs if isinstance(x, dict)]

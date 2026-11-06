@@ -234,15 +234,32 @@ def test_uncompressed_limit_counts_ignored_images_and_cleans_staging(
     assert not list(tmp_path.glob(".too-large-staging-*"))
 
 
-def test_duplicate_output_path_is_rejected_without_partial_files(
+def test_duplicate_output_path_last_entry_wins_and_updates_metadata(
     duplicate_path_source: Path,
     tmp_path: Path,
 ) -> None:
     dest = tmp_path / "duplicate"
     meta = _extract(duplicate_path_source, dest)
-    assert meta.status is Status.CORRUPT
-    assert "duplicate" in (meta.error or "")
-    assert not dest.exists()
+    assert meta.status is Status.OK
+    assert (dest / "main.tex").read_bytes() == b"Second content.\n"
+    assert len(meta.files) == 1
+    assert meta.files[0].path == "main.tex"
+    assert meta.files[0].size == len(b"Second content.\n")
+    assert meta.files[0].sha256 == hashlib.sha256(b"Second content.\n").hexdigest()
+    assert meta.kept_bytes == len(b"Second content.\n")
+    assert meta.raw_uncompressed_bytes == len(b"First content.\n") + len(b"Second content.\n")
+
+    # Case-insensitive duplicate (e.g. JSSC.bib followed by jssc.bib) also overwrites cleanly:
+    case_archive = _write_tar(
+        tmp_path / "jssc.tar.gz",
+        [("JSSC.bib", b"@article{old}\n"), ("jssc.bib", b"@article{updated, year={2024}}\n")],
+    )
+    case_dest = tmp_path / "case-dup"
+    case_meta = _extract(case_archive, case_dest)
+    assert case_meta.status is Status.OK
+    assert len(case_meta.files) == 1
+    assert case_meta.files[0].path == "jssc.bib"
+    assert case_meta.kept_bytes == len(b"@article{updated, year={2024}}\n")
 
 
 def test_same_basename_in_different_directories_and_uppercase_suffixes_are_kept(
@@ -486,3 +503,45 @@ def test_download_pdf_aborts_even_when_magic_split_across_tiny_chunks(tmp_path: 
     assert chunks_read == 2
     assert result.path is not None
     assert sniff_archive_type(result.path) is ArchiveType.PDF
+
+
+def test_in_memory_spool_skips_temp_file_below_threshold_and_spills_above(
+    tar_gz_source: Path,
+    tmp_path: Path,
+) -> None:
+    payload = tar_gz_source.read_bytes()
+    mem_tmp = tmp_path / "mem-tmp"
+    res_mem = download_source(
+        FakeClient(FakeResponse(200, [payload[:64], payload[64:]])),
+        "2408.06045",
+        1,
+        mem_tmp,
+        spool_max_bytes=len(payload) + 100,
+    )
+    assert res_mem.path is None
+    assert res_mem.data == payload
+    assert not mem_tmp.exists()  # zero temp-dir I/O when within spool threshold
+
+    dest = tmp_path / "mem-extracted"
+    meta = extract_tex_bib(
+        res_mem.data,
+        dest,
+        Config(max_extract_bytes=1_000_000),
+        arxiv_id="2408.06045",
+        version=1,
+        raw_archive_bytes=res_mem.raw_archive_bytes,
+    )
+    assert meta.status is Status.OK
+    assert (dest / "main.tex").is_file()
+
+    # Above spool_max_bytes, seamlessly spills to tmp_dir:
+    spill_tmp = tmp_path / "spill-tmp"
+    res_spill = download_source(
+        FakeClient(FakeResponse(200, [payload[:32], payload[32:]])),
+        "2408.06045",
+        1,
+        spill_tmp,
+        spool_max_bytes=16,
+    )
+    assert res_spill.data is None
+    assert res_spill.path is not None and res_spill.path.read_bytes() == payload

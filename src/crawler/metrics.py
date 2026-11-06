@@ -127,12 +127,13 @@ class ResourceSampler:
         self,
         data_dir: Path,
         interval: float = 5.0,
-        disk_interval: float = 60.0,
+        disk_interval: float = 300.0,
     ) -> None:
         self._data_dir = Path(data_dir)
         self._interval = max(interval, 0.01)
         self._disk_interval = max(disk_interval, self._interval)
         self._stop = threading.Event()
+        self._sample_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._ram_samples = 0
         self._ram_sum = 0
@@ -141,12 +142,15 @@ class ResourceSampler:
 
     def _sample_ram(self) -> None:
         rss = total_rss_bytes()
-        self._ram_samples += 1
-        self._ram_sum += rss
-        self._ram_peak = max(self._ram_peak, rss)
+        with self._sample_lock:
+            self._ram_samples += 1
+            self._ram_sum += rss
+            self._ram_peak = max(self._ram_peak, rss)
 
     def _sample_disk(self) -> None:
-        self._disk_peak = max(self._disk_peak, tree_size(self._data_dir))
+        size = tree_size(self._data_dir)
+        with self._sample_lock:
+            self._disk_peak = max(self._disk_peak, size)
 
     def _run(self) -> None:
         next_disk = 0.0
@@ -164,6 +168,19 @@ class ResourceSampler:
         self._thread = threading.Thread(target=self._run, name="resource-sampler", daemon=True)
         self._thread.start()
 
+    def snapshot(self) -> dict[str, float]:
+        """Live non-blocking snapshot of RAM and disk peaks while sampling continues."""
+        self._sample_ram()
+        with self._sample_lock:
+            mean = self._ram_sum / self._ram_samples if self._ram_samples else 0.0
+            return {
+                "ram_peak_bytes": float(self._ram_peak),
+                "ram_mean_bytes": float(mean),
+                "ram_samples": float(self._ram_samples),
+                "disk_peak_bytes": float(self._disk_peak),
+                "disk_final_bytes": float(self._disk_peak),
+            }
+
     def stop(self) -> dict[str, float]:
         """Return e.g. ``{"ram_peak_bytes", "ram_mean_bytes", "disk_peak_bytes"}``."""
         if self._thread is not None:
@@ -173,15 +190,17 @@ class ResourceSampler:
         # One last reading so short runs always report something and the disk peak
         # includes the final output size.
         self._sample_ram()
-        self._sample_disk()
-        mean = self._ram_sum / self._ram_samples if self._ram_samples else 0.0
-        return {
-            "ram_peak_bytes": float(self._ram_peak),
-            "ram_mean_bytes": float(mean),
-            "ram_samples": float(self._ram_samples),
-            "disk_peak_bytes": float(self._disk_peak),
-            "disk_final_bytes": float(tree_size(self._data_dir)),
-        }
+        final_disk = tree_size(self._data_dir)
+        with self._sample_lock:
+            self._disk_peak = max(self._disk_peak, final_disk)
+            mean = self._ram_sum / self._ram_samples if self._ram_samples else 0.0
+            return {
+                "ram_peak_bytes": float(self._ram_peak),
+                "ram_mean_bytes": float(mean),
+                "ram_samples": float(self._ram_samples),
+                "disk_peak_bytes": float(self._disk_peak),
+                "disk_final_bytes": float(final_disk),
+            }
 
 
 def load_saved(path: Path) -> dict:
@@ -192,20 +211,14 @@ def load_saved(path: Path) -> dict:
         return {}
 
 
-def save_run(
-    path: Path,
+def merge_with_base(
+    previous: dict,
     stages: dict[str, float],
     resources: dict[str, float],
     *,
     crawl_counters: dict[str, float | int] | None = None,
 ) -> dict:
-    """Merge this run into the cumulative metrics file and return the merged document.
-
-    ``stage_seconds`` are summed over runs (active time, honest under resume); RAM and
-    disk peaks keep the maximum; ``runs`` counts invocations; the mean RAM is the mean
-    of the per-run means weighted by their sample counts.
-    """
-    previous = load_saved(path)
+    """Merge one session's cumulative counters onto ``previous`` without double-counting."""
     prev_stages = previous.get("stage_seconds", {})
     merged_stages = {
         stage: float(prev_stages.get(stage, 0.0)) + float(stages.get(stage, 0.0))
@@ -235,7 +248,7 @@ def save_run(
         "papers_not_indexed": int(prev_s2.get("papers_not_indexed", 0))
         + int(s2_in.get("s2_not_indexed", 0)),
     }
-    merged = {
+    return {
         "runs": int(previous.get("runs", 0)) + 1,
         "last_run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "stage_seconds": merged_stages,
@@ -255,6 +268,45 @@ def save_run(
             "disk_final_bytes": float(resources.get("disk_final_bytes", 0.0)),
         },
     }
+
+
+def flush_run(
+    path: Path,
+    base_previous: dict,
+    stages: dict[str, float],
+    resources: dict[str, float],
+    *,
+    crawl_counters: dict[str, float | int] | None = None,
+) -> dict:
+    """Atomically write ``base_previous + current_session`` to ``path`` (idempotent per run)."""
+    merged = merge_with_base(
+        base_previous,
+        stages,
+        resources,
+        crawl_counters=crawl_counters,
+    )
     with atomic_write(Path(path)) as tmp:
         tmp.write_text(json.dumps(merged, indent=2, sort_keys=True), encoding="utf-8")
     return merged
+
+
+def save_run(
+    path: Path,
+    stages: dict[str, float],
+    resources: dict[str, float],
+    *,
+    crawl_counters: dict[str, float | int] | None = None,
+) -> dict:
+    """Merge this run into the cumulative metrics file and return the merged document.
+
+    ``stage_seconds`` are summed over runs (active time, honest under resume); RAM and
+    disk peaks keep the maximum; ``runs`` counts invocations; the mean RAM is the mean
+    of the per-run means weighted by their sample counts.
+    """
+    return flush_run(
+        path,
+        load_saved(path),
+        stages,
+        resources,
+        crawl_counters=crawl_counters,
+    )

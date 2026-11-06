@@ -62,6 +62,10 @@ class Manifest:
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        rows = self._conn.execute("SELECT arxiv_id, version, status FROM version_pairs").fetchall()
+        self._status_cache: dict[tuple[str, int], Status] = {
+            (row["arxiv_id"], int(row["version"])): Status(row["status"]) for row in rows
+        }
 
     def close(self) -> None:
         with self._lock:
@@ -69,7 +73,10 @@ class Manifest:
 
     def register(self, arxiv_id: str, version: int) -> None:
         """Insert a ``pending`` row if the pair is unknown (idempotent)."""
+        key = (arxiv_id, version)
         with self._lock:
+            if key in self._status_cache:
+                return
             self._conn.execute(
                 """
                 INSERT OR IGNORE INTO version_pairs
@@ -79,16 +86,11 @@ class Manifest:
                 (arxiv_id, version, Status.PENDING.value, SCHEMA_VERSION),
             )
             self._conn.commit()
+            self._status_cache[key] = Status.PENDING
 
     def status(self, arxiv_id: str, version: int) -> Status | None:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT status FROM version_pairs WHERE arxiv_id = ? AND version = ?",
-                (arxiv_id, version),
-            ).fetchone()
-        if row is None:
-            return None
-        return Status(row["status"])
+            return self._status_cache.get((arxiv_id, version))
 
     def record(self, meta: VersionMeta) -> None:
         """Store the final result of a pair (status, sizes, timing, crawled_at)."""
@@ -129,6 +131,7 @@ class Manifest:
                 ),
             )
             self._conn.commit()
+            self._status_cache[(meta.arxiv_id, meta.version)] = meta.status
 
     def todo(self) -> Iterator[tuple[str, int]]:
         """Pairs that still need work: pending + failed."""
