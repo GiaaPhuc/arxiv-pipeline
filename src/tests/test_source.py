@@ -708,14 +708,14 @@ def test_download_source_resumes_with_http_206_byte_range_on_mid_stream_drop(
     )
 
 
-def test_download_source_progress_aware_range_resume_exceeds_3_attempts(
+def test_download_source_progress_aware_range_resume_caps_at_4_total_attempts(
     tmp_path: Path,
 ) -> None:
-    # 5 consecutive drops that each progress >= 512 KiB reset stalled_attempts to 0,
-    # completing on the 6th request via HTTP 206 Range instead of failing at attempt 3.
+    # 3 consecutive drops that each progress >= 512 KiB reset stalled_attempts to 0,
+    # completing on the 4th request (exceeding the 2-attempt stalled cap) without hammering arXiv.
     segment = b"x" * (600 * 1024)  # 600 KiB >= 512 KiB _MIN_PROGRESS_BYTES
-    payload = b"\x1f\x8b" + segment * 5 + b"tail-end"
-    cuts = [len(b"\x1f\x8b") + len(segment) * i for i in range(1, 6)]
+    payload = b"\x1f\x8b" + segment * 3 + b"tail-end"
+    cuts = [len(b"\x1f\x8b") + len(segment) * i for i in range(1, 4)]
     responses_seq = [
         FakeResponse(
             200,
@@ -732,17 +732,7 @@ def test_download_source_progress_aware_range_resume_exceeds_3_attempts(
             [payload[cuts[1] : cuts[2]]],
             requests.exceptions.ChunkedEncodingError("cut 3"),
         ),
-        FakeResponse(
-            206,
-            [payload[cuts[2] : cuts[3]]],
-            requests.exceptions.ChunkedEncodingError("cut 4"),
-        ),
-        FakeResponse(
-            206,
-            [payload[cuts[3] : cuts[4]]],
-            requests.exceptions.ChunkedEncodingError("cut 5"),
-        ),
-        FakeResponse(206, [payload[cuts[4] :]]),
+        FakeResponse(206, [payload[cuts[2] :]]),
     ]
     client = _RetryFakeClient(responses_seq)
     client._config = Config(contact="test@example.com", max_retries=5)  # noqa: SLF001
@@ -758,11 +748,100 @@ def test_download_source_progress_aware_range_resume_exceeds_3_attempts(
     assert res.range_resumed is True
     assert res.raw_archive_bytes == len(payload)
     assert bytes(res.data or b"") == payload
-    assert len(client.calls) == 6
+    assert len(client.calls) == 4
     assert client.calls[-1] == (
         "/src/2408.14782v1",
-        {"stream": True, "headers": {"Range": f"bytes={cuts[4]}-"}},
+        {"stream": True, "headers": {"Range": f"bytes={cuts[2]}-"}},
     )
+
+    # A 4th consecutive cut hits _MAX_TOTAL_STREAM_ATTEMPTS == 4 and aborts cleanly:
+    too_many_cuts = [
+        FakeResponse(
+            200 if i == 0 else 206,
+            [segment],
+            requests.exceptions.ChunkedEncodingError(f"cut {i + 1}"),
+        )
+        for i in range(4)
+    ]
+    client_cap = _RetryFakeClient(too_many_cuts)
+    with pytest.raises(requests.exceptions.ChunkedEncodingError, match="cut 4"):
+        download_source(client_cap, "2408.15601", 1, tmp_path / ".tmp-cap")
+    assert len(client_cap.calls) == 4
+
+
+def test_download_source_range_retry_enforces_at_least_3s_backoff_and_recycles_session(
+    tmp_path: Path,
+) -> None:
+    from crawler.http import RateLimiter, _StreamResponse
+
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(round(seconds, 4))
+        now[0] += seconds
+
+    limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep, min_idle_gap=0.50)
+    segment = b"x" * (600 * 1024)  # >= 512 KiB so stalled_attempts resets to 0 every time!
+    payload = b"\x1f\x8b" + segment * 3 + b"done"
+    cuts = [len(b"\x1f\x8b") + len(segment) * i for i in range(1, 4)]
+
+    class TimedRangeClient:
+        def __init__(self) -> None:
+            self.limiter = limiter
+            self._config = Config(contact="test@example.com", max_retries=3)
+            self.recycles = 0
+            self.stream_breaks = 0
+            self._idx = 0
+            self._seq = [
+                FakeResponse(
+                    200,
+                    [payload[: cuts[0]]],
+                    requests.exceptions.ChunkedEncodingError("drop 1"),
+                ),
+                FakeResponse(
+                    206,
+                    [payload[cuts[0] : cuts[1]]],
+                    requests.exceptions.ChunkedEncodingError("drop 2"),
+                ),
+                FakeResponse(
+                    206,
+                    [payload[cuts[1] : cuts[2]]],
+                    requests.exceptions.ChunkedEncodingError("drop 3"),
+                ),
+                FakeResponse(206, [payload[cuts[2] :]]),
+            ]
+
+        def recycle_session(self) -> None:
+            self.recycles += 1
+
+        def note_stream_break(self) -> None:
+            self.stream_breaks += 1
+
+        def get(self, _path: str, **_kwargs: object) -> _StreamResponse:
+            self.limiter.wait()
+            # Simulate a slow 5.0s broken stream (> 3.0s Start-to-Start):
+            now[0] += 5.0
+            resp = self._seq[self._idx]
+            self._idx += 1
+            return _StreamResponse(resp, self.limiter)  # type: ignore[arg-type]
+
+    client = TimedRangeClient()
+    res = download_source(
+        client,
+        "2408.15601",
+        1,
+        tmp_path / ".tmp-timed",
+        spool_max_bytes=len(payload) + 1024,
+    )
+    assert res.http_status == 200
+    assert client.recycles == 3
+    assert client.stream_breaks == 3
+    # Every retry waited >= 3.0s End-to-Start (3.0s -> 4.5s -> 6.0s), NEVER 1.5s!
+    assert sleeps == [3.0, 4.5, 6.0]
 
 
 def test_fast_gzip_stream_handles_concatenated_multi_member_gzip_and_many_subdirs(

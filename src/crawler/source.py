@@ -35,8 +35,8 @@ _CHUNK_SIZE = 256 * 1024
 _GIANT_CHUNK_SIZE = 512 * 1024
 _GIANT_ARCHIVE_THRESHOLD = 25 * 1024 * 1024
 _STREAM_CHUNK_SIZE = 128 * 1024
-_MAX_STREAM_ATTEMPTS = 3
-_MAX_TOTAL_STREAM_ATTEMPTS = 12
+_MAX_STREAM_ATTEMPTS = 2
+_MAX_TOTAL_STREAM_ATTEMPTS = 4
 _MIN_PROGRESS_BYTES = 512 * 1024
 _KEEPALIVE_DRAIN_BYTES = 64 * 1024
 _STREAM_RETRY_ERRORS = (ChunkedEncodingError, ConnectionError, Timeout)
@@ -328,8 +328,18 @@ def sniff_archive_type(path: Path | bytes | bytearray) -> ArchiveType:
 def _stream_attempts(client: HostClient) -> int:
     config = getattr(client, "_config", None)
     # Cap body-stream retries: each retry costs another >= 3 s arXiv request, and a pair
-    # that keeps breaking is recorded ``failed`` and retried on the next run instead.
+    # that keeps breaking is deferred / recorded ``failed`` instead of hammering arXiv.
     return min(config.max_retries + 1, _MAX_STREAM_ATTEMPTS) if config is not None else 1
+
+
+def _stream_retry_backoff_seconds(limiter: Any, retry_number: int) -> float:
+    """Return End-to-Start backoff (>= 3.0 s on arXiv, escalating 3.0 -> 4.5 -> 6.0 s)."""
+    base_floor = float(getattr(limiter, "_base_floor", 0.0) or 0.0)
+    if base_floor <= 0.0:
+        return 0.0
+    min_interval = float(getattr(limiter, "_min_interval", base_floor) or base_floor)
+    floor = max(min_interval, 3.0)
+    return round(floor + 1.5 * max(retry_number - 1, 0), 4)
 
 
 def _retry_after_seconds(response) -> float | None:
@@ -544,6 +554,8 @@ def download_source(
                 disk_out = None
             if hasattr(client, "note_stream_break"):
                 client.note_stream_break()
+            if hasattr(client, "recycle_session"):
+                client.recycle_session()
             progressed = written - written_before
             if progressed >= _MIN_PROGRESS_BYTES:
                 stalled_attempts = 0
@@ -552,20 +564,25 @@ def download_source(
             if stalled_attempts >= max_attempts or total_attempts >= max_total_attempts:
                 _cleanup_partial()
                 raise
+            retry_delay = _stream_retry_backoff_seconds(
+                getattr(client, "limiter", None), total_attempts
+            )
             logger.warning(
-                "stream %sv%d failed at %d bytes (+%d B, %s); retry %d (stalled %d/%d)",
+                "stream %sv%d failed at %d bytes (+%d B, %s); retry %d/%d in %.1fs (stalled %d/%d)",
                 arxiv_id,
                 version,
                 written,
                 progressed,
                 type(exc).__name__,
                 total_attempts,
+                max_total_attempts - 1,
+                retry_delay,
                 stalled_attempts,
                 max_attempts,
             )
             limiter = getattr(client, "limiter", None)
             if limiter is not None and hasattr(limiter, "schedule_retry_backoff"):
-                limiter.schedule_retry_backoff(1.5 * max(stalled_attempts, 1))
+                limiter.schedule_retry_backoff(retry_delay)
         except BaseException:
             _cleanup_partial()
             raise
@@ -1050,16 +1067,20 @@ def download_and_extract_source(
                 staging = None
             if attempt >= _stream_attempts(client) - 1:
                 raise
+            if hasattr(client, "recycle_session"):
+                client.recycle_session()
+            limiter = getattr(client, "limiter", None)
+            retry_delay = _stream_retry_backoff_seconds(limiter, attempt + 1)
             logger.warning(
-                "in-flight stream %sv%d failed (%s); retry %d",
+                "in-flight stream %sv%d failed (%s); retry %d in %.1fs",
                 arxiv_id,
                 version,
                 type(exc).__name__,
                 attempt + 1,
+                retry_delay,
             )
-            limiter = getattr(client, "limiter", None)
             if limiter is not None and hasattr(limiter, "schedule_retry_backoff"):
-                limiter.schedule_retry_backoff(1.5 * (attempt + 1))
+                limiter.schedule_retry_backoff(retry_delay)
         finally:
             if staging is not None and staging.exists():
                 shutil.rmtree(staging)

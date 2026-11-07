@@ -322,14 +322,13 @@ class HostClient:
             self.recycle_session()
 
     def _update_thermal_on_response(self, status: int, header_elapsed: float) -> None:
+        del header_elapsed  # slow 2xx headers are normal on large tarballs; never penalize ok
         if self._is_s2:
             return
         if status == 429 or self._is_transient_server_error(status):
             self.thermal_score = round(self.thermal_score + 2.0, 4)
-        elif header_elapsed >= 3.5:
-            self.thermal_score = round(self.thermal_score + 1.0, 4)
-        elif 200 <= status < 300 and header_elapsed < 1.5:
-            self.thermal_score = round(max(0.0, self.thermal_score - 0.35), 4)
+        elif 200 <= status < 300:
+            self.thermal_score = round(max(0.0, self.thermal_score - 0.5), 4)
 
     def note_stream_break(self) -> None:
         """Record a mid-stream disconnect (ChunkedEncodingError/ConnectionError) (v3.3)."""
@@ -360,7 +359,7 @@ class HostClient:
         return 500 <= status < 600
 
     def _sleep_for_retry(self, attempt: int) -> None:
-        delay = min(float(2**attempt), 60.0)
+        delay = max(self.limiter._min_interval, min(float(2**attempt), 60.0))
         self.limiter.schedule_retry_backoff(delay)
 
     def get(self, path: str, **kwargs) -> requests.Response:
