@@ -395,10 +395,14 @@ def _validated_member_relpath(member: tarfile.TarInfo) -> Path | None:
         raise OSError(f"unsafe path components in backup archive: {member.name!r}")
     if any(p.startswith(".") for p in parts) or parts[-1].endswith(".tmp"):
         return None
-    if parts == ("manifest.sqlite",):
-        return Path("manifest.sqlite")
-    if parts[0] in _DATA_SUBDIRS:
-        return Path(*parts)
+    # Strip optional outer wrapper folders (e.g. ``data/``, ``arxiv-data/``,
+    # ``content/data/``) from older or manually-created backup archives.
+    for offset in range(min(3, len(parts))):
+        tail = parts[offset:]
+        if tail == ("manifest.sqlite",):
+            return Path("manifest.sqlite")
+        if tail[0] in _DATA_SUBDIRS:
+            return Path(*tail)
     return None
 
 

@@ -271,3 +271,74 @@ def test_aggregate_sessions_deduplicates_and_strips_idle_colab_gaps():
     assert agg["idle_gap_seconds"] == pytest.approx(7200.0)
     assert agg["ram_peak_bytes"] == 140.0
     assert agg["disk_peak_bytes"] == 900.0
+
+
+def test_summarize_sessions_supports_benchmark_sessions_format_and_detects_overlaps(tmp_path: Path):
+    s1 = {
+        "run_id": "session-1",
+        "source_revision": "rev-a",
+        "started_at_utc": "2026-11-06T00:00:00Z",
+        "finished_at_utc": "2026-11-06T02:00:00Z",
+        "resumed": False,
+        "counts": {"processed_publications": 600},
+        "time_breakdown_profiler_sec": {"total_profiler_sec": 100.0},
+        "resources": {
+            "peak_rss_mib": 250.0,
+            "avg_rss_mib": 200.0,
+            "peak_disk_bytes": 10_000,
+            "final_disk_bytes": 8_000,
+        },
+        "environment": {
+            "is_google_colab": True,
+            "cpu_only": True,
+            "cpu_count_logical": 2,
+            "python_version": "3.10.12",
+        },
+        "config": {"intervals": {"arxiv_min_interval": 3.0}},
+    }
+    s2 = {
+        "run_id": "session-2",
+        "source_revision": "rev-b",
+        "started_at_utc": "2026-11-06T01:30:00Z",  # overlaps with session-1!
+        "finished_at_utc": "2026-11-06T03:00:00Z",
+        "resumed": True,
+        "counts": {"processed_publications": 400},
+        "time_breakdown_profiler_sec": {"total_profiler_sec": 300.0},
+        "resources": {
+            "peak_rss_mib": 320.0,
+            "avg_rss_mib": 280.0,
+            "peak_disk_bytes": 20_000,
+            "final_disk_bytes": 19_000,
+        },
+        "environment": {
+            "is_google_colab": True,
+            "cpu_only": True,
+            "cpu_count_logical": 2,
+            "python_version": "3.10.12",
+        },
+        "config": {"intervals": {"arxiv_min_interval": 3.0}},
+    }
+    p1 = tmp_path / "s1.json"
+    p1_dup = tmp_path / "s1_copy.json"
+    p2 = tmp_path / "s2.json"
+    p1.write_text(json.dumps(s1), encoding="utf-8")
+    p1_dup.write_text(json.dumps(s1), encoding="utf-8")
+    p2.write_text(json.dumps(s2), encoding="utf-8")
+
+    summary = metrics.summarize_sessions([p1, p1_dup, p2])
+    assert summary["session_count"] == 2
+    assert summary["duplicate_run_files_skipped"] == 1
+    assert summary["all_sessions_colab_cpu"] is True
+    assert summary["source_revisions"] == ["rev-a", "rev-b"]
+    assert summary["session_timestamps_complete"] is True
+    assert summary["sessions_overlap"] is True
+    assert summary["processed_attempts"] == 1000
+    assert summary["total_profiler_sec"] == pytest.approx(400.0)
+    assert summary["max_session_peak_rss_mib"] == pytest.approx(320.0)
+    # Time-weighted avg RSS: (200*100 + 280*300) / 400 = 260.0 MiB
+    assert summary["session_time_weighted_avg_rss_mib"] == pytest.approx(260.0)
+    assert summary["max_session_peak_disk_bytes"] == 20_000
+    assert summary["final_output_bytes"] == 19_000
+
+    with pytest.raises(ValueError, match="Cannot summarize mock or dry-run"):
+        metrics.summarize_sessions([{"is_mock": True, "runs": 1}])

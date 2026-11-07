@@ -240,3 +240,108 @@ def test_cross_version_dedup_reports_unchanged_revisions_and_duplicate_sha256(
     assert dedup["duplicate_files_across_versions"] == 3  # 2 in v2 + 1 (refs.bib) in v3
     assert dedup["duplicate_bytes_across_versions"] == 200 + 100 + 100  # 400 bytes
     assert dedup["dedup_byte_ratio"] == pytest.approx(400 / (300 + 300 + 350))
+
+
+def test_export_stats_and_tables_support_legacy_backup_schemas_and_tar_archives(
+    tmp_path: Path,
+):
+    from crawler.checkpoint import backup_tar_archive
+    from crawler.export import export_tables
+
+    legacy_root = tmp_path / "legacy_workspace"
+    paper_dir = legacy_root / "papers" / "2408-00500"
+    v1_dir = paper_dir / "v1"
+    v1_dir.mkdir(parents=True)
+
+    # Legacy paper.json with extra fields & first_submitted_date instead of submission_date
+    (paper_dir / "paper.json").write_text(
+        json.dumps(
+            {
+                "arxiv_id": "2408.00500",
+                "title": "Legacy Backup Paper",
+                "authors": ["Alice", "Bob"],
+                "first_submitted_date": "2024-08-05",
+                "categories": ["cs.LG"],
+                "abstract": "Some abstract",
+                "versions": [{"version": "v1", "submitted_date": "2024-08-05"}],
+                "journal_ref": "NeurIPS 2024",
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Legacy v1/meta.json with selected_files_bytes / extracted_total_bytes
+    (v1_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "arxiv_id": "2408.00500",
+                "version": 1,
+                "status": "ok",
+                "archive_bytes": 500,
+                "extracted_total_bytes": 2000,
+                "selected_files_bytes": 800,
+                "fetched_at": "2026-11-05T10:00:00+00:00",
+                "file_inventory": {"tex": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Legacy references.json at paper root (dict keyed by s2_id)
+    (paper_dir / "references.json").write_text(
+        json.dumps(
+            {
+                "s2-ref-99": {
+                    "arxiv_id": "2301.12345",
+                    "title": "Cited Legacy Paper",
+                    "authors": ["Carol"],
+                    "year": 2023,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Legacy metrics.json without 'sessions' list
+    (legacy_root / "logs").mkdir(parents=True)
+    (legacy_root / "logs" / "metrics.json").write_text(
+        json.dumps(
+            {
+                "runs": 1,
+                "last_run_at": "2026-11-05T11:00:00+00:00",
+                "stage_seconds": {"discovery": 5.0, "download": 100.0, "extract": 10.0, "s2": 5.0},
+                "resources": {
+                    "ram_peak_bytes": 256 * 1024 * 1024,
+                    "ram_mean_bytes": 128 * 1024 * 1024,
+                    "disk_peak_bytes": 4096,
+                    "disk_final_bytes": 3072,
+                },
+                "s2": {"papers_ok": 1, "retry_wait_seconds": 4.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = Manifest(legacy_root / "manifest.sqlite")
+    manifest.record(VersionMeta("2408.00500", 1, Status.OK))
+    manifest.close()
+
+    out_dir = tmp_path / "legacy_out"
+    export_tables(legacy_root, out_dir)
+    summary = export_stats(legacy_root, out_dir)
+
+    assert summary["papers_total"] == 1
+    assert summary["papers_success"] == 1
+    assert summary["refs_total"] == 1
+    assert summary["refs_with_arxiv_id"] == 1
+    bench = summary["benchmark_summary"]
+    assert bench["session_count"] == 1
+    assert bench["unique_publications"] == 1
+    assert bench["total_profiler_sec"] == pytest.approx(120.0)
+    assert bench["max_session_peak_rss_mib"] == pytest.approx(256.0)
+    assert bench["session_time_weighted_avg_rss_mib"] == pytest.approx(128.0)
+
+    # Pack into a backup .tar.gz and export directly from the archive via CLI
+    archive_path = tmp_path / "arxiv-data.tar.gz"
+    backup_tar_archive(legacy_root, archive_path)
+    cli_out = tmp_path / "cli_archive_out"
+    assert export_data.main(["--data-dir", str(archive_path), "--out-dir", str(cli_out)]) == 0
+    assert (cli_out / "papers.parquet").is_file()
+    assert (cli_out / "references.parquet").is_file()
+    assert (cli_out / "summary.json").is_file()
