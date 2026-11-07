@@ -372,8 +372,39 @@ def test_arxiv_src_sets_identity_accept_encoding():
 
 
 def test_host_client_enables_single_connection_pool():
+    import socket
+
     config = Config(contact="test@example.com", arxiv_min_interval=3.0)
     client = HostClient("https://export.arxiv.org", RateLimiter(3.0), config)
     adapter = client._session.get_adapter("https://export.arxiv.org")  # noqa: SLF001
     assert adapter._pool_connections == 1  # noqa: SLF001
     assert adapter._pool_maxsize == 1  # noqa: SLF001
+    sock_opts = adapter.poolmanager.connection_pool_kw.get("socket_options", [])
+    assert (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) in sock_opts
+    # Never lock SO_RCVBUF on Linux (would set SOCK_RCVBUF_LOCK and disable tcp_rmem autotuning):
+    assert not any(
+        opt[0] == socket.SOL_SOCKET and opt[1] == getattr(socket, "SO_RCVBUF", -1)
+        for opt in sock_opts
+    )
+
+
+def test_retry_backoff_honored_after_slow_broken_stream():
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(round(seconds, 4))
+        now[0] += seconds
+
+    limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep)
+    limiter.wait()
+    now[0] += 12.0  # stream stalled for 12s (> 3.0s Start-to-Start) before ChunkedEncodingError
+    limiter.schedule_retry_backoff(1.5)
+    limiter.done()
+
+    limiter.wait()
+    limiter.done()
+    assert sleeps == [1.5]

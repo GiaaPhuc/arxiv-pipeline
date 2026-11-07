@@ -394,6 +394,9 @@ def download_source(
                 type(exc).__name__,
                 attempt + 1,
             )
+            limiter = getattr(client, "limiter", None)
+            if limiter is not None and hasattr(limiter, "schedule_retry_backoff"):
+                limiter.schedule_retry_backoff(1.5 * (attempt + 1))
         except BaseException:
             _cleanup_partial()
             raise
@@ -879,6 +882,9 @@ def download_and_extract_source(
                 type(exc).__name__,
                 attempt + 1,
             )
+            limiter = getattr(client, "limiter", None)
+            if limiter is not None and hasattr(limiter, "schedule_retry_backoff"):
+                limiter.schedule_retry_backoff(1.5 * (attempt + 1))
         finally:
             if staging is not None and staging.exists():
                 shutil.rmtree(staging)

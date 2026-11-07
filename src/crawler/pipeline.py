@@ -847,16 +847,21 @@ def _note_s2_success(run: _Run) -> None:
         limiter.note_success()
 
 
-def _wait_s2_429(run: _Run, response: requests.Response | None) -> bool:
+def _wait_s2_429(
+    run: _Run,
+    response: requests.Response | None,
+    *,
+    rate_attempt: int = 0,
+) -> bool:
     """Wait for Retry-After; return True if the run was stopped."""
-    wait = _retry_after(response)
+    wait = _retry_after(response, rate_attempt=rate_attempt)
     _inc(run, "s2_429")
     _inc(run, "s2_retry_wait_seconds", wait)
     run.s2_rate_limit_wait += wait
     limiter = run.s2.limiter
     if isinstance(limiter, AdaptiveRateLimiter):
         limiter.note_429()
-    _diag(run, "s2_429", wait_seconds=wait)
+    _diag(run, "s2_429", attempt=rate_attempt + 1, wait_seconds=wait)
     if run.rate_state_path is not None and wait > 0:
         save_rate_state(run.rate_state_path, s2_cooldown_until=time.time() + wait)
     logger.warning("S2 429; waiting %.0fs (Retry-After)", wait)
@@ -913,7 +918,7 @@ def _handle_s2_batch(run: _Run, jobs: list[_S2Job]) -> None:
         except requests.HTTPError as exc:
             status = _http_status(exc)
             if status == 429:
-                if _wait_s2_429(run, exc.response):
+                if _wait_s2_429(run, exc.response, rate_attempt=_attempt):
                     _requeue_s2_jobs(run, jobs)
                     return
                 if run.s2_rate_limit_wait >= _S2_MAX_RATE_LIMIT_WAIT:

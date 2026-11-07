@@ -55,7 +55,7 @@ src/
 ├── crawler/                  # Package thu thập dữ liệu (Milestone 1)
 │   ├── models.py             # Hợp đồng dữ liệu M1 (SCHEMA_VERSION=1, không tự ý sửa)
 │   ├── config.py             # Cấu hình từ biến môi trường / .env + CLI overrides
-│   ├── http.py               # HostClient, _SingleConnAdapter (SO_RCVBUF 1MiB), RateLimiter (+0.15s, trần 3.3s), rate_state.json
+│   ├── http.py               # HostClient, _SingleConnAdapter (TCP_NODELAY, Linux tcp_rmem), RateLimiter (+0.15s, trần 3.3s), rate_state.json
 │   ├── ids.py                # Chuẩn hóa ID, tách version, expand_range, id_to_dirname
 │   ├── discovery.py          # Atom API lô 250 ID, tận dụng <updated>, xác nhận sub-batch 50 (T3)
 │   ├── source.py             # download_source (RAM <=96 MiB, Range 206 resume), extract_tex_bib (1-pass .tex/.bib/.bbl, memoryview)
@@ -281,7 +281,7 @@ Ký hiệu: $P$ là số bài cần crawl ($5.000$ ID/dải hoặc $25.000$ ID t
 
 | Mã hạng mục | Nội dung tối ưu | Trạng thái trong code | Chi tiết thực tế trong repo |
 | --- | --- | --- | --- |
-| **O1 + T5** | Nhịp `Start-to-Start 3,0 s` + 1 kết nối `_SingleConnAdapter` (`SO_RCVBUF 1 MiB`) | ✅ Đã triển khai | `RateLimiter` & `_SingleConnAdapter` trong `http.py` (`pool_connections=1, pool_maxsize=1, TCP_NODELAY`) |
+| **O1 + T5** | Nhịp `Start-to-Start 3,0 s` + 1 kết nối `_SingleConnAdapter` (`TCP_NODELAY`, bảo toàn Linux `tcp_rmem` auto-tuning) | ✅ Đã triển khai | `RateLimiter` & `_SingleConnAdapter` trong `http.py` (`pool_connections=1, pool_maxsize=1, TCP_NODELAY`, không khóa `SO_RCVBUF`) |
 | **O2 + T3** | Discovery lô **250 ID** + tận dụng `<updated>` + sub-batch **50 ID** + auto-heal | ✅ Đã triển khai | `discovery.py` (`discovery_batch_size=250`, `_CONFIRM_BATCH_SIZE=50`) + `_plan_chunk` trong `pipeline.py` |
 | **O3 + T5** | Tách `extract-worker` + Đệm RAM `bytearray` $\le 96\text{ MiB}$ + `_ZeroCopyBytesReader` | ✅ Đã triển khai | `download_source` nhả socket ngay; đọc qua `memoryview` không nhân bản RAM; chunk `512 KiB` cho gói $\ge 25\text{ MiB}$ |
 | **O4 + S3 + U4** | Giải nén `.tar.gz` 1-pass + giữ **`.tex`, `.bib`, `.bbl`** + ghi đè entry trùng tên | ✅ Đã triển khai | `_write_tar_members_from_stream` bỏ qua ảnh, giữ thêm `.bbl` phụ trợ cho M2, xử lý `JSSC.bib` |
@@ -294,7 +294,7 @@ Ký hiệu: $P$ là số bài cần crawl ($5.000$ ID/dải hoặc $25.000$ ID t
 | **U2 (v3.1)** | Chế độ vét & làm giàu Semantic Scholar độc lập (`--s2-only`) | ✅ Đã triển khai | `_crawl_s2_only` trong `pipeline.py` và cờ `--s2-only` trong `run_crawl.py` |
 | **U3 (v3.1)** | Lưu trạng thái Cooldown liên tiến trình (`rate_state.json`) & Khóa OS Mutex | ✅ Đã triển khai | `load_rate_state`/`save_rate_state` trong `http.py` và `_acquire_workspace_lock` trong `pipeline.py` |
 | **U5 (v3.1)** | Nhật ký chẩn đoán `diagnostics.jsonl`, `redact_secrets()` & `source_code_hash` | ✅ Đã triển khai | Tự động che API key trong log, lưu hash code và ghi sự kiện bất thường vào `data/logs/diagnostics.jsonl` |
-| **T1 (v3.2)** | Xóa phạt kép 429 (`+0,15 s`, trần `3,30 s`, hồi phục sau 5 bài) & Backoff `15→30→60s` | ✅ Đã triển khai | `RateLimiter` trong `http.py` và `_wait_arxiv_429` trong `pipeline.py` |
+| **T1 (v3.2)** | Xóa phạt kép 429 (`+0,15 s`, trần `3,30 s`, hồi phục sau 5 bài) & Backoff `15→30→60s` | ✅ Đã triển khai | `RateLimiter` trong `http.py`, `_wait_arxiv_429` và `_wait_s2_429` trong `pipeline.py` |
 | **T2 (v3.2)** | Khôi phục luồng tải đứt bằng `HTTP Range (206 Partial Content)` | ✅ Đã triển khai | `download_source` gửi `Range: bytes={written}-` nối tiếp `mem_buf`/file tạm khi đứt stream |
 | **T4 (v3.2)** | Đồng bộ hóa đồng hồ retry `schedule_retry_backoff` với `RateLimiter` | ✅ Đã triển khai | `HostClient.get()` trong `http.py` tính thời gian ngủ retry từ `_last_request_at`, không ngủ chồng |
 

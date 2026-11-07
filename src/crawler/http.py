@@ -39,7 +39,7 @@ def _default_sleep(seconds: float) -> None:
 
 
 class _SingleConnAdapter(HTTPAdapter):
-    """Single-connection HTTPAdapter with tuned TCP socket options for large /src/ streams (T5)."""
+    """Single-connection HTTPAdapter with TCP_NODELAY; leaves SO_RCVBUF to Linux autotuning."""
 
     def init_poolmanager(self, connections: int, maxsize: int, block: bool = False, **pool_kwargs):
         sock_opts = list(
@@ -49,8 +49,6 @@ class _SingleConnAdapter(HTTPAdapter):
                 [(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)],
             )
         )
-        if hasattr(socket, "SO_RCVBUF"):
-            sock_opts.append((socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024))
         pool_kwargs.setdefault("socket_options", sock_opts)
         super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
 
@@ -151,15 +149,22 @@ class RateLimiter:
         """Acquire single-connection slot and sleep until Start-to-Start interval elapses."""
         self._acquire_slot()
         try:
-            effective_interval = max(self._min_interval, self._retry_backoff)
+            retry_backoff = self._retry_backoff
+            effective_interval = max(self._min_interval, retry_backoff)
             self._retry_backoff = 0.0
             cooldown_rem = self._consume_cooldown_remaining()
+            now = self._clock()
             remaining = 0.0
             if self._last_request_at is not None:
-                elapsed = self._clock() - self._last_request_at
+                elapsed = now - self._last_request_at
                 remaining = max(0.0, effective_interval - elapsed)
             elif effective_interval > self._min_interval:
                 remaining = effective_interval
+            if retry_backoff > 0.0 and self._last_done_at is not None:
+                # When a long stream breaks after > min_interval, still honor retry_backoff
+                # after socket teardown so we never reconnect within 1 ms of a broken stream.
+                since_done = now - self._last_done_at
+                remaining = max(remaining, max(0.0, retry_backoff - since_done))
             remaining = max(remaining, cooldown_rem)
             if remaining > 0:
                 self._sleep(remaining)
