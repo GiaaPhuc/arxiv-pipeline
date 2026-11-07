@@ -14,11 +14,13 @@ Design
   a zero-copy RAM ``bytearray`` (``<= 96 MiB``, zero ``.tmp/`` disk I/O for >99% of packages),
   immediately releases the HTTP connection / rate-limiter slot, and hands each
   ``DownloadResult`` to ``extract_queue``.
-* **Extract worker** (one thread, bounded ``extract_queue`` of 8): runs single-pass gzip/tar
-  ``.tex``/``.bib`` extraction into ``.vK.part/tex/`` in parallel with the next download,
-  writes ``meta.json``, swaps into ``vK/`` with ``os.replace``, commits the manifest row LAST,
-  periodically flushes live metrics off the network thread, and queues completed papers to
-  ``s2_queue``.
+* **Extract worker pool** (configurable ``extract_workers`` threads, default 2, bounded
+  ``extract_queue`` of 8 + ``extract_max_queue_bytes`` RAM budget of 192 MiB): runs 512 KiB
+  single-pass gzip/tar ``.tex``/``.bib`` extraction into ``.vK.part/tex/`` in parallel across
+  CPU cores while the next download proceeds, writes ``meta.json``, swaps into ``vK/`` with
+  ``os.replace``, commits the manifest row LAST, tracks atomic per-paper completion across
+  workers, periodically flushes live metrics off the network thread, and queues completed
+  papers to ``s2_queue``.
 * **S2 worker** (one thread, >= 1.1 s End-to-Start, adaptive after 429): batches papers
   (``POST /paper/batch``, up to 100 ids) once all versions are processed, writes
   ``references.json`` into every version dir and, last, ``s2_references.raw.json.gz``.
@@ -171,6 +173,7 @@ class _ExtractJob:
     download: DownloadResult | None = None
     download_error: BaseException | None = None
     is_last_for_paper: bool = False
+    queued_bytes: int = 0
 
 
 @dataclass
@@ -185,6 +188,9 @@ class _Run:
     extract_queue: queue.Queue[_ExtractJob | None] = field(
         default_factory=lambda: queue.Queue(maxsize=8)
     )
+    extract_bytes_cond: threading.Condition = field(default_factory=threading.Condition)
+    extract_queued_bytes: int = 0
+    paper_pending_versions: dict[str, int] = field(default_factory=dict)
     s2_queue: queue.Queue[_S2Job | None] = field(default_factory=queue.Queue)
     s2_disabled: bool = False
     checkpoint_last_seen: int = 0
@@ -395,19 +401,57 @@ def _extract_version(
         download.data = None
 
 
+def _release_queued_bytes(run: _Run, job: _ExtractJob) -> None:
+    """Release RAM byte budget held by ``job`` and wake waiting producer threads."""
+    nbytes = job.queued_bytes
+    if nbytes <= 0:
+        return
+    job.queued_bytes = 0
+    with run.extract_bytes_cond:
+        run.extract_queued_bytes = max(0, run.extract_queued_bytes - nbytes)
+        run.extract_bytes_cond.notify_all()
+
+
+def _enqueue_extract_job(run: _Run, job: _ExtractJob) -> None:
+    """Enqueue ``job`` into ``extract_queue``, applying byte-budget backpressure (E4)."""
+    job_bytes = (
+        len(job.download.data)
+        if (job.download is not None and job.download.data is not None)
+        else 0
+    )
+    max_bytes = run.config.extract_max_queue_bytes
+    if job_bytes > 0 and max_bytes > 0:
+        with run.extract_bytes_cond:
+            while (
+                run.extract_queued_bytes > 0
+                and run.extract_queued_bytes + job_bytes > max_bytes
+                and not run.stop.is_set()
+            ):
+                run.extract_bytes_cond.wait(timeout=0.2)
+            run.extract_queued_bytes += job_bytes
+            job.queued_bytes = job_bytes
+    try:
+        run.extract_queue.put(job)
+    except BaseException:
+        _release_queued_bytes(run, job)
+        raise
+
+
 def _install_version(final: Path, part: Path, old: Path, meta: VersionMeta) -> None:
     """Write ``meta.json`` into ``part`` and swap it into ``final`` (keeps old references)."""
     part.mkdir(parents=True, exist_ok=True)
     payload = asdict(meta)
     payload["status"] = meta.status.value
     _write_json(part / "meta.json", payload)
-    refs = final / "references.json"
-    if refs.is_file():  # S2 already wrote it for the previous attempt of this version
-        shutil.copy2(refs, part / "references.json")
     if final.exists():
+        refs = final / "references.json"
+        if refs.is_file():  # S2 already wrote it for the previous attempt of this version
+            shutil.copy2(refs, part / "references.json")
         final.replace(old)
-    part.replace(final)
-    shutil.rmtree(old, ignore_errors=True)
+        part.replace(final)
+        shutil.rmtree(old, ignore_errors=True)
+    else:
+        part.replace(final)
 
 
 def _consume_extract_job(run: _Run, job: _ExtractJob) -> Status:
@@ -418,20 +462,28 @@ def _consume_extract_job(run: _Run, job: _ExtractJob) -> Status:
     final = paper_dir / f"v{version}"
     part = paper_dir / f".v{version}.part"
     old = paper_dir / f".v{version}.old"
-    shutil.rmtree(part, ignore_errors=True)
-    shutil.rmtree(old, ignore_errors=True)
+    if part.exists():
+        shutil.rmtree(part, ignore_errors=True)
+    if old.exists():
+        shutil.rmtree(old, ignore_errors=True)
 
     try:
-        if job.download_error is not None:
-            raise job.download_error
-        assert job.download is not None
-        meta = _extract_version(run, paper, version, job.download, part)
-    except Exception as exc:  # one bad pair must never stop the batch
-        logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
-        shutil.rmtree(part, ignore_errors=True)
-        meta = VersionMeta(
-            paper.arxiv_id, version, Status.FAILED, error=f"{type(exc).__name__}: {exc}"[:500]
-        )
+        try:
+            if job.download_error is not None:
+                raise job.download_error
+            assert job.download is not None
+            meta = _extract_version(run, paper, version, job.download, part)
+        except Exception as exc:  # one bad pair must never stop the batch
+            logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
+            shutil.rmtree(part, ignore_errors=True)
+            meta = VersionMeta(
+                paper.arxiv_id,
+                version,
+                Status.FAILED,
+                error=f"{type(exc).__name__}: {exc}"[:500],
+            )
+    finally:
+        _release_queued_bytes(run, job)
 
     meta.version_date = _version_date(paper, version)
     meta.crawled_at = _now()
@@ -457,7 +509,20 @@ def _consume_extract_job(run: _Run, job: _ExtractJob) -> Status:
 
     run.manifest.record(meta)
     logger.info("%s v%d -> %s", paper.arxiv_id, version, meta.status.value)
-    if job.is_last_for_paper:
+    with run.counters_lock:
+        rem = run.paper_pending_versions.get(paper.arxiv_id)
+        if rem is not None:
+            rem -= 1
+            if rem <= 0:
+                run.paper_pending_versions.pop(paper.arxiv_id, None)
+                paper_completed = True
+            else:
+                run.paper_pending_versions[paper.arxiv_id] = rem
+                paper_completed = False
+        else:
+            paper_completed = job.is_last_for_paper
+
+    if paper_completed:
         _inc(run, "papers_done")
         if not (paper_dir / S2_RAW_NAME).is_file():
             run.s2_queue.put(_S2Job(paper, paper_dir))
@@ -465,7 +530,7 @@ def _consume_extract_job(run: _Run, job: _ExtractJob) -> Status:
 
 
 def _extract_worker(run: _Run) -> None:
-    """Consumer thread (O3): extracts archives, installs ``vK/``, and commits manifest rows."""
+    """Consumer thread (O3/E3): extracts archives, installs ``vK/``, and commits manifest rows."""
     last_flush = time.monotonic()
     while True:
         job = run.extract_queue.get()
@@ -479,6 +544,7 @@ def _extract_worker(run: _Run) -> None:
                 last_flush = now
         except Exception:
             if job is not None:
+                _release_queued_bytes(run, job)
                 logger.exception(
                     "extract worker unexpected error on %s v%d",
                     job.paper.arxiv_id,
@@ -505,31 +571,36 @@ def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) 
             run.s2_queue.put(_S2Job(paper, paper_dir))
         return
 
+    with run.counters_lock:
+        run.paper_pending_versions[paper.arxiv_id] = len(pending_versions)
+
     for idx, version in enumerate(pending_versions):
         if run.stop.is_set():
             return
         is_last = idx == len(pending_versions) - 1
         try:
             download = _download_version(run, paper, version)
-            run.extract_queue.put(
+            _enqueue_extract_job(
+                run,
                 _ExtractJob(
                     paper=paper,
                     version=version,
                     download=download,
                     is_last_for_paper=is_last,
-                )
+                ),
             )
         except (StopCrawl, _DeferRateLimit):
             raise
         except Exception as exc:  # one bad pair must never stop the batch
             logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
-            run.extract_queue.put(
+            _enqueue_extract_job(
+                run,
                 _ExtractJob(
                     paper=paper,
                     version=version,
                     download_error=exc,
                     is_last_for_paper=is_last,
-                )
+                ),
             )
         if run.config.auto_resume_rate_limit and run.arxiv.consume_thermal_trigger():
             _handle_thermal_cooldown(
@@ -1254,10 +1325,17 @@ def run(
 
         metrics.reset()
         sampler.start()
-        extract_thread = threading.Thread(
-            target=_extract_worker, args=(state,), name="extract-worker"
-        )
-        extract_thread.start()
+        num_extract_workers = max(int(config.extract_workers), 1)
+        extract_threads = [
+            threading.Thread(
+                target=_extract_worker,
+                args=(state,),
+                name="extract-worker",
+            )
+            for _ in range(num_extract_workers)
+        ]
+        for extract_thread in extract_threads:
+            extract_thread.start()
         s2_thread = threading.Thread(target=_s2_worker, args=(state,), name="s2-worker")
         s2_thread.start()
         if config.backup_every_ids and not config.backup_dir:
@@ -1285,16 +1363,20 @@ def run(
             failure = exc
             state.stop.set()
         finally:
-            while extract_thread.is_alive():
+            with state.extract_bytes_cond:
+                state.extract_bytes_cond.notify_all()
+            for _ in extract_threads:
+                while any(t.is_alive() for t in extract_threads):
+                    try:
+                        state.extract_queue.put(None, timeout=0.5)
+                        break
+                    except queue.Full:
+                        continue
+            for extract_thread in extract_threads:
                 try:
-                    state.extract_queue.put(None, timeout=0.5)
-                    break
-                except queue.Full:
-                    continue
-            try:
-                extract_thread.join()
-            except RuntimeError:
-                pass
+                    extract_thread.join()
+                except RuntimeError:
+                    pass
             state.s2_queue.put(None)
             try:
                 s2_thread.join()

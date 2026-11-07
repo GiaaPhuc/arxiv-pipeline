@@ -128,10 +128,161 @@ class _ZeroCopyBytesReader(io.RawIOBase):
         return n
 
 
-def _open_gzip_reader(archive: Path | bytes | bytearray) -> gzip.GzipFile:
-    if isinstance(archive, (bytes, bytearray)):
-        return gzip.GzipFile(fileobj=io.BufferedReader(_ZeroCopyBytesReader(archive)), mode="rb")
-    return gzip.open(archive, "rb")
+class _FastGzipStream:
+    """High-throughput RFC-1952 gzip reader using 512 KiB blocks and C-level zlib CRC check (E1).
+
+    Replaces ``gzip.GzipFile``'s 8 KiB ``_compression.DecompressReader`` loop with
+    512 KiB memoryview/file reads and ``zlib.decompressobj(16 + zlib.MAX_WBITS)``, cutting
+    Python loop and buffer-copy overhead on heavy figure-laden archives while still
+    validating gzip headers, multi-member streams, and 8-byte CRC32/ISIZE trailers.
+    """
+
+    def __init__(self, archive: Path | bytes | bytearray | Any) -> None:
+        self._view: memoryview | None = None
+        self._fp: BinaryIO | Any | None = None
+        self._owns_fp = False
+        if isinstance(archive, (bytes, bytearray)):
+            self._view = memoryview(archive)
+        elif isinstance(archive, (Path, os.PathLike, str)):
+            self._fp = Path(archive).open("rb", buffering=_GIANT_CHUNK_SIZE)
+            self._owns_fp = True
+        else:
+            self._fp = archive
+        self._pos = 0
+        self._decomp = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        self._in_member = False
+        self._members_done = 0
+        self._pending_in: bytes | memoryview = b""
+        self._out_buf = bytearray()
+        self._out_pos = 0
+        self._eof = False
+
+    def __enter__(self) -> _FastGzipStream:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._view is not None:
+            self._view = None
+        if self._owns_fp and self._fp is not None:
+            self._fp.close()
+            self._fp = None
+
+    def readable(self) -> bool:
+        return True
+
+    def _next_compressed_chunk(self) -> bytes | memoryview:
+        if self._pending_in:
+            chunk = self._pending_in
+            self._pending_in = b""
+            return chunk
+        if self._view is not None:
+            if self._pos >= len(self._view):
+                return b""
+            end = min(self._pos + _GIANT_CHUNK_SIZE, len(self._view))
+            chunk = self._view[self._pos : end]
+            self._pos = end
+            return chunk
+        if self._fp is not None:
+            return self._fp.read(_GIANT_CHUNK_SIZE)
+        return b""
+
+    def _append_out(self, data: bytes) -> None:
+        if not data:
+            return
+        if self._out_pos > 0:
+            if self._out_pos >= len(self._out_buf):
+                self._out_buf.clear()
+            else:
+                del self._out_buf[: self._out_pos]
+            self._out_pos = 0
+        self._out_buf.extend(data)
+
+    def _pump(self, max_out: int) -> bool:
+        if self._eof:
+            return False
+
+        if self._in_member and self._decomp.unconsumed_tail:
+            out = self._decomp.decompress(self._decomp.unconsumed_tail, max_out)
+            if out:
+                self._append_out(out)
+            if self._decomp.eof:
+                if self._decomp.unused_data:
+                    self._pending_in = self._decomp.unused_data
+                self._in_member = False
+                self._members_done += 1
+            return True
+
+        raw = self._next_compressed_chunk()
+        if not raw:
+            if self._in_member:
+                tail = self._decomp.flush()
+                if tail:
+                    self._append_out(tail)
+                if not self._decomp.eof:
+                    raise EOFError(
+                        "Compressed file ended before the end-of-stream marker was reached"
+                    )
+                self._in_member = False
+                self._members_done += 1
+            elif self._members_done == 0:
+                raise EOFError("Compressed file ended before the end-of-stream marker was reached")
+            self._eof = True
+            return False
+
+        if not self._in_member:
+            if self._members_done > 0:
+                stripped = bytes(raw).lstrip(b"\x00")
+                if not stripped:
+                    return True
+                if len(stripped) == 1 and stripped == _GZIP_MAGIC[:1]:
+                    stripped += bytes(self._next_compressed_chunk())
+                if not stripped.startswith(_GZIP_MAGIC):
+                    raise gzip.BadGzipFile("Not a gzipped file")
+                raw = stripped
+                self._decomp = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            self._in_member = True
+
+        out = self._decomp.decompress(raw, max_out)
+        if out:
+            self._append_out(out)
+        if self._decomp.eof:
+            if self._decomp.unused_data:
+                self._pending_in = self._decomp.unused_data
+            self._in_member = False
+            self._members_done += 1
+        return True
+
+    def read(self, size: int | None = -1) -> bytes:
+        if size == 0:
+            return b""
+        if size is None or size < 0:
+            while self._pump(_GIANT_CHUNK_SIZE):
+                pass
+            out = bytes(self._out_buf[self._out_pos :])
+            self._out_buf.clear()
+            self._out_pos = 0
+            return out
+
+        step_max = max(size, _GIANT_CHUNK_SIZE)
+        while len(self._out_buf) - self._out_pos < size and self._pump(step_max):
+            pass
+        end = min(self._out_pos + size, len(self._out_buf))
+        out = bytes(self._out_buf[self._out_pos : end])
+        self._out_pos = end
+        if self._out_pos >= len(self._out_buf):
+            self._out_buf.clear()
+            self._out_pos = 0
+        elif self._out_pos >= _GIANT_CHUNK_SIZE:
+            del self._out_buf[: self._out_pos]
+            self._out_pos = 0
+        return out
+
+
+def _open_gzip_reader(archive: Path | bytes | bytearray | Any) -> _FastGzipStream:
+    return _FastGzipStream(archive)
 
 
 def _looks_like_tar_header(tar_header: bytes) -> bool:
@@ -578,8 +729,9 @@ def _write_tar_members_from_stream(
     seen_outputs: dict[str, tuple[int, Path]] = {}
     member_count = 0
     stage_root = staging.resolve()
+    created_dirs: set[Path] = {staging}
 
-    with tarfile.open(fileobj=gz_stream, mode="r|", bufsize=_CHUNK_SIZE) as archive:
+    with tarfile.open(fileobj=gz_stream, mode="r|", bufsize=_GIANT_CHUNK_SIZE) as archive:
         for member in archive:
             member_count += 1
             relative, relative_path = _safe_member_path(member.name)
@@ -609,13 +761,18 @@ def _write_tar_members_from_stream(
                 raise tarfile.ReadError(f"cannot read regular member {member.name!r}")
 
             target = staging / relative_path
+            parent = target.parent
             digest = hashlib.sha256()
             member_bytes = 0
             output = None
             try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if not target.resolve().is_relative_to(stage_root):
-                    raise _UnsafeArchiveError(f"member escapes staging directory: {member.name!r}")
+                if parent not in created_dirs:
+                    parent.mkdir(parents=True, exist_ok=True)
+                    if not parent.resolve().is_relative_to(stage_root):
+                        raise _UnsafeArchiveError(
+                            f"member escapes staging directory: {member.name!r}"
+                        )
+                    created_dirs.add(parent)
                 if prev_record is not None:
                     # Standard POSIX tar semantics (S3): later entry overwrites earlier one.
                     prev_record[1].unlink(missing_ok=True)
@@ -654,9 +811,9 @@ def _write_tar_members_from_stream(
     # Drain remaining tar zero-padding blocks on the same gzip stream so gzip
     # validates its 8-byte CRC/ISIZE trailer without a second pass (O4), while
     # still enforcing the uncompressed zip-bomb limit.
-    overhead_allowance = (member_count + 2) * 2048 + _CHUNK_SIZE
+    overhead_allowance = (member_count + 2) * 2048 + _GIANT_CHUNK_SIZE
     tail_bytes = 0
-    while chunk := gz_stream.read(_CHUNK_SIZE):
+    while chunk := gz_stream.read(_GIANT_CHUNK_SIZE):
         tail_bytes += len(chunk)
         if raw_bytes + tail_bytes > max_bytes + overhead_allowance:
             raise _UnsafeArchiveError(
@@ -817,7 +974,7 @@ def download_and_extract_source(
             )
             raw_bytes = 0
             try:
-                with gzip.GzipFile(fileobj=stream, mode="rb") as gz_stream:
+                with _open_gzip_reader(stream) as gz_stream:
                     first_block = bytearray()
                     while len(first_block) < 512:
                         piece = gz_stream.read(512 - len(first_block))

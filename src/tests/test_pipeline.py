@@ -967,3 +967,58 @@ def test_fast_defer_429_enforces_post_done_gap_and_proactive_thermal_cooldown(tm
     assert summary["ok"] == 4
     # After 429 was held 10.9s (> 3.15s Start-to-Start), next GET waits 3.15s from _last_done_at!
     assert 3.15 in sleeps
+
+
+@responses.activate
+def test_parallel_extract_workers_complete_out_of_order_versions_before_queuing_s2(
+    tmp_path, monkeypatch
+):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        extract_workers=2,
+        extract_max_queue_bytes=1024,  # tiny budget to also exercise E4 byte backpressure
+    )
+    real_extract = pipeline.extract_tex_bib
+    v3_extracted = threading.Event()
+    worker_idents: set[int] = set()
+
+    def slow_v1_extract(archive, dest_dir, cfg, *, arxiv_id, version, raw_archive_bytes=None):
+        ident = threading.get_ident()
+        worker_idents.add(ident)
+        if arxiv_id == "2408.00004" and version == 1:
+            # Hold v1 on worker A until worker B finishes v2 and v3 out of order:
+            v3_extracted.wait(timeout=2.0)
+        res = real_extract(
+            archive,
+            dest_dir,
+            cfg,
+            arxiv_id=arxiv_id,
+            version=version,
+            raw_archive_bytes=raw_archive_bytes,
+        )
+        if arxiv_id == "2408.00004" and version == 3:
+            v3_extracted.set()
+        return res
+
+    monkeypatch.setattr(pipeline, "extract_tex_bib", slow_v1_extract)
+    summary = pipeline.run(["2408.00004"], config)
+
+    assert summary["ok"] == 3
+    assert len(worker_idents) == 2
+    paper_dir = config.data_dir / "papers" / "2408-00004"
+    # Even though v3 finished extracting before v1, S2 ran only AFTER v1 was installed,
+    # so all 3 version directories received references.json:
+    for v in (1, 2, 3):
+        assert (paper_dir / f"v{v}" / "meta.json").is_file()
+        assert (paper_dir / f"v{v}" / "references.json").is_file()
+    metrics_doc = _read(config.data_dir / "logs" / "metrics.json")
+    assert metrics_doc["sessions"][0]["papers_done"] == 1
+    assert metrics_doc["s2"]["papers_ok"] == 1
