@@ -645,7 +645,8 @@ def test_non_blocking_checkpoint_skips_if_previous_still_running(tmp_path, monke
 
     def slow_backup(source: Path, destination: Path) -> None:
         calls.append(1)
-        gate.wait(timeout=0.2)
+        if len(calls) == 1:
+            gate.wait(timeout=0.5)
 
     monkeypatch.setattr(pipeline, "backup_data_dir", slow_backup)
     config = Config(
@@ -911,3 +912,58 @@ def test_fast_defer_skips_15s_wait_on_first_429_and_continues_immediately(tmp_pa
     assert metrics_doc["arxiv"]["retry_wait_seconds"] == 0.0
     assert metrics_doc["arxiv"]["cooldown_seconds"] == 0.0
     assert metrics_doc["arxiv"]["auto_resumes"] == 1
+
+
+@responses.activate
+def test_fast_defer_429_enforces_post_done_gap_and_proactive_thermal_cooldown(tmp_path):
+    from crawler.http import HostClient, RateLimiter
+
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    # 2408.00004v1 succeeds; v2 is held in CDN tarpit for 10.9s before returning 429:
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", status=429)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v3", body=archive)
+    _mock_s2()
+
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(round(seconds, 4))
+        now[0] += seconds
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=3.0,
+        arxiv_min_idle_gap=0.50,
+        s2_min_interval=0.0,
+        max_retries=0,
+        auto_resume_rate_limit=True,
+        rate_limit_cooldown_seconds=0.01,
+        arxiv_thermal_cooldown_seconds=0.01,
+    )
+    limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep, min_idle_gap=0.50)
+    arxiv_client = HostClient(ARXIV, limiter, config)
+    real_session_get = arxiv_client._session.get  # noqa: SLF001
+
+    def tarpit_on_v2(url: str, **kwargs):
+        if url.endswith("/src/2408.00004v2") and not sleeps[-1:]:
+            pass
+        resp = real_session_get(url, **kwargs)
+        if resp.status_code == 429:
+            now[0] += 10.9  # CDN held request for 10.9s before returning HTTP 429
+        return resp
+
+    arxiv_client._session.get = tarpit_on_v2  # type: ignore[method-assign]  # noqa: SLF001
+
+    summary = pipeline.run(["2408.00004", "2408.00002"], config, arxiv_client=arxiv_client)
+    assert summary["ok"] == 4
+    # After 429 was held 10.9s (> 3.15s Start-to-Start), next GET waits 3.15s from _last_done_at!
+    assert 3.15 in sleeps

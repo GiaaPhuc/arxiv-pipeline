@@ -290,11 +290,11 @@ def test_arxiv_rate_limiter_adapts_above_3s_floor_on_429_and_recovers():
     limiter.done()
     assert sleeps == [3.3]
 
-    # Recover -0.15s after 5 successes, back to 3.0s after 10 successes:
-    for _ in range(5):
+    # Recover -0.15s after 3 successes, back to 3.0s after 6 successes (v3.3):
+    for _ in range(3):
         limiter.note_success()
     assert limiter._min_interval == 3.15  # noqa: SLF001
-    for _ in range(5):
+    for _ in range(3):
         limiter.note_success()
     assert limiter._min_interval == 3.0  # never drops below configured 3.0s floor  # noqa: SLF001
 
@@ -408,3 +408,92 @@ def test_retry_backoff_honored_after_slow_broken_stream():
     limiter.wait()
     limiter.done()
     assert sleeps == [1.5]
+
+
+def test_rate_limiter_min_idle_gap_zero_overhead_on_fast_requests():
+    now = [0.0]
+    sleeps: list[float] = []
+    starts: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(round(seconds, 4))
+        now[0] += seconds
+
+    limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep, min_idle_gap=0.50)
+
+    # Request 1: fast transfer (1.20s <= 2.50s) -> next starts at 3.00s (+0.00s overhead)
+    limiter.wait()
+    starts.append(round(now[0], 4))
+    now[0] += 1.20
+    limiter.done()
+
+    # Request 2: borderline transfer (2.50s) -> next starts at 6.00s (+0.00s overhead)
+    limiter.wait()
+    starts.append(round(now[0], 4))
+    now[0] += 2.50
+    limiter.done()
+
+    # Request 3: heavy transfer (4.00s, ends at 10.00s) -> 0.50s idle gap -> starts at 10.50s
+    limiter.wait()
+    starts.append(round(now[0], 4))
+    now[0] += 4.00
+    limiter.done()
+
+    limiter.wait()
+    starts.append(round(now[0], 4))
+    limiter.done()
+
+    assert sleeps == [1.8, 0.5, 0.5]
+    assert starts == [0.0, 3.0, 6.0, 10.5]
+
+
+def test_host_client_recycle_session_and_thermal_sensor():
+    now = [0.0]
+
+    def clock() -> float:
+        return now[0]
+
+    limiter = RateLimiter(0.0, clock=clock, sleep=lambda _s: None)
+    config = Config(
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        arxiv_socket_recycle_every=2,
+        arxiv_thermal_threshold=3.0,
+    )
+    client = HostClient("https://export.arxiv.org", limiter, config)
+    first_session = client._session  # noqa: SLF001
+
+    def make_resp(status: int, ttfb: float = 0.05):
+        def _call(*_a, **_kw):
+            now[0] += ttfb
+            resp = MagicMock(spec=requests.Response)
+            resp.status_code = status
+            resp.close = MagicMock()
+            return resp
+
+        return _call
+
+    client._session.get = MagicMock(side_effect=make_resp(200, 0.05))  # noqa: SLF001
+    client.get("/api/query?id_list=1")
+    assert client.session_recycles == 0
+
+    client._session.get = MagicMock(side_effect=make_resp(200, 0.05))  # noqa: SLF001
+    client.get("/api/query?id_list=2")
+    # Recycled automatically right after the 2nd request completed:
+    assert client.session_recycles == 1
+    assert client._session is not first_session  # noqa: SLF001
+
+    # Thermal sensor: 1 slow TTFB (4.0s -> +1.0) + 1 HTTP 429 (+2.0) = 3.0 -> triggers cooldown
+    client._session.get = MagicMock(side_effect=make_resp(200, 4.0))  # noqa: SLF001
+    client.get("/api/query?id_list=3")
+    assert client.thermal_score == 1.0
+    assert client.consume_thermal_trigger() is False
+
+    client._session.get = MagicMock(side_effect=make_resp(429, 8.0))  # noqa: SLF001
+    client.get("/api/query?id_list=4")
+    assert client.thermal_score == 3.0
+    assert client.consume_thermal_trigger() is True
+    assert client.thermal_score == 0.0
