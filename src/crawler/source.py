@@ -36,6 +36,8 @@ _GIANT_CHUNK_SIZE = 512 * 1024
 _GIANT_ARCHIVE_THRESHOLD = 25 * 1024 * 1024
 _STREAM_CHUNK_SIZE = 128 * 1024
 _MAX_STREAM_ATTEMPTS = 3
+_MAX_TOTAL_STREAM_ATTEMPTS = 12
+_MIN_PROGRESS_BYTES = 512 * 1024
 _KEEPALIVE_DRAIN_BYTES = 64 * 1024
 _STREAM_RETRY_ERRORS = (ChunkedEncodingError, ConnectionError, Timeout)
 _GZIP_MAGIC = b"\x1f\x8b"
@@ -227,6 +229,9 @@ def download_source(
     first_chunk_checked = False
     range_resumed = False
     max_attempts = _stream_attempts(client)
+    max_total_attempts = _MAX_TOTAL_STREAM_ATTEMPTS if max_attempts > 1 else 1
+    stalled_attempts = 0
+    total_attempts = 0
 
     def _cleanup_partial() -> None:
         nonlocal disk_out, temp_path
@@ -238,9 +243,11 @@ def download_source(
             temp_path = None
         mem_buf.clear()
 
-    for attempt in range(max_attempts):
+    while stalled_attempts < max_attempts and total_attempts < max_total_attempts:
+        total_attempts += 1
+        written_before = written
         req_kwargs: dict[str, Any] = {"stream": True}
-        if attempt > 0 and written > 0:
+        if total_attempts > 1 and written > 0:
             req_kwargs["headers"] = {"Range": f"bytes={written}-"}
         try:
             response = client.get(path, **req_kwargs)
@@ -262,7 +269,8 @@ def download_source(
                 written = 0
                 header.clear()
                 first_chunk_checked = False
-                if attempt < max_attempts - 1:
+                stalled_attempts += 1
+                if stalled_attempts < max_attempts and total_attempts < max_total_attempts:
                     continue
                 return DownloadResult(path=None, http_status=status)
             if not 200 <= status < 300:
@@ -383,20 +391,30 @@ def download_source(
                 disk_out.flush()
                 disk_out.close()
                 disk_out = None
-            if attempt >= max_attempts - 1:
+            if hasattr(client, "note_stream_break"):
+                client.note_stream_break()
+            progressed = written - written_before
+            if progressed >= _MIN_PROGRESS_BYTES:
+                stalled_attempts = 0
+            else:
+                stalled_attempts += 1
+            if stalled_attempts >= max_attempts or total_attempts >= max_total_attempts:
                 _cleanup_partial()
                 raise
             logger.warning(
-                "stream %sv%d failed at %d bytes (%s); retry %d",
+                "stream %sv%d failed at %d bytes (+%d B, %s); retry %d (stalled %d/%d)",
                 arxiv_id,
                 version,
                 written,
+                progressed,
                 type(exc).__name__,
-                attempt + 1,
+                total_attempts,
+                stalled_attempts,
+                max_attempts,
             )
             limiter = getattr(client, "limiter", None)
             if limiter is not None and hasattr(limiter, "schedule_retry_backoff"):
-                limiter.schedule_retry_backoff(1.5 * (attempt + 1))
+                limiter.schedule_retry_backoff(1.5 * max(stalled_attempts, 1))
         except BaseException:
             _cleanup_partial()
             raise

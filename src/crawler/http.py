@@ -11,6 +11,7 @@ arXiv API and /src/ share ONE limiter (same host, export.arxiv.org, one connecti
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import random
@@ -56,15 +57,24 @@ class _SingleConnAdapter(HTTPAdapter):
 class _StreamResponse:
     """Wrap a streaming ``requests.Response``; active request slot ends when closed."""
 
-    def __init__(self, inner: requests.Response, limiter: RateLimiter) -> None:
+    def __init__(
+        self,
+        inner: requests.Response,
+        limiter: RateLimiter,
+        *,
+        on_close: Callable[[], None] | None = None,
+    ) -> None:
         self._inner = inner
         self._limiter = limiter
+        self._on_close = on_close
         self._released = False
 
     def _release(self) -> None:
         if not self._released:
             self._released = True
             self._limiter.done()
+            if self._on_close is not None:
+                self._on_close()
 
     def close(self) -> None:
         try:
@@ -96,14 +106,16 @@ class RateLimiter:
         min_interval: float,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = _default_sleep,
+        *,
+        min_idle_gap: float = 0.0,
     ) -> None:
         self._base_floor = min_interval
         self._min_interval = min_interval
-        # T1 (v3.2): after sleeping Retry-After, upstream rate-limit window has already reset;
-        # nudge only +0.15 s (capped at floor + 0.30 s = 3.30 s) and recover after 5 successes.
+        self._min_idle_gap = max(float(min_idle_gap), 0.0)
+        # T1 (v3.2) + v3.3: nudge +0.15 s (cap floor + 0.30 s = 3.30 s), recover after 3 successes.
         self._adaptive_step = 0.15
         self._max_adaptive_interval = round(min_interval + 0.30, 4) if min_interval > 0 else 0.0
-        self._recover_streak = 5
+        self._recover_streak = 3
         self._adaptive_streak = 0
         self._retry_backoff = 0.0
         self._cooldown_until = 0.0
@@ -160,6 +172,11 @@ class RateLimiter:
                 remaining = max(0.0, effective_interval - elapsed)
             elif effective_interval > self._min_interval:
                 remaining = effective_interval
+            if self._min_idle_gap > 0.0 and self._last_done_at is not None:
+                # v3.3: post-download idle floor prevents 100% socket duty cycle after >2.50s runs;
+                # adds +0.00s overhead when transfer duration <= (min_interval - min_idle_gap).
+                since_done = now - self._last_done_at
+                remaining = max(remaining, max(0.0, self._min_idle_gap - since_done))
             if retry_backoff > 0.0 and self._last_done_at is not None:
                 # When a long stream breaks after > min_interval, still honor retry_backoff
                 # after socket teardown so we never reconnect within 1 ms of a broken stream.
@@ -271,14 +288,61 @@ class HostClient:
         self._base_url = base_url.rstrip("/") + "/"
         self.limiter = limiter
         self._config = config
-        self._session = requests.Session()
-        adapter = _SingleConnAdapter(pool_connections=1, pool_maxsize=1)
-        self._session.mount("https://", adapter)
-        self._session.mount("http://", adapter)
-        self._session.headers["User-Agent"] = config.user_agent
         self._is_s2 = S2_API_HOST in base_url
-        if self._is_s2 and config.s2_api_key:
-            self._session.headers["x-api-key"] = config.s2_api_key
+        self._requests_since_recycle = 0
+        self.session_recycles = 0
+        self.thermal_score: float = 0.0
+        self._session = self._build_session()
+
+    def _build_session(self) -> requests.Session:
+        session = requests.Session()
+        adapter = _SingleConnAdapter(pool_connections=1, pool_maxsize=1)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        session.headers["User-Agent"] = self._config.user_agent
+        if self._is_s2 and self._config.s2_api_key:
+            session.headers["x-api-key"] = self._config.s2_api_key
+        return session
+
+    def recycle_session(self) -> None:
+        """Close the current HTTP session and open a fresh 1-connection pool (v3.3)."""
+        old_session = getattr(self, "_session", None)
+        self._session = self._build_session()
+        self._requests_since_recycle = 0
+        self.session_recycles += 1
+        if old_session is not None:
+            with contextlib.suppress(Exception):
+                old_session.close()
+
+    def _maybe_recycle_after_request(self) -> None:
+        if self._is_s2:
+            return
+        every = int(getattr(self._config, "arxiv_socket_recycle_every", 0) or 0)
+        if every > 0 and self._requests_since_recycle >= every:
+            self.recycle_session()
+
+    def _update_thermal_on_response(self, status: int, header_elapsed: float) -> None:
+        if self._is_s2:
+            return
+        if status == 429 or self._is_transient_server_error(status):
+            self.thermal_score = round(self.thermal_score + 2.0, 4)
+        elif header_elapsed >= 3.5:
+            self.thermal_score = round(self.thermal_score + 1.0, 4)
+        elif 200 <= status < 300 and header_elapsed < 1.5:
+            self.thermal_score = round(max(0.0, self.thermal_score - 0.35), 4)
+
+    def note_stream_break(self) -> None:
+        """Record a mid-stream disconnect (ChunkedEncodingError/ConnectionError) (v3.3)."""
+        if not self._is_s2:
+            self.thermal_score = round(self.thermal_score + 1.5, 4)
+
+    def consume_thermal_trigger(self) -> bool:
+        """Return True and reset ``thermal_score`` when proactive thermal cooldown is due (v3.3)."""
+        threshold = float(getattr(self._config, "arxiv_thermal_threshold", 3.0) or 0.0)
+        if not self._is_s2 and threshold > 0.0 and self.thermal_score >= threshold:
+            self.thermal_score = 0.0
+            return True
+        return False
 
     def _full_url(self, path: str) -> str:
         if path.startswith("http://") or path.startswith("https://"):
@@ -307,26 +371,37 @@ class HostClient:
             headers.setdefault("Accept-Encoding", "identity")
             kwargs["headers"] = headers
         stream = bool(kwargs.get("stream"))
+        clock = getattr(self.limiter, "_clock", time.monotonic)
         response: requests.Response | None = None
         for attempt in range(self._config.max_retries + 1):
             self.limiter.wait()
             handoff = False
             try:
                 self._log_request("GET", url)
+                t0 = clock()
                 try:
                     response = self._session.get(url, **kwargs)
                 except (requests.ConnectionError, requests.Timeout) as exc:
+                    self._requests_since_recycle += 1
+                    self.note_stream_break()
                     # Transient network failure: back off and retry within the budget.
                     if attempt >= self._config.max_retries:
                         raise
                     logger.warning("GET %s failed (%s); retry %d", url, type(exc).__name__, attempt)
                     self._sleep_for_retry(attempt)
                     continue
+                header_elapsed = max(0.0, clock() - t0)
+                self._requests_since_recycle += 1
+                self._update_thermal_on_response(response.status_code, header_elapsed)
                 self._log_request("GET", url, response.status_code)
                 if response.status_code in _STOP_STATUSES:
                     if stream:
                         handoff = True
-                        return _StreamResponse(response, self.limiter)
+                        return _StreamResponse(
+                            response,
+                            self.limiter,
+                            on_close=self._maybe_recycle_after_request,
+                        )
                     return response
                 if (
                     self._is_transient_server_error(response.status_code)
@@ -337,11 +412,16 @@ class HostClient:
                     continue
                 if stream:
                     handoff = True
-                    return _StreamResponse(response, self.limiter)
+                    return _StreamResponse(
+                        response,
+                        self.limiter,
+                        on_close=self._maybe_recycle_after_request,
+                    )
                 return response
             finally:
                 if not handoff:
                     self.limiter.done()
+                    self._maybe_recycle_after_request()
         assert response is not None
         return response
 
@@ -442,7 +522,12 @@ def save_rate_state(
 
 
 def make_arxiv_client(config: Config) -> HostClient:
-    limiter = RateLimiter(config.arxiv_min_interval)
+    idle_gap = (
+        min(config.arxiv_min_idle_gap, config.arxiv_min_interval)
+        if config.arxiv_min_interval > 0
+        else 0.0
+    )
+    limiter = RateLimiter(config.arxiv_min_interval, min_idle_gap=idle_gap)
     return HostClient(f"https://{ARXIV_API_HOST}", limiter, config)
 
 

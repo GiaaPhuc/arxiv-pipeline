@@ -208,6 +208,7 @@ class _Run:
             "arxiv_429": 0,
             "arxiv_retry_wait_seconds": 0.0,
             "arxiv_auto_resumes": 0,
+            "arxiv_thermal_cooldowns": 0,
             "arxiv_cooldown_seconds": 0.0,
             "range_resumes": 0,
             "s2_ok": 0,
@@ -487,7 +488,7 @@ def _extract_worker(run: _Run) -> None:
             run.extract_queue.task_done()
 
 
-def _process_paper(run: _Run, paper: PaperMeta) -> None:
+def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) -> None:
     paper_dir = _paper_dir(run, paper.arxiv_id)
     _clean_stale(paper_dir)
     pending_versions: list[int] = []
@@ -529,6 +530,12 @@ def _process_paper(run: _Run, paper: PaperMeta) -> None:
                     download_error=exc,
                     is_last_for_paper=is_last,
                 )
+            )
+        if run.config.auto_resume_rate_limit and run.arxiv.consume_thermal_trigger():
+            _handle_thermal_cooldown(
+                run,
+                f"after {paper.arxiv_id}v{version}",
+                ids_seen=ids_seen,
             )
 
 
@@ -750,6 +757,7 @@ def _wait_arxiv_429(
     """Sleep after arXiv 429; fast-defer (U1) or raise ``StopCrawl`` when retry budget exhausted."""
     _inc(run, "arxiv_429")
     run.arxiv.limiter.note_429()
+    run.arxiv.limiter.schedule_retry_backoff(run.arxiv.limiter._min_interval)
     run.consecutive_arxiv_429 += 1
     if fast_defer and run.config.auto_resume_rate_limit and not run.in_deferred_pass:
         need_cooldown = run.consecutive_arxiv_429 >= 2
@@ -810,8 +818,59 @@ def _wait_arxiv_429(
             save_rate_state(run.rate_state_path, arxiv_cooldown_until=0.0)
 
 
+def _handle_thermal_cooldown(
+    run: _Run,
+    context: str,
+    *,
+    ids_seen: int | None = None,
+) -> None:
+    """v3.3: Proactive 60s micro-cooldown when thermal sensor detects early CDN tarpit/shaping."""
+    run.arxiv.recycle_session()
+    run.arxiv.thermal_score = 0.0
+    run.extract_queue.join()
+    _flush_metrics(run)
+    if ids_seen is not None:
+        _maybe_checkpoint(run, ids_seen)
+    raw_cooldown = min(
+        float(run.config.arxiv_thermal_cooldown_seconds),
+        float(run.config.rate_limit_cooldown_seconds),
+    )
+    cooldown = min(max(raw_cooldown, 0.0), 600.0)
+    _inc(run, "arxiv_thermal_cooldowns")
+    _inc(run, "arxiv_cooldown_seconds", cooldown)
+    _diag(
+        run,
+        "thermal_cooldown",
+        context=context,
+        cooldown_seconds=cooldown,
+    )
+    if run.rate_state_path is not None and cooldown > 0:
+        save_rate_state(run.rate_state_path, arxiv_cooldown_until=time.time() + cooldown)
+    logger.warning(
+        "thermal sensor triggered (v3.3) %s: recycled TCP session; sleeping micro-cooldown %.0fs",
+        context,
+        cooldown,
+    )
+    try:
+        remaining = cooldown
+        while remaining > 0:
+            step = min(15.0, remaining)
+            if run.stop.wait(step):
+                raise StopCrawl(f"arXiv thermal cooldown {context} (interrupted while waiting)")
+            remaining -= step
+            if remaining > 0:
+                logger.info("thermal micro-cooldown: %.0fs remaining...", remaining)
+    finally:
+        if run.rate_state_path is not None:
+            save_rate_state(run.rate_state_path, arxiv_cooldown_until=0.0)
+    run.consecutive_arxiv_429 = 0
+    run.arxiv.limiter.reset_interval()
+
+
 def _handle_auto_resume_cooldown(run: _Run, context: str, deferred_count: int) -> None:
     """U1: Drain extract queue, flush metrics + backup, sleep cooldown, reset limiter to 3.0s."""
+    run.arxiv.recycle_session()
+    run.arxiv.thermal_score = 0.0
     run.extract_queue.join()
     _flush_metrics(run)
     if run.config.backup_dir is not None:
@@ -1110,11 +1169,14 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
                 if run.stop.is_set():
                     return
                 try:
-                    _process_paper(run, paper)
+                    _process_paper(run, paper, ids_seen=seen)
                 except _DeferRateLimit as exc:
                     deferred_ids.append(paper.arxiv_id)
                     if exc.need_cooldown:
                         _handle_auto_resume_cooldown(run, str(exc), 1)
+                    elif run.config.auto_resume_rate_limit and run.arxiv.consume_thermal_trigger():
+                        _inc(run, "arxiv_auto_resumes")
+                        _handle_thermal_cooldown(run, str(exc), ids_seen=seen)
                     else:
                         _inc(run, "arxiv_auto_resumes")
                     continue

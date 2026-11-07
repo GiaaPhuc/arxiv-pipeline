@@ -39,6 +39,12 @@ class Config:
     auto_resume_rate_limit: bool = False  # U1: defer rate-limited chunk & sleep cooldown
     rate_limit_cooldown_seconds: float = 180.0  # U1: cooldown window (180s - 600s) before resume
     s2_only: bool = False  # U2: skip arXiv network calls and only backfill S2 references
+    arxiv_min_idle_gap: float = 0.50  # v3.3: post-download idle floor after requests > 2.50s
+    arxiv_socket_recycle_every: int = 400  # v3.3: recycle TCP session every N requests (0=off)
+    arxiv_thermal_cooldown_seconds: float = (
+        60.0  # v3.3: proactive micro-cooldown on thermal trigger
+    )
+    arxiv_thermal_threshold: float = 3.0  # v3.3: thermal score threshold for proactive cooldown
 
     @property
     def user_agent(self) -> str:

@@ -706,3 +706,60 @@ def test_download_source_resumes_with_http_206_byte_range_on_mid_stream_drop(
         "/src/2408.06045v1",
         {"stream": True, "headers": {"Range": f"bytes={split_at}-"}},
     )
+
+
+def test_download_source_progress_aware_range_resume_exceeds_3_attempts(
+    tmp_path: Path,
+) -> None:
+    # 5 consecutive drops that each progress >= 512 KiB reset stalled_attempts to 0,
+    # completing on the 6th request via HTTP 206 Range instead of failing at attempt 3.
+    segment = b"x" * (600 * 1024)  # 600 KiB >= 512 KiB _MIN_PROGRESS_BYTES
+    payload = b"\x1f\x8b" + segment * 5 + b"tail-end"
+    cuts = [len(b"\x1f\x8b") + len(segment) * i for i in range(1, 6)]
+    responses_seq = [
+        FakeResponse(
+            200,
+            [payload[: cuts[0]]],
+            requests.exceptions.ChunkedEncodingError("cut 1"),
+        ),
+        FakeResponse(
+            206,
+            [payload[cuts[0] : cuts[1]]],
+            requests.exceptions.ChunkedEncodingError("cut 2"),
+        ),
+        FakeResponse(
+            206,
+            [payload[cuts[1] : cuts[2]]],
+            requests.exceptions.ChunkedEncodingError("cut 3"),
+        ),
+        FakeResponse(
+            206,
+            [payload[cuts[2] : cuts[3]]],
+            requests.exceptions.ChunkedEncodingError("cut 4"),
+        ),
+        FakeResponse(
+            206,
+            [payload[cuts[3] : cuts[4]]],
+            requests.exceptions.ChunkedEncodingError("cut 5"),
+        ),
+        FakeResponse(206, [payload[cuts[4] :]]),
+    ]
+    client = _RetryFakeClient(responses_seq)
+    client._config = Config(contact="test@example.com", max_retries=5)  # noqa: SLF001
+
+    res = download_source(
+        client,
+        "2408.14782",
+        1,
+        tmp_path / ".tmp",
+        spool_max_bytes=len(payload) + 1024,
+    )
+    assert res.http_status == 200
+    assert res.range_resumed is True
+    assert res.raw_archive_bytes == len(payload)
+    assert bytes(res.data or b"") == payload
+    assert len(client.calls) == 6
+    assert client.calls[-1] == (
+        "/src/2408.14782v1",
+        {"stream": True, "headers": {"Range": f"bytes={cuts[4]}-"}},
+    )

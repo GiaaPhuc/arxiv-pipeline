@@ -362,6 +362,8 @@ def merge_with_base(
         + float(s2_in.get("arxiv_retry_wait_seconds", 0.0)),
         "auto_resumes": int(prev_arxiv.get("auto_resumes", 0))
         + int(s2_in.get("arxiv_auto_resumes", 0)),
+        "thermal_cooldowns": int(prev_arxiv.get("thermal_cooldowns", 0))
+        + int(s2_in.get("arxiv_thermal_cooldowns", 0)),
         "cooldown_seconds": float(prev_arxiv.get("cooldown_seconds", 0.0))
         + float(s2_in.get("arxiv_cooldown_seconds", 0.0)),
         "range_resumes": int(prev_arxiv.get("range_resumes", 0))

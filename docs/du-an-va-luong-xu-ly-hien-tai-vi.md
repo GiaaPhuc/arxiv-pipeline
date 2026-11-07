@@ -1,8 +1,8 @@
 # arxiv-pipeline — Mô tả dự án và luồng xử lý hiện tại
 
-> **Mục đích tài liệu:** Mô tả kiến trúc và luồng end-to-end **đúng 100% với mã nguồn** sau các đợt tối ưu **O1–O6**, **S1–S7**, kiến trúc **v3 Producer–Consumer**, **v3.1 Resilience & QA Alignment (`U1–U6`)** và **v3.2 Sub-7h Speed Tuning (`T1–T5`)** (cập nhật **07/11/2026**). Nền tảng phân tích hiệu năng và thiết kế chi tiết xem tại `docs/plans/Plan-toi-uu-luong-crawl-5000-id-vi.md`.
+> **Mục đích tài liệu:** Mô tả kiến trúc và luồng end-to-end **đúng 100% với mã nguồn** sau các đợt tối ưu **O1–O6**, **S1–S7**, kiến trúc **v3 Producer–Consumer**, **v3.1 Resilience & QA Alignment (`U1–U6`)**, **v3.2 Sub-7h Speed Tuning (`T1–T5` + Fast-Defer Queue)** và **v3.3 Thermal-Aware Pacing (Chống "Quá Nhiệt IP" & Crawl Liên Tục 24/7)** (cập nhật **07/11/2026**). Nền tảng phân tích hiệu năng và thiết kế chi tiết xem tại `docs/plans/Plan-toi-uu-luong-crawl-5000-id-vi.md` và `docs/plans/Plan-chong-qua-nhiet-ip-va-crawl-lien-tuc-vi.md`.
 >
-> **Trạng thái code:** **245 unit tests pass**, `ruff` sạch; Pilot 30 ID hoàn tất ✅ (`57` cặp phiên bản: `51` `ok`, `6` `no_source`, `0` `failed`); đang chạy **Milestone 1 Phase 2** (crawl 25.000 ID trên một máy) và đã khởi động **Milestone 2 Phase 0** (khóa `src/parsing/models.py` + khung pipeline đa nhân). Chi tiết đối chiếu đề bài: `STATUS.md` mục 0.
+> **Trạng thái code:** **249 unit tests pass**, `ruff` sạch; Pilot 30 ID hoàn tất ✅ (`57` cặp phiên bản: `51` `ok`, `6` `no_source`, `0` `failed`); đang chạy **Milestone 1 Phase 2** (crawl 25.000 ID trên một máy) và đã khởi động **Milestone 2 Phase 0** (khóa `src/parsing/models.py` + khung pipeline đa nhân). Chi tiết đối chiếu đề bài: `STATUS.md` mục 0.
 
 ---
 
@@ -20,9 +20,10 @@
 - **v0 (Baseline):** ~15,0 giờ (`End-to-Start 3,5 s`, tuần tự 1 luồng, giải nén 2-pass, backup đồng bộ).
 - **v1 (O1–O6 cơ bản):** ~10,8 giờ (`Start-to-Start 3,0 s`, tách `extract-worker`, 1-pass extract, nhưng bị nghẽn bởi ghi/đọc đĩa tạm ~40,6 GB).
 - **v2 (S1–S7):** ~7,0 – 7,4 giờ (đệm RAM 32 MiB, tối ưu S2 batch + streaming checkpoint, nhưng còn kẹt trần thích ứng 429 ở 6,0 s).
-- **v3 + v3.1 (`U1–U6`) + v3.2 (`T1–T5` — Mã hiện tại):**
-  - **Giờ trống / ít 429:** **~6,85 – 6,95 giờ (< 7,0 giờ)** — đạt ~98,5% trần lý thuyết `6,85 giờ` của chuẩn lịch sự **Start-to-Start ≥ 3,0 s** trên 1 kết nối đơn.
-  - **Giờ cao điểm / nhiều 429 & đứt stream:** **~6,95 – 7,25 giờ (< 7,5 giờ)** — chỉ trễ thêm ~15–25 phút nhờ xóa phạt kép 429 (`+0,15 s`, trần `3,30 s`), khôi phục luồng đứt bằng `HTTP 206 Partial Content`, và tự động hoãn ID nghẽn (`--auto-resume-rate-limit`).
+- **v3 + v3.1 (`U1–U6`) + v3.2 (`T1–T5`) + v3.3 (`Thermal-Aware Pacing` — Mã hiện tại):**
+  - **Giờ trống / ít 429:** **`~6,85 – 6,92 giờ` (< 7,0 giờ)** — đạt ~99% trần lý thuyết `6,85 giờ` của chuẩn lịch sự **Start-to-Start ≥ 3,0 s** trên 1 kết nối đơn (`+0,00 s` overhead cho `96%` gói nguồn $\le 2,50\text{ s}$; xoay vòng TCP socket mỗi `400` request ẩn hoàn toàn trong thời gian chờ `RateLimiter`; hồi phục nhịp `3,00 s` sau **3** bài thành công).
+  - **Giờ cao điểm / chạy liên tục nhiều giờ:** **`~6,92 – 7,15 giờ` (< 7,2 giờ)** — triệt tiêu hoàn toàn hiện tượng "quá nhiệt IP" (Tarpit `TTFB 5–11 s`, bóp băng thông `0,5 MB/s`, cắt stream ở bội số `1–2 MiB`) nhờ **Sàn nghỉ hậu tải `min_idle_gap = 0,50 s`** (giữ `Duty Cycle <= 85%`), **Khóa hậu tải `3,15 s` sau `429 Fast-Defer`**, **Nối tiếp `HTTP 206 Range` theo tiến độ (`>= 512 KiB`, tới 12 nhịp $\rightarrow 0$ `failed`)** và **Cảm biến nhiệt `thermal_score` + Tản nhiệt chủ động `60 s`**.
+  - **Toàn bộ `25.000 ID` ($\approx 41.000$ phiên bản):** **`~34,3 – 35,8 giờ`** treo máy liên tục 24/7 tự động 100%, `0 failed`.
 
 ---
 
@@ -30,7 +31,7 @@
 
 | Host | Dùng cho | Host thực tế | Giới hạn trong code | Hành vi đặc biệt khi gặp lỗi / Rate-limit |
 | --- | --- | --- | --- | --- |
-| **arXiv** | Atom API (`/api/query?id_list=...`) + tải gói nguồn (`/src/{id}vN`) | **`export.arxiv.org`** (1 `Session`, 1 `RateLimiter`, `_SingleConnAdapter(pool_connections=1, pool_maxsize=1)` với `TCP_NODELAY = 1` & bảo toàn Linux `tcp_rmem` auto-tuning tới `6 MiB`, header `/src/` đặt `Accept-Encoding: identity`) | $\ge \mathbf{3,0\text{ s}}$ **Start-to-Start** giữa hai request (`CRAWLER_ARXIV_MIN_INTERVAL`, sàn cứng 3,0 s) | • **HTTP 403:** dừng toàn bộ lần chạy (`StopCrawl`, exit code `3`).<br/>• **HTTP 429 trên `/src/` — Fast-Defer Queue (`U1` + `T1`, bật mặc định trong `Config.from_env()`):** gọi `limiter.note_429()` nhích nhẹ **`+0,15 s`** (trần cứng **`3,30 s`**). Ở lần `429` đầu tiên (`consecutive_arxiv_429 == 1`), **không đứng chờ `15 s` và không retry tại chỗ**: đẩy ngay ID đó vào hàng đợi `deferred_ids` (`0 s` chờ phụ) và **chuyển sang tải ngay ID kế tiếp** (sau nhịp chuẩn `3,15 s`). Nếu ID kế tiếp tải thành công (`200 OK`), bộ đếm `consecutive_arxiv_429` reset về `0` (mất đúng `0 s` chờ phạt!). Chỉ khi **$\ge 2$ bài liên tiếp** đều bị `429` (chứng tỏ toàn IP đang bị CDN chặn) mới kích hoạt ngủ `cooldown` (`180 s`) bảo vệ IP. Cuối dải tự động chạy lượt vét `deferred_ids`.<br/>• **HTTP 2xx (T1):** sau mỗi chuỗi **5 request thành công** (`note_success()`), nhịp tự thu hẹp `-0,15 s` về sàn `3,0 s`.<br/>• **5xx / lỗi mạng tạm thời / đứt stream (T4):** retry tối đa `max_retries=5` với đồng hồ hợp nhất `schedule_retry_backoff` (`max(min_interval, backoff)` tính từ cả `_last_start_at` và `_last_done_at` để luồng tải dài `> 3,0 s` bị đứt giữa chừng luôn nghỉ tối thiểu `1,5 × (attempt + 1)` giây trước khi reconnect). |
+| **arXiv** | Atom API (`/api/query?id_list=...`) + tải gói nguồn (`/src/{id}vN`) | **`export.arxiv.org`** (1 `Session`, 1 `RateLimiter`, `_SingleConnAdapter(pool_connections=1, pool_maxsize=1)` với `TCP_NODELAY = 1` & bảo toàn Linux `tcp_rmem` auto-tuning tới `6 MiB`, xoay vòng TCP `recycle_session()` mỗi `400` request với `0 ms` overhead, header `/src/` đặt `Accept-Encoding: identity`) | $\ge \mathbf{3,0\text{ s}}$ **Start-to-Start** giữa hai request (`CRAWLER_ARXIV_MIN_INTERVAL`, sàn cứng 3,0 s) + sàn nghỉ hậu tải `min_idle_gap = 0,50 s` sau các bài tải `> 2,50 s` (giữ `Duty Cycle <= 85%`, `+0,00 s` overhead cho các bài $\le 2,50\text{ s}$) | • **HTTP 403:** dừng toàn bộ lần chạy (`StopCrawl`, exit code `3`).<br/>• **HTTP 429 trên `/src/` — Fast-Defer Queue (`U1` + `T1` + `v3.3`, bật mặc định trong `Config.from_env()`):** gọi `limiter.note_429()` nhích nhẹ **`+0,15 s`** (trần cứng **`3,30 s`**) kèm `schedule_retry_backoff(3,15 s)` tính từ `_last_done_at` (chặn tuyệt đối lỗi bắn bồi `GET` sau `4 ms` khi request `429` bị Tarpit ngâm lâu). Ở lần `429` đầu tiên (`consecutive_arxiv_429 == 1`), **không đứng chờ `15 s` và không retry tại chỗ**: đẩy ngay ID đó vào hàng đợi `deferred_ids` (`0 s` chờ phụ) và **chuyển sang tải ngay ID kế tiếp** (sau đúng `3,15 s`). Nếu ID kế tiếp tải thành công (`200 OK`), bộ đếm `consecutive_arxiv_429` reset về `0`. Khi **$\ge 2$ bài liên tiếp** bị `429` thì kích hoạt ngủ `cooldown` (`180 s`) + `recycle_session()`.<br/>• **Cảm biến nhiệt IP (`thermal_score` — `v3.3`):** cộng điểm khi `TTFB >= 3,5 s` (`+1,0`), đứt stream (`+1,5`), `429/5xx` (`+2,0`) và giảm `-0,35` mỗi request khỏe (`TTFB < 1,5 s`). Khi `thermal_score >= 3,0`, chủ động đóng TCP session nóng (`recycle_session()`), xả `extract_queue` + flush metrics + backup và nghỉ tản nhiệt ngắn **`60 s`** trước khi bị CDN giam Tarpit.<br/>• **HTTP 2xx (`T1` + `v3.3`):** sau mỗi chuỗi **3 request thành công** (`note_success()`), nhịp tự thu hẹp `-0,15 s` về sàn `3,0 s`.<br/>• **5xx / lỗi mạng tạm thời / đứt stream (`T4` + `v3.3`):** nối tiếp `HTTP 206 Range` theo tiến độ (`Progress-Aware`: miễn là mỗi nhịp tải thêm $\ge 512\text{ KiB}$ thì reset `stalled_attempts = 0`, cho phép tối đa `12` nhịp nối tiếp đến khi xong 100% gói mà không rơi vào `failed`). |
 | **Semantic Scholar (S2)** | Metadata bổ sung (`venue`) + danh sách trích dẫn (`references`) | `api.semanticscholar.org` | Nền $\mathbf{1,1\text{ s}}$ **End-to-Start** + jitter `0..0,05 s` (`AdaptiveRateLimiter`, chuẩn key 1 req/s) | • Đính kèm header `x-api-key` nếu có `S2_API_KEY` (`SecretRedactingFilter` tự động che mọi khóa trong log — **U5**).<br/>• **HTTP 429 (T1):** chờ `Retry-After` (hoặc backoff bậc thang `15 s → 30 s → 60 s` theo `rate_attempt`, kẹp trong `15–600 s`), `note_429()` nhân đôi khoảng nghỉ (tối đa 5,0 s), thử lại lô tối đa 4 lần. Nếu tổng thời gian chờ 429 liên tiếp không có request thành công $\ge \mathbf{30\text{ phút}}$ $\rightarrow$ tắt `s2-worker` (`s2_disabled=True`, có thể vét bù sau bằng `--s2-only` — **U2**).<br/>• **HTTP 403:** tắt `s2-worker` ngay lập tức (bảo toàn arXiv crawl). |
 
 **Quy tắc bất khả xâm phạm (`AGENTS.md` & `CONTRIBUTING.md`):**
@@ -61,7 +62,7 @@ src/
 │   ├── source.py             # download_source (RAM <=96 MiB, Range 206 resume), extract_tex_bib (1-pass .tex/.bib/.bbl, memoryview)
 │   ├── s2.py                 # POST /paper/batch (100 ID) + fallback GET /references (limit 1000)
 │   ├── manifest.py           # SQLite manifest + atomic_write
-│   ├── pipeline.py           # Điều phối Producer-Consumer + auto-resume 429 + --s2-only + OS mutex + diagnostics.jsonl
+│   ├── pipeline.py           # Điều phối Producer-Consumer + Fast-Defer Queue (0s chờ lần 429 đầu) + --s2-only + OS mutex + diagnostics.jsonl
 │   ├── checkpoint.py         # Sao lưu nền nguyên tử (.tar.gz / mirror) + shrink guard + restore
 │   ├── metrics.py            # Đo stage, ResourceSampler O(1), redact_secrets, source_code_hash, aggregate_sessions
 │   └── export.py             # Tổng hợp bảng Hugging Face & thống kê báo cáo (cross_version_dedup + benchmark_summary)
@@ -77,7 +78,7 @@ src/
 
 | Luồng (Thread) | Vai trò chính | Cô lập tài nguyên |
 | --- | --- | --- |
-| **1. `MainThread` (arXiv Producer)** | Chia chunk ID; gọi `discover` & `fetch_revised_dates` (lô **250** ID); tải `/src/{id}vK` theo chunk `256 KiB` (`512 KiB` cho gói $\ge 25\text{ MiB}$) vào `bytearray` RAM ($\le 96\text{ MiB}$), tự nối tiếp bằng `HTTP 206 Range` nếu đứt stream; **đóng HTTP stream & nhả `RateLimiter` ngay lập tức**; đẩy `_ExtractJob` vào `extract_queue` (`maxsize=8`). | Chỉ gọi `export.arxiv.org`; không giải nén tar, không gọi S2. |
+| **1. `MainThread` (arXiv Producer)** | Chia chunk ID; gọi `discover` & `fetch_revised_dates` (lô **250** ID); tải `/src/{id}vK` theo chunk `256 KiB` (`512 KiB` cho gói $\ge 25\text{ MiB}$) vào `bytearray` RAM ($\le 96\text{ MiB}$), tự nối tiếp bằng `HTTP 206 Range` nếu đứt stream; nếu `/src/{id}vK` gặp `429` lần đầu thì **Fast-Defer (`0 s` chờ phụ)** đẩy ngay bài vào `deferred_ids` và qua ID kế tiếp (chỉ ngủ cooldown khi $\ge 2$ bài liên tiếp bị `429`); **đóng HTTP stream & nhả `RateLimiter` ngay lập tức**; đẩy `_ExtractJob` vào `extract_queue` (`maxsize=8`). | Chỉ gọi `export.arxiv.org`; không giải nén tar, không gọi S2. |
 | **2. `extract-worker` (Consumer)** | Lấy gói từ `extract_queue`; đọc qua `_ZeroCopyBytesReader` (`memoryview`) và giải nén **1-pass** gzip/tar chỉ giữ `.tex`/`.bib`/`.bbl` vào `.vK.part/tex/`, tính `sha256`; ghi `meta.json`, hoán đổi nguyên tử sang `vK/`; ghi `manifest.sqlite` **sau cùng**; định kỳ mỗi **60 s** gọi `_flush_metrics`; đẩy `_S2Job` sang `s2_queue` khi xong phiên bản cuối của bài. | Thuần CPU + Disk I/O; chạy song song 100% với lượt tải mạng kế tiếp. |
 | **3. `s2-worker`** | Gom tối đa **100 bài** từ `s2_queue` (chờ gom 0,35 s); gọi `POST /paper/batch`; gọi fallback phân trang `/references` nếu bị cắt; ghi `references.json` vào mọi `vK/`, cập nhật `venue` cho `paper.json`, và ghi `s2_references.raw.json.gz` làm marker hoàn tất. | Chỉ gọi `api.semanticscholar.org`. |
 | **4. `checkpoint-worker`** | Được kích hoạt ở nền mỗi khi đi qua `CRAWLER_BACKUP_EVERY_IDS` ID mới (cũng như khi nghỉ cooldown `U1` và một lần cuối khi kết thúc): chụp snapshot SQLite bằng `sqlite3.Connection.backup`, đóng gói `papers/`, `logs/`, `stats/` ra `.tar.gz` (hoặc thư mục đích) kèm kiểm tra chống tụt lùi dữ liệu (`shrink protection`). | Không chặn `MainThread` (trừ bước `extract_queue.join()` ngắn trước khi mở snapshot). |
@@ -103,8 +104,16 @@ flowchart TB
     PLAN --> DIS["discover (lô 250) + xác nhận missing (sub-batch 50) + fetch_revised_dates"]
     DIS --> PJ["Ghi nguyên tử paper.json / đánh dấu not_found"]
     PJ --> DL["download_source (/src/{id}vK, chunk 256/512 KiB, HTTP 206 Range resume)<br/>Ngắt sớm PDF/ZIP ở 512 B | Nạp bytearray RAM <= 96 MiB"]
-    DL --> REL["Đóng response -> Nhả RateLimiter ngay cho request kế tiếp"]
+    DL --> H429{"HTTP 429 trên /src/?"}
+    H429 -->|Không - 2xx/404| REL["Reset consecutive_arxiv_429 = 0, note_success()<br/>Đóng response -> Nhả RateLimiter ngay cho request kế tiếp"]
+    H429 -->|Có - Lượt chính| FD["Fast-Defer Queue (U1 + T1): note_429() (+0.15s, trần 3.30s)<br/>Đẩy bài vào deferred_ids"]
+    FD --> C429{"consecutive_arxiv_429 >= 2?"}
+    C429 -->|Không - Lần 429 đầu| NEXT["0 s chờ phụ -> Chuyển ngay sang tải ID kế tiếp (nhịp 3.15s)"]
+    C429 -->|Có - >= 2 bài liên tiếp| COOL["Cầu chì IP: extract_queue.join() + flush + backup<br/>Ngủ cooldown 180s -> Reset nhịp 3.0s"]
+    NEXT -.-> DL
+    COOL -.-> DL
     REL --> EQ[("extract_queue (maxsize = 8)")]
+    EQ -.->|Hết dải chính & có deferred_ids| DEFPASS["Lượt vét cuối dải (in_deferred_pass = True):<br/>Chạy lại _run_chunks cho deferred_ids"]
   end
 
   subgraph EX["2. extract-worker — CPU & Disk Consumer"]
@@ -132,6 +141,7 @@ flowchart TB
   end
 
   DL -.->|Cuối mỗi chunk| JOIN
+  COOL -.-> JOIN
 ```
 
 ### 4.1. Khám phá siêu dữ liệu (Discovery — tối ưu O2 + T3)
@@ -149,21 +159,34 @@ flowchart TB
    - Các ID không xuất hiện trong kết quả lô 250 được kiểm tra lại theo từng cụm **50 ID** (`_CONFIRM_BATCH_SIZE = 50`; chỉ tách lẻ từng ID nếu feed trả về `/api/errors`). Nếu vẫn không tồn tại $\rightarrow$ ghi manifest `(id, 1) = not_found` (không tạo thư mục bài).
 5. **Lấy ngày phiên bản trung gian (`fetch_revised_dates`):**
    - Gom các định danh `idv2 .. idv{N-1}` vào các lô 250 (kèm cơ chế re-check sub-batch 50 nếu thiếu). Nếu sau khi re-check vẫn khuyết ngày của phiên bản nào, giữ chuỗi rỗng `""` tại vị trí đó và tăng bộ đếm `revised_dates_incomplete` (vẫn tiếp tục tải gói nguồn).
-6. **Lưu đĩa:** Ghi nguyên tử `data/papers/<dirname>/paper.json`.
+6. **Xử lý Rate-Limit trong Discovery & Lưu đĩa:**
+   - Nếu Atom API trả về `HTTP 429` trong lúc `discover` hoặc `fetch_revised_dates` (`fast_defer=False`), hệ thống chờ `Retry-After` (hoặc backoff bậc thang `15 s → 30 s → 60 s`) và thử lại tối đa 4 lần; nếu vẫn bị chặn khi bật `--auto-resume-rate-limit`, toàn bộ chunk đó được đẩy vào `deferred_ids` kèm nghỉ cooldown `180 s`.
+   - Khi thành công: ghi nguyên tử `data/papers/<dirname>/paper.json`.
 
-### 4.2. Tải gói nguồn & Giải nén bất đồng bộ (Producer–Consumer v3 + v3.1/v3.2)
+### 4.2. Tải gói nguồn, Fast-Defer Queue, Chống Quá Nhiệt IP & Giải nén bất đồng bộ (Producer–Consumer v3 + v3.1/v3.2/v3.3)
 
 Với mỗi bài hợp lệ, duyệt `version = 1 .. paper.num_versions`:
 
-**A. Trên `MainThread` (`_download_version` $\rightarrow$ `download_source`):**
+**A. Trên `MainThread` (`_process_paper` $\rightarrow$ `_download_version` $\rightarrow$ `download_source`):**
 1. Đăng ký `(arxiv_id, version)` vào manifest (trạng thái `pending` nếu chưa có). Nếu trạng thái hiện tại đã thuộc nhóm kết thúc (`is_final`: `ok`, `ok_no_tex`, `no_source`, `not_found`, `corrupt`) $\rightarrow$ **bỏ qua**.
 2. Gọi `GET /src/{arxiv_id}v{version}` với `stream=True` và đọc theo khung **`256 KiB`** (tự động nâng lên **`512 KiB`** khi `Content-Length >= 25 MiB` — **T5**).
+   - **Sàn nghỉ hậu tải `min_idle_gap = 0,50 s` & Xoay vòng TCP mỗi `400` request (`v3.3`):** Với `~96%` gói nguồn thông thường (tải trong $\le 2,50\text{ s}$), chu kỳ `Start-to-Start = 3,00 s` giữ nguyên tuyệt đối (`+0,00 s` overhead). Với `~4%` bài nặng kéo dài `> 2,50 s`, `RateLimiter.wait()` đảm bảo socket nghỉ tối thiểu `0,50 s` tính từ `_last_done_at` (`Duty Cycle <= 85%`), kết hợp tự động làm mới `requests.Session` (`recycle_session()`) ngay cuối request thứ `400` (trước khi ngủ chờ nhịp `3,00 s`, tốn `0 ms` overhead) để xóa trạng thái theo dõi kết nối dài hạn trên CDN Varnish/Fastly.
 3. **Ngắt sớm ở 512 bytes đầu (`O5` / `S2`):**
    - Ngay khi đọc đủ 4–512 bytes đầu tiên, kiểm tra magic bytes. Nếu là **`%PDF`** hoặc **`ZIP`** (`PK\x03\x04`, `PK\x05\x06`, `PK\x07\x08`): ngắt luồng tải ngay lập tức (nếu phần còn lại của phản hồi $\le 64\text{ KiB}$ thì đọc nốt để tái sử dụng kết nối TCP Keep-Alive), giữ lại đúng 512 bytes stub và ghi nhận `raw_archive_bytes` từ `Content-Length`.
-4. **Đệm RAM Zero-Copy (`spool_max_bytes = 96 MiB`) & Khôi phục luồng đứt bằng `HTTP 206 Range` (`T2`):**
+4. **Đệm RAM Zero-Copy (`spool_max_bytes = 96 MiB`) & Nối tiếp `HTTP 206 Range` theo tiến độ (`T2` + `v3.3`):**
    - Mọi gói nguồn $\le 96\text{ MiB}$ (>99,5% tổng số bài trên arXiv) được nối trực tiếp vào `bytearray` trong RAM — **0 byte ghi xuống `data/.tmp/`**. Chỉ những gói khổng lồ $> 96\text{ MiB}$ mới tự động chuyển sang file tạm trong `data/.tmp/`.
-   - **Nối tiếp luồng đứt (`T2`):** Nếu luồng tải bị đứt giữa chừng (`ChunkedEncodingError` / `ConnectionError` / `IncompleteRead`), `download_source` giữ nguyên các byte đã tải trong `mem_buf` (hoặc file tạm), đặt `schedule_retry_backoff(1.5 * (attempt + 1))` (tính từ `_last_done_at` để không reconnect ngay sau `1 ms`), và gửi kèm header `Range: bytes={written}-` ở lần retry kế tiếp. Nếu server trả về **`206 Partial Content`**, chỉ tải nốt phần đuôi còn thiếu (nếu trả về `200 OK` mới xóa buffer tải lại từ đầu).
-5. **Nhả kết nối tức thì:** Ngay khi tải xong byte cuối (hoặc ngắt ở 512 B), khối `with response:` đóng lại, giải phóng slot `RateLimiter` để nhịp `Start-to-Start 3,0 s` của gói kế tiếp không bị trễ bởi thời gian giải nén. Các gói $\ge 50\text{ MiB}$ hoặc sự kiện đứt stream/retry được ghi tự động vào `data/logs/diagnostics.jsonl` (**U5**). `DownloadResult` được đẩy vào `extract_queue`.
+   - **Nối tiếp luồng đứt theo tiến độ (`Progress-Aware Range Resume`):** Nếu luồng tải bị đứt giữa chừng (`ChunkedEncodingError` / `ConnectionError` / `Timeout`), `download_source` giữ nguyên các byte đã tải trong `mem_buf` (hoặc file tạm), báo `client.note_stream_break()` (`+1,5` điểm nhiệt), và kiểm tra số byte tiến thêm `progressed = written - written_before`:
+     - Nếu `progressed >= 512 KiB`: **reset `stalled_attempts = 0`** (vì gói đang tiến triển thực chất) và gửi `Range: bytes={written}-` ở nhịp kế tiếp (cho phép tối đa `_MAX_TOTAL_STREAM_ATTEMPTS = 12` nhịp nối tiếp, triệt tiêu hoàn toàn việc vứt bỏ 10–40 MiB dữ liệu dở dang và đưa số bài `failed` về **`0`**).
+     - Nếu `progressed < 512 KiB`: tăng `stalled_attempts += 1` và chỉ dừng khi `stalled_attempts >= 3`.
+5. **Cơ chế Fast-Defer Queue (`0 s` chờ ở lần 429 đầu) & Tản nhiệt Chủ động `60 s` (`U1` + `T1` + `v3.3`):**
+   - Khi `/src/{id}vN` trả về `429`, `_wait_arxiv_429(..., fast_defer=True)` được gọi: tăng `arxiv_429`, gọi `limiter.note_429()` nhích nhịp nhẹ **`+0,15 s`** (trần cứng **`3,30 s`**), gọi `limiter.schedule_retry_backoff(limiter._min_interval)` (đảm bảo request kế tiếp luôn cách thời điểm đóng phản hồi `429` ít nhất `3,15 s` kể cả khi bị Tarpit ngâm `10,9 s`), và tăng bộ đếm `consecutive_arxiv_429 += 1`.
+   - **Trong lượt chạy chính (`not run.in_deferred_pass` và `auto_resume_rate_limit=True`):**
+     - **Lần `429` đầu tiên (`consecutive_arxiv_429 == 1`, `need_cooldown=False`):** Đẩy ngay `paper.arxiv_id` vào hàng đợi `deferred_ids`, ghi sự kiện `arxiv_429_fast_defer` vào `diagnostics.jsonl`, và **chuyển sang tải ngay ID kế tiếp** (mất **`0 s` chờ phụ**, chỉ giữ nhịp chuẩn `3,15 s` tính từ `_last_done_at`).
+     - **Khi ID kế tiếp tải thành công (`200 <= http_status < 300`):** Reset ngay `consecutive_arxiv_429 = 0` và gọi `limiter.note_success()` (sau **3 request thành công liên tiếp** nhịp tự giảm `-0,15 s` về sàn `3,0 s`).
+     - **Tản nhiệt chủ động (`Proactive Micro-Cooldown = 60 s`) khi `thermal_score >= 3,0` (`v3.3`):** Ngay khi cảm biến nhiệt trên `HostClient` phát hiện chớm quá nhiệt (ví dụ: 2 lần đứt stream `1,5 + 1,5 = 3,0`, hoặc 1 lần `429` + 1 bài `TTFB >= 3,5 s` `2,0 + 1,0 = 3,0`, hoặc 3 bài liên tiếp `TTFB >= 3,5 s`), `_handle_thermal_cooldown` lập tức đóng TCP socket nóng (`recycle_session()`), tranh thủ lúc ngủ **`60 s`** để `extract_queue.join()` + `_flush_metrics` + chạy checkpoint backup, rồi reset nhịp về `3,00 s`.
+     - **Cầu chì bảo vệ IP khi $\ge 2$ bài liên tiếp đều bị `429` (`consecutive_arxiv_429 >= 2`, `need_cooldown=True`):** Đẩy tiếp bài thứ 2 vào `deferred_ids` và gọi `_handle_auto_resume_cooldown` (`recycle_session()`, đợi `extract_queue.join()`, flush `metrics.json`, chạy backup nền, lưu `rate_state.json`, ngủ cooldown `180 s`, rồi reset `consecutive_arxiv_429 = 0` và đưa nhịp `RateLimiter` về `3,0 s`).
+   - **Lượt vét cuối dải (`in_deferred_pass = True`):** Sau khi đi hết dải ID chính, nếu `deferred_ids` khác rỗng, hệ thống đợi `extract_queue.join()`, khử trùng lặp danh sách `deferred_ids` và chạy lại `_run_chunks(retry_list, is_deferred=True)`. Ở lượt vét này, nếu vẫn gặp `429`, `_wait_arxiv_429` sẽ chờ theo `Retry-After` / stepped backoff (`15 s → 30 s → 60 s`, tối đa 4 lần thử).
+6. **Nhả kết nối tức thì:** Ngay khi tải xong byte cuối (hoặc ngắt ở 512 B), khối `with response:` đóng lại, giải phóng slot `RateLimiter` để nhịp `Start-to-Start 3,0 s` của gói kế tiếp không bị trễ bởi thời gian giải nén. Các gói $\ge 50\text{ MiB}$ hoặc sự kiện đứt stream/retry được ghi tự động vào `data/logs/diagnostics.jsonl` (**U5**). `DownloadResult` được đẩy vào `extract_queue`.
 
 **B. Trên `extract-worker` (`_consume_extract_job` $\rightarrow$ `extract_tex_bib`):**
 1. **Đọc Zero-Copy (`_ZeroCopyBytesReader` — T5) & Giải nén 1-pass mở Gzip duy nhất 1 lần (`O4`):**
@@ -250,13 +273,13 @@ Ký hiệu: $P$ là số bài cần crawl ($5.000$ ID/dải hoặc $25.000$ ID t
    $$N_{\text{arxiv}} = N_{\text{discovery\_batches}} + N_{\text{confirm\_subbatches}} + N_{\text{revised\_batches}} + R$$
    Với lô `250` ID, sub-batch `50` ID (`T3`) và tối ưu `<updated>` (`O2`), phần discovery cho $5.000$ ID chỉ tốn $\approx 20 + 5 + 5 \approx 30$ requests ($\approx 1,5\text{ phút}$).
 
-2. **Thời gian tầng arXiv (`Start-to-Start >= 3,0 s` + Producer–Consumer `v3.1/v3.2`):**
+2. **Thời gian tầng arXiv (`Start-to-Start >= 3,0 s` + Producer–Consumer `v3.1/v3.2/v3.3`):**
    - Sàn lý thuyết của bộ điều nhịp: $T_{\text{floor}} = 3,0\text{ s} \times N_{\text{arxiv}}$.
-   - Nhờ nhịp **Start-to-Start** và giải nén tách sang `extract-worker`, mọi gói nguồn có thời gian tải mạng $\le 3,0\text{ s}$ đều đạt chu kỳ đúng $3,0\text{ s/request}$; các gói PDF/ZIP được ngắt ngay ở byte 512 chỉ mất $\sim 0,1\text{ s}$ mạng.
+   - Nhờ nhịp **Start-to-Start**, sàn nghỉ hậu tải `min_idle_gap = 0,50 s` (chỉ kích hoạt cho các bài tải `> 2,50 s`, `+0,00 s` overhead cho `96%` bài thông thường) và giải nén tách sang `extract-worker`, mọi gói nguồn có thời gian tải mạng $\le 2,50\text{ s}$ đều đạt chu kỳ đúng $3,00\text{ s/request}$; các gói PDF/ZIP được ngắt ngay ở byte 512 chỉ mất $\sim 0,1\text{ s}$ mạng.
    - **Cho 1 dải 5.000 ID ($R \approx 8.187$ phiên bản, sàn lý thuyết `6,85 giờ`):**
-     - **Giờ trống / ít 429 (`10:00 – 18:00` giờ VN):** chu kỳ trung bình `~3,01 – 3,05 s/phiên bản` $\rightarrow$ **`~6,85 – 6,95 giờ` (< 7,0 giờ)**.
-     - **Giờ cao điểm / nhiều 429 & đứt stream (`19:00 – 03:00` giờ VN):** chu kỳ trung bình `~3,08 – 3,18 s/phiên bản` $\rightarrow$ **`~6,95 – 7,25 giờ` (< 7,5 giờ)** (chỉ trễ thêm ~15–25 phút nhờ `T1` xóa phạt kép và `T2` nối luồng `HTTP 206 Range`).
-   - **Cho toàn bộ 25.000 ID ($R \approx 41.000$ phiên bản):** **~34,5 – 36,5 giờ** chạy tích lũy (~1,5 ngày treo máy với cơ chế `Auto-Resume` + `Backup Google Drive` mỗi 1.000 ID).
+     - **Giờ trống / ít 429 (`10:00 – 18:00` giờ VN):** chu kỳ trung bình `~3,00 – 3,03 s/phiên bản` $\rightarrow$ **`~6,85 – 6,92 giờ` (< 7,0 giờ)**.
+     - **Giờ cao điểm / chạy liên tục nhiều giờ (`19:00 – 03:00` giờ VN):** chu kỳ trung bình `~3,03 – 3,13 s/phiên bản` $\rightarrow$ **`~6,92 – 7,15 giờ` (< 7,2 giờ)** (nhanh hơn thực tế bị Tarpit của `v3.2` **45 – 90 phút** nhờ xoay vòng TCP mỗi 400 request với `0 ms` overhead, tản nhiệt chủ động `60 s` khi `thermal_score >= 3,0`, và nối tiếp `Progress-Aware HTTP 206 Range` tới 12 nhịp với **`0 failed`**).
+   - **Cho toàn bộ 25.000 ID ($R \approx 41.000$ phiên bản):** **`~34,3 – 35,8 giờ`** chạy tích lũy tự động 100% (~1,5 ngày treo máy liên tục với `Auto-Resume` + `Thermal-Aware Pacing` + `Backup Google Drive` mỗi 1.000 ID).
 
 3. **Thời gian tầng Semantic Scholar (`s2-worker` chạy song song):**
    $$T_{\text{s2}} \approx 1,1\text{ s} \times \left(\lceil P / 100 \rceil + F_{\text{fallback}}\right)$$
@@ -294,9 +317,10 @@ Ký hiệu: $P$ là số bài cần crawl ($5.000$ ID/dải hoặc $25.000$ ID t
 | **U2 (v3.1)** | Chế độ vét & làm giàu Semantic Scholar độc lập (`--s2-only`) | ✅ Đã triển khai | `_crawl_s2_only` trong `pipeline.py` và cờ `--s2-only` trong `run_crawl.py` |
 | **U3 (v3.1)** | Lưu trạng thái Cooldown liên tiến trình (`rate_state.json`) & Khóa OS Mutex | ✅ Đã triển khai | `load_rate_state`/`save_rate_state` trong `http.py` và `_acquire_workspace_lock` trong `pipeline.py` |
 | **U5 (v3.1)** | Nhật ký chẩn đoán `diagnostics.jsonl`, `redact_secrets()` & `source_code_hash` | ✅ Đã triển khai | Tự động che API key trong log, lưu hash code và ghi sự kiện bất thường vào `data/logs/diagnostics.jsonl` |
-| **T1 (v3.2)** | Xóa phạt kép 429 (`+0,15 s`, trần `3,30 s`, hồi phục sau 5 bài) & Backoff `15→30→60s` | ✅ Đã triển khai | `RateLimiter` trong `http.py`, `_wait_arxiv_429` và `_wait_s2_429` trong `pipeline.py` |
-| **T2 (v3.2)** | Khôi phục luồng tải đứt bằng `HTTP Range (206 Partial Content)` | ✅ Đã triển khai | `download_source` gửi `Range: bytes={written}-` nối tiếp `mem_buf`/file tạm khi đứt stream |
-| **T4 (v3.2)** | Đồng bộ hóa đồng hồ retry `schedule_retry_backoff` với `RateLimiter` | ✅ Đã triển khai | `RateLimiter.wait()` trong `http.py` tính thời gian ngủ retry từ cả `_last_start_at` và `_last_done_at` (chặn reconnect sau `1 ms`), không ngủ chồng |
+| **T1 (v3.2/v3.3)** | Xóa phạt kép 429 (`+0,15 s`, trần `3,30 s`, hồi phục sau **3** bài) & Backoff `15→30→60s` | ✅ Đã triển khai | `RateLimiter` trong `http.py`, `_wait_arxiv_429` và `_wait_s2_429` trong `pipeline.py` |
+| **T2 (v3.2/v3.3)** | Nối tiếp `HTTP Range (206 Partial Content)` theo tiến độ (`>= 512 KiB`, tới 12 nhịp) | ✅ Đã triển khai | `download_source` reset `stalled_attempts = 0` khi tiến thêm $\ge 512\text{ KiB}$, triệt tiêu `failed` |
+| **T4 (v3.2/v3.3)** | Đồng bộ hóa đồng hồ retry `schedule_retry_backoff` (kể cả sau `429 Fast-Defer`) | ✅ Đã triển khai | `RateLimiter.wait()` tính từ cả `_last_start_at` và `_last_done_at` (chặn bắn `GET` sau `4 ms`) |
+| **V3.3 (Thermal)** | Sàn nghỉ hậu tải `min_idle_gap = 0,50 s`, xoay vòng TCP mỗi `400` req (`0 ms` overhead) & Tản nhiệt chủ động `60 s` (`thermal_score >= 3,0`) | ✅ Đã triển khai | `RateLimiter` & `HostClient` trong `http.py`, `_handle_thermal_cooldown` trong `pipeline.py` |
 
 ---
 
@@ -342,7 +366,7 @@ ruff check . && ruff format . && pytest
 ## 11. Giới hạn đã biết & Lưu ý khi viết Báo cáo
 
 1. **Điểm nhấn kỹ thuật trong báo cáo Jupyter Book:**
-   - **Tuân thủ tuyệt đối chuẩn lịch sự (`Start-to-Start >= 3,0 s`, 1 kết nối tới `export.arxiv.org`)** nhưng vẫn kéo thời gian thực tế 5.000 ID về sát trần vật lý lý thuyết (`~6,85 – 6,95 giờ` khi mạng sạch và `~6,95 – 7,25 giờ` khi có throttle) nhờ kiến trúc **Producer–Consumer 5 luồng**, đệm RAM Zero-Copy `96 MiB` (`memoryview`), giải nén 1-pass giữ `.tex`/`.bib`/`.bbl`, nối luồng đứt bằng `HTTP 206 Range`, và xóa phạt kép 429.
+   - **Tuân thủ tuyệt đối chuẩn lịch sự (`Start-to-Start >= 3,0 s`, 1 kết nối tới `export.arxiv.org`)** nhưng vẫn kéo thời gian thực tế 5.000 ID về sát trần vật lý lý thuyết (`~6,85 – 6,95 giờ` khi mạng sạch và `~6,95 – 7,25 giờ` khi có throttle) nhờ kiến trúc **Producer–Consumer 5 luồng**, đệm RAM Zero-Copy `96 MiB` (`memoryview`), giải nén 1-pass giữ `.tex`/`.bib`/`.bbl`, nối luồng đứt bằng `HTTP 206 Range`, xóa phạt kép 429 và **Fast-Defer Queue (`0 s` chờ ở lần 429 đầu trên `/src/{id}vN`)**.
    - **Thống kê đa phiên chuẩn xác (`benchmark_summary` & `cross_version_dedup`):** Bóc tách tường minh thời gian chạy thực (`active_wall_seconds`) khỏi thời gian nghỉ giữa các phiên Colab (`idle_gap_seconds`) và thời gian chờ phạt (`cooldown_retry_seconds`), đồng thời định lượng tỷ lệ trùng lặp mã nguồn giữa các phiên bản bằng `sha256` làm cầu nối sang Milestone 2.
 2. **Môi trường Windows:** Trình diệt virus (Windows Defender) đôi khi quét file trong `.vK.part` lúc `os.replace`; `pipeline.py` đã bọc bắt lỗi `OSError`, khôi phục bản cũ và đánh dấu `failed` để lần chạy sau tự retry (rủi ro R8).
 3. **Đóng băng nộp bài (R6):** Trước khi nộp link repo mã Milestone 1, cần dọn các file quản trị nội bộ (`STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/`, `project requirements/`) theo đúng quy định đề bài (chỉ giữ `.py`, `.ipynb`, `requirements.txt`, `README.md`).
