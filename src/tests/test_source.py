@@ -763,3 +763,47 @@ def test_download_source_progress_aware_range_resume_exceeds_3_attempts(
         "/src/2408.14782v1",
         {"stream": True, "headers": {"Range": f"bytes={cuts[4]}-"}},
     )
+
+
+def test_fast_gzip_stream_handles_concatenated_multi_member_gzip_and_many_subdirs(
+    tmp_path: Path,
+) -> None:
+    import gzip
+
+    # Build a tar archive with multiple files sharing nested directories (exercises E2 dir cache)
+    # and compress it as two concatenated gzip members plus trailing NUL padding (exercises E1).
+    raw_tar = io.BytesIO()
+    members = [
+        ("sections/s1/intro.tex", b"\\section{Intro}\n"),
+        ("sections/s1/method.tex", b"\\section{Method}\n"),
+        ("sections/s1/figure.pdf", b"%PDF-1.5 heavy ignored figure" + b"0" * 4096),
+        ("sections/s2/results.tex", b"\\section{Results}\n"),
+        ("sections/s2/discussion.tex", b"\\section{Discussion}\n"),
+        ("refs.bib", b"@article{k, title={T}}\n"),
+    ]
+    with tarfile.open(fileobj=raw_tar, mode="w") as archive:
+        for name, data in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    tar_bytes = raw_tar.getvalue()
+    mid = len(tar_bytes) // 2
+    concatenated_gz = gzip.compress(tar_bytes[:mid]) + gzip.compress(tar_bytes[mid:]) + b"\x00" * 16
+
+    dest = tmp_path / "multi-member-out"
+    meta = extract_tex_bib(
+        bytearray(concatenated_gz),
+        dest,
+        Config(max_extract_bytes=1_000_000),
+        arxiv_id="2408.06045",
+        version=1,
+    )
+    assert meta.status is Status.OK
+    assert {e.path for e in meta.files} == {
+        "sections/s1/intro.tex",
+        "sections/s1/method.tex",
+        "sections/s2/results.tex",
+        "sections/s2/discussion.tex",
+        "refs.bib",
+    }
+    assert not (dest / "sections" / "s1" / "figure.pdf").exists()

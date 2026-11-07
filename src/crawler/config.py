@@ -10,6 +10,8 @@ Environment variables:
     CRAWLER_BACKUP_DIR          copy ``data/`` here periodically (Colab: Drive path)
     CRAWLER_BACKUP_EVERY_IDS    trigger backup every N base arXiv ids seen (default 0 = off)
     CRAWLER_AUTO_RESUME_RATE_LIMIT  1/true to defer 429-throttled ids and auto-resume after cooldown
+    CRAWLER_EXTRACT_WORKERS     number of parallel extract-worker threads (default 2)
+    CRAWLER_EXTRACT_MAX_QUEUE_BYTES max in-memory bytes queued for extraction (default 192 MiB)
 """
 
 from __future__ import annotations
@@ -45,6 +47,8 @@ class Config:
         60.0  # v3.3: proactive micro-cooldown on thermal trigger
     )
     arxiv_thermal_threshold: float = 3.0  # v3.3: thermal score threshold for proactive cooldown
+    extract_workers: int = 2  # v3.4: parallel extract-worker threads for heavy archives
+    extract_max_queue_bytes: int = 192 * 1024 * 1024  # v3.4: byte budget for extract_queue RAM
 
     @property
     def user_agent(self) -> str:
@@ -98,6 +102,30 @@ class Config:
         ).strip()
         auto_resume_rate_limit = auto_resume_raw.lower() not in {"0", "false", "no", "off"}
 
+        extract_workers_raw = (
+            os.environ.get("CRAWLER_EXTRACT_WORKERS")
+            or local_vars.get("CRAWLER_EXTRACT_WORKERS")
+            or ""
+        )
+        extract_workers = 2
+        if extract_workers_raw:
+            try:
+                extract_workers = max(int(extract_workers_raw), 1)
+            except ValueError:
+                pass
+
+        extract_max_queue_raw = (
+            os.environ.get("CRAWLER_EXTRACT_MAX_QUEUE_BYTES")
+            or local_vars.get("CRAWLER_EXTRACT_MAX_QUEUE_BYTES")
+            or ""
+        )
+        extract_max_queue_bytes = 192 * 1024 * 1024
+        if extract_max_queue_raw:
+            try:
+                extract_max_queue_bytes = max(int(extract_max_queue_raw), 0)
+            except ValueError:
+                pass
+
         values = {
             "data_dir": Path(data_dir_raw),
             "contact": os.environ.get("CRAWLER_CONTACT") or local_vars.get("CRAWLER_CONTACT") or "",
@@ -106,6 +134,8 @@ class Config:
             "backup_dir": Path(backup_dir_raw) if backup_dir_raw else None,
             "backup_every_ids": backup_every_ids,
             "auto_resume_rate_limit": auto_resume_rate_limit,
+            "extract_workers": extract_workers,
+            "extract_max_queue_bytes": extract_max_queue_bytes,
         }
         values.update(overrides)
         return cls(**values)

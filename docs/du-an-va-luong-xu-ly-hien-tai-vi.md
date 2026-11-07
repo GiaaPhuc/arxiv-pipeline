@@ -1,8 +1,8 @@
 # arxiv-pipeline — Mô tả dự án và luồng xử lý hiện tại
 
-> **Mục đích tài liệu:** Mô tả kiến trúc và luồng end-to-end **đúng 100% với mã nguồn** sau các đợt tối ưu **O1–O6**, **S1–S7**, kiến trúc **v3 Producer–Consumer**, **v3.1 Resilience & QA Alignment (`U1–U6`)**, **v3.2 Sub-7h Speed Tuning (`T1–T5` + Fast-Defer Queue)** và **v3.3 Thermal-Aware Pacing (Chống "Quá Nhiệt IP" & Crawl Liên Tục 24/7)** (cập nhật **07/11/2026**). Nền tảng phân tích hiệu năng và thiết kế chi tiết xem tại `docs/plans/Plan-toi-uu-luong-crawl-5000-id-vi.md` và `docs/plans/Plan-chong-qua-nhiet-ip-va-crawl-lien-tuc-vi.md`.
+> **Mục đích tài liệu:** Mô tả kiến trúc và luồng end-to-end **đúng 100% với mã nguồn** sau các đợt tối ưu **O1–O6**, **S1–S7**, kiến trúc **v3 Producer–Consumer**, **v3.1 Resilience & QA Alignment (`U1–U6`)**, **v3.2 Sub-7h Speed Tuning (`T1–T5` + Fast-Defer Queue)**, **v3.3 Thermal-Aware Pacing (Chống "Quá Nhiệt IP" & Crawl Liên Tục 24/7)** và **v3.4 Extract-Turbo (`E1–E5` — Tối ưu Giải Nén Đa Luồng Cho Gói Nguồn Nặng)** (cập nhật **07/11/2026**). Nền tảng phân tích hiệu năng và thiết kế chi tiết xem tại `docs/plans/Plan-toi-uu-luong-crawl-5000-id-vi.md` và `docs/plans/Plan-chong-qua-nhiet-ip-va-crawl-lien-tuc-vi.md`.
 >
-> **Trạng thái code:** **249 unit tests pass**, `ruff` sạch; Pilot 30 ID hoàn tất ✅ (`57` cặp phiên bản: `51` `ok`, `6` `no_source`, `0` `failed`); đang chạy **Milestone 1 Phase 2** (crawl 25.000 ID trên một máy) và đã khởi động **Milestone 2 Phase 0** (khóa `src/parsing/models.py` + khung pipeline đa nhân). Chi tiết đối chiếu đề bài: `STATUS.md` mục 0.
+> **Trạng thái code:** **253 unit tests pass**, `ruff` sạch; Pilot 30 ID hoàn tất ✅ (`57` cặp phiên bản: `51` `ok`, `6` `no_source`, `0` `failed`); đang chạy **Milestone 1 Phase 2** (crawl 25.000 ID trên một máy) và đã khởi động **Milestone 2 Phase 0** (khóa `src/parsing/models.py` + khung pipeline đa nhân). Chi tiết đối chiếu đề bài: `STATUS.md` mục 0.
 
 ---
 
@@ -20,8 +20,8 @@
 - **v0 (Baseline):** ~15,0 giờ (`End-to-Start 3,5 s`, tuần tự 1 luồng, giải nén 2-pass, backup đồng bộ).
 - **v1 (O1–O6 cơ bản):** ~10,8 giờ (`Start-to-Start 3,0 s`, tách `extract-worker`, 1-pass extract, nhưng bị nghẽn bởi ghi/đọc đĩa tạm ~40,6 GB).
 - **v2 (S1–S7):** ~7,0 – 7,4 giờ (đệm RAM 32 MiB, tối ưu S2 batch + streaming checkpoint, nhưng còn kẹt trần thích ứng 429 ở 6,0 s).
-- **v3 + v3.1 (`U1–U6`) + v3.2 (`T1–T5`) + v3.3 (`Thermal-Aware Pacing` — Mã hiện tại):**
-  - **Giờ trống / ít 429:** **`~6,85 – 6,92 giờ` (< 7,0 giờ)** — đạt ~99% trần lý thuyết `6,85 giờ` của chuẩn lịch sự **Start-to-Start ≥ 3,0 s** trên 1 kết nối đơn (`+0,00 s` overhead cho `96%` gói nguồn $\le 2,50\text{ s}$; xoay vòng TCP socket mỗi `400` request ẩn hoàn toàn trong thời gian chờ `RateLimiter`; hồi phục nhịp `3,00 s` sau **3** bài thành công).
+- **v3 + v3.1 (`U1–U6`) + v3.2 (`T1–T5`) + v3.3 (`Thermal-Aware Pacing`) + v3.4 (`Extract-Turbo E1–E5` — Mã hiện tại):**
+  - **Giờ trống / ít 429:** **`~6,85 – 6,92 giờ` (< 7,0 giờ)** — đạt ~99% trần lý thuyết `6,85 giờ` của chuẩn lịch sự **Start-to-Start ≥ 3,0 s** trên 1 kết nối đơn (`+0,00 s` overhead cho `96%` gói nguồn $\le 2,50\text{ s}$; xoay vòng TCP socket mỗi `400` request ẩn hoàn toàn trong thời gian chờ `RateLimiter`; hồi phục nhịp `3,00 s` sau **3** bài thành công; pool `extract-worker` 2 luồng + `_FastGzipStream` `512 KiB` triệt tiêu nghẽn giải nén trên các bài 50–200 MB nhiều hình ảnh).
   - **Giờ cao điểm / chạy liên tục nhiều giờ:** **`~6,92 – 7,15 giờ` (< 7,2 giờ)** — triệt tiêu hoàn toàn hiện tượng "quá nhiệt IP" (Tarpit `TTFB 5–11 s`, bóp băng thông `0,5 MB/s`, cắt stream ở bội số `1–2 MiB`) nhờ **Sàn nghỉ hậu tải `min_idle_gap = 0,50 s`** (giữ `Duty Cycle <= 85%`), **Khóa hậu tải `3,15 s` sau `429 Fast-Defer`**, **Nối tiếp `HTTP 206 Range` theo tiến độ (`>= 512 KiB`, tới 12 nhịp $\rightarrow 0$ `failed`)** và **Cảm biến nhiệt `thermal_score` + Tản nhiệt chủ động `60 s`**.
   - **Toàn bộ `25.000 ID` ($\approx 41.000$ phiên bản):** **`~34,3 – 35,8 giờ`** treo máy liên tục 24/7 tự động 100%, `0 failed`.
 
@@ -55,17 +55,17 @@ src/
 ├── colab_run.ipynb           # Notebook vận hành crawl + auto-backup trên Google Colab
 ├── crawler/                  # Package thu thập dữ liệu (Milestone 1)
 │   ├── models.py             # Hợp đồng dữ liệu M1 (SCHEMA_VERSION=1, không tự ý sửa)
-│   ├── config.py             # Cấu hình từ biến môi trường / .env + CLI overrides
+│   ├── config.py             # Cấu hình từ biến môi trường / .env + CLI overrides (extract_workers=2, extract_max_queue_bytes=192 MiB)
 │   ├── http.py               # HostClient, _SingleConnAdapter (TCP_NODELAY, Linux tcp_rmem), RateLimiter (+0.15s, trần 3.3s), rate_state.json
 │   ├── ids.py                # Chuẩn hóa ID, tách version, expand_range, id_to_dirname
 │   ├── discovery.py          # Atom API lô 250 ID, tận dụng <updated>, xác nhận sub-batch 50 (T3)
-│   ├── source.py             # download_source (RAM <=96 MiB, Range 206 resume), extract_tex_bib (1-pass .tex/.bib/.bbl, memoryview)
+│   ├── source.py             # download_source (RAM <=96 MiB, Range 206 resume), extract_tex_bib (_FastGzipStream 512 KiB + dir cache)
 │   ├── s2.py                 # POST /paper/batch (100 ID) + fallback GET /references (limit 1000)
 │   ├── manifest.py           # SQLite manifest + atomic_write
-│   ├── pipeline.py           # Điều phối Producer-Consumer + Fast-Defer Queue (0s chờ lần 429 đầu) + --s2-only + OS mutex + diagnostics.jsonl
+│   ├── pipeline.py           # Điều phối Producer-Consumer + Pool extract-worker (E1-E5) + Fast-Defer Queue + --s2-only + OS mutex
 │   ├── checkpoint.py         # Sao lưu nền nguyên tử (.tar.gz / mirror) + shrink guard + restore
-│   ├── metrics.py            # Đo stage, ResourceSampler O(1), redact_secrets, source_code_hash, aggregate_sessions
-│   └── export.py             # Tổng hợp bảng Hugging Face & thống kê báo cáo (cross_version_dedup + benchmark_summary)
+│   ├── metrics.py            # Đo stage, ResourceSampler O(1), redact_secrets, source_code_hash, summarize_sessions
+│   └── export.py             # Tổng hợp bảng Hugging Face & thống kê báo cáo (cross_version_dedup + benchmark_summary + tương thích backup cũ)
 ├── run_parse.py              # CLI Milestone 2 (Phase 0): khung chạy parser đa nhân
 └── parsing/                  # Package xử lý LaTeX & BibTeX (Milestone 2 Phase 0)
     ├── models.py             # Hợp đồng dữ liệu M2 (khóa ở Phase 0)
@@ -74,12 +74,12 @@ src/
 
 **Phân công phụ trách (Milestone 1):** A — `http`, `manifest`, `pipeline`, `metrics`, `checkpoint` · B — `ids`, `discovery`, `s2` · C — `source`, fixtures · D — `export`, `corpus` · E — `validate_corpus`, Jupyter Book.
 
-### 3.2. Năm luồng thực thi trong một phiên `pipeline.run()`
+### 3.2. Năm nhóm luồng thực thi trong một phiên `pipeline.run()`
 
 | Luồng (Thread) | Vai trò chính | Cô lập tài nguyên |
 | --- | --- | --- |
-| **1. `MainThread` (arXiv Producer)** | Chia chunk ID; gọi `discover` & `fetch_revised_dates` (lô **250** ID); tải `/src/{id}vK` theo chunk `256 KiB` (`512 KiB` cho gói $\ge 25\text{ MiB}$) vào `bytearray` RAM ($\le 96\text{ MiB}$), tự nối tiếp bằng `HTTP 206 Range` nếu đứt stream; nếu `/src/{id}vK` gặp `429` lần đầu thì **Fast-Defer (`0 s` chờ phụ)** đẩy ngay bài vào `deferred_ids` và qua ID kế tiếp (chỉ ngủ cooldown khi $\ge 2$ bài liên tiếp bị `429`); **đóng HTTP stream & nhả `RateLimiter` ngay lập tức**; đẩy `_ExtractJob` vào `extract_queue` (`maxsize=8`). | Chỉ gọi `export.arxiv.org`; không giải nén tar, không gọi S2. |
-| **2. `extract-worker` (Consumer)** | Lấy gói từ `extract_queue`; đọc qua `_ZeroCopyBytesReader` (`memoryview`) và giải nén **1-pass** gzip/tar chỉ giữ `.tex`/`.bib`/`.bbl` vào `.vK.part/tex/`, tính `sha256`; ghi `meta.json`, hoán đổi nguyên tử sang `vK/`; ghi `manifest.sqlite` **sau cùng**; định kỳ mỗi **60 s** gọi `_flush_metrics`; đẩy `_S2Job` sang `s2_queue` khi xong phiên bản cuối của bài. | Thuần CPU + Disk I/O; chạy song song 100% với lượt tải mạng kế tiếp. |
+| **1. `MainThread` (arXiv Producer)** | Chia chunk ID; gọi `discover` & `fetch_revised_dates` (lô **250** ID); tải `/src/{id}vK` theo chunk `256 KiB` (`512 KiB` cho gói $\ge 25\text{ MiB}$) vào `bytearray` RAM ($\le 96\text{ MiB}$), tự nối tiếp bằng `HTTP 206 Range` nếu đứt stream; nếu `/src/{id}vK` gặp `429` lần đầu thì **Fast-Defer (`0 s` chờ phụ)** đẩy ngay bài vào `deferred_ids` và qua ID kế tiếp (chỉ ngủ cooldown khi $\ge 2$ bài liên tiếp bị `429`); **đóng HTTP stream & nhả `RateLimiter` ngay lập tức**; đẩy `_ExtractJob` vào `extract_queue` (`maxsize=8`, có điều tiết trần RAM `extract_max_queue_bytes = 192 MiB`). | Chỉ gọi `export.arxiv.org`; không giải nén tar, không gọi S2. |
+| **2. Pool `extract-worker` (Consumer, mặc định 2 luồng — `E3`)** | Lấy gói từ `extract_queue`; đọc qua `_FastGzipStream` (`512 KiB` zero-copy `memoryview` + `zlib.decompressobj(16 + zlib.MAX_WBITS)` ở tầng C) và giải nén **1-pass** gzip/tar (`bufsize=512 KiB`, cache thư mục `created_dirs`) chỉ giữ `.tex`/`.bib`/`.bbl` vào `.vK.part/tex/`, tính `sha256`; giải phóng ngay hạn mức byte RAM; ghi `meta.json`, hoán đổi nguyên tử sang `vK/`; ghi `manifest.sqlite` **sau cùng**; định kỳ mỗi **60 s** gọi `_flush_metrics`; giảm bộ đếm nguyên tử `paper_pending_versions[arxiv_id]` và chỉ luồng nào hoàn tất phiên bản cuối cùng của bài (`rem == 0`) mới đẩy `_S2Job` sang `s2_queue`. | Thuần CPU + Disk I/O; giải nén song song trên nhiều nhân CPU (vì `zlib` và file I/O nhả GIL), chạy song song 100% với lượt tải mạng kế tiếp. |
 | **3. `s2-worker`** | Gom tối đa **100 bài** từ `s2_queue` (chờ gom 0,35 s); gọi `POST /paper/batch`; gọi fallback phân trang `/references` nếu bị cắt; ghi `references.json` vào mọi `vK/`, cập nhật `venue` cho `paper.json`, và ghi `s2_references.raw.json.gz` làm marker hoàn tất. | Chỉ gọi `api.semanticscholar.org`. |
 | **4. `checkpoint-worker`** | Được kích hoạt ở nền mỗi khi đi qua `CRAWLER_BACKUP_EVERY_IDS` ID mới (cũng như khi nghỉ cooldown `U1` và một lần cuối khi kết thúc): chụp snapshot SQLite bằng `sqlite3.Connection.backup`, đóng gói `papers/`, `logs/`, `stats/` ra `.tar.gz` (hoặc thư mục đích) kèm kiểm tra chống tụt lùi dữ liệu (`shrink protection`). | Không chặn `MainThread` (trừ bước `extract_queue.join()` ngắn trước khi mở snapshot). |
 | **5. `resource-sampler`** | Luồng daemon của `metrics.ResourceSampler`: đo RSS RAM (mỗi 5 s) và dung lượng đĩa (mỗi 300 s) ở nền, giúp `sampler.snapshot()` đọc cực trị `O(1)` không tốn chi phí quét tiến trình trên luồng chính. | Chỉ đọc thông số hệ thống ở nền. |
@@ -112,16 +112,16 @@ flowchart TB
     C429 -->|Có - >= 2 bài liên tiếp| COOL["Cầu chì IP: extract_queue.join() + flush + backup<br/>Ngủ cooldown 180s -> Reset nhịp 3.0s"]
     NEXT -.-> DL
     COOL -.-> DL
-    REL --> EQ[("extract_queue (maxsize = 8)")]
+    REL --> EQ[("extract_queue (maxsize = 8, <= 192 MiB RAM)")]
     EQ -.->|Hết dải chính & có deferred_ids| DEFPASS["Lượt vét cuối dải (in_deferred_pass = True):<br/>Chạy lại _run_chunks cho deferred_ids"]
   end
 
-  subgraph EX["2. extract-worker — CPU & Disk Consumer"]
-    EQ --> EXT["extract_tex_bib (memoryview + 1-pass gzip/tar, lọc .tex/.bib/.bbl, sha256)"]
-    EXT --> INST["_install_version: ghi .vK.part/meta.json -> os.replace sang vK/"]
+  subgraph EX["2. Pool extract-worker (2 luồng) — CPU & Disk Consumer (v3.4 Extract-Turbo)"]
+    EQ --> EXT["extract_tex_bib (_FastGzipStream 512 KiB + 1-pass tar + dir cache, lọc .tex/.bib/.bbl, sha256)"]
+    EXT --> INST["_install_version (fast-path): ghi .vK.part/meta.json -> os.replace sang vK/"]
     INST --> MAN["manifest.record(meta) [GHI SAU CÙNG]"]
     MAN --> FL60["Mỗi 60s: _flush_metrics -> logs/metrics.json"]
-    MAN --> LAST{"Phiên bản cuối &<br/>chưa có raw.gz?"}
+    MAN --> LAST{"paper_pending_versions == 0 &<br/>chưa có raw.gz?"}
   end
 
   LAST -->|Có| SQ[("s2_queue")]
@@ -163,7 +163,7 @@ flowchart TB
    - Nếu Atom API trả về `HTTP 429` trong lúc `discover` hoặc `fetch_revised_dates` (`fast_defer=False`), hệ thống chờ `Retry-After` (hoặc backoff bậc thang `15 s → 30 s → 60 s`) và thử lại tối đa 4 lần; nếu vẫn bị chặn khi bật `--auto-resume-rate-limit`, toàn bộ chunk đó được đẩy vào `deferred_ids` kèm nghỉ cooldown `180 s`.
    - Khi thành công: ghi nguyên tử `data/papers/<dirname>/paper.json`.
 
-### 4.2. Tải gói nguồn, Fast-Defer Queue, Chống Quá Nhiệt IP & Giải nén bất đồng bộ (Producer–Consumer v3 + v3.1/v3.2/v3.3)
+### 4.2. Tải gói nguồn, Fast-Defer Queue, Chống Quá Nhiệt IP & Giải nén Đa luồng `v3.4 Extract-Turbo` (Producer–Consumer v3 + v3.1/v3.2/v3.3/v3.4)
 
 Với mỗi bài hợp lệ, duyệt `version = 1 .. paper.num_versions`:
 
@@ -186,23 +186,23 @@ Với mỗi bài hợp lệ, duyệt `version = 1 .. paper.num_versions`:
      - **Tản nhiệt chủ động (`Proactive Micro-Cooldown = 60 s`) khi `thermal_score >= 3,0` (`v3.3`):** Ngay khi cảm biến nhiệt trên `HostClient` phát hiện chớm quá nhiệt (ví dụ: 2 lần đứt stream `1,5 + 1,5 = 3,0`, hoặc 1 lần `429` + 1 bài `TTFB >= 3,5 s` `2,0 + 1,0 = 3,0`, hoặc 3 bài liên tiếp `TTFB >= 3,5 s`), `_handle_thermal_cooldown` lập tức đóng TCP socket nóng (`recycle_session()`), tranh thủ lúc ngủ **`60 s`** để `extract_queue.join()` + `_flush_metrics` + chạy checkpoint backup, rồi reset nhịp về `3,00 s`.
      - **Cầu chì bảo vệ IP khi $\ge 2$ bài liên tiếp đều bị `429` (`consecutive_arxiv_429 >= 2`, `need_cooldown=True`):** Đẩy tiếp bài thứ 2 vào `deferred_ids` và gọi `_handle_auto_resume_cooldown` (`recycle_session()`, đợi `extract_queue.join()`, flush `metrics.json`, chạy backup nền, lưu `rate_state.json`, ngủ cooldown `180 s`, rồi reset `consecutive_arxiv_429 = 0` và đưa nhịp `RateLimiter` về `3,0 s`).
    - **Lượt vét cuối dải (`in_deferred_pass = True`):** Sau khi đi hết dải ID chính, nếu `deferred_ids` khác rỗng, hệ thống đợi `extract_queue.join()`, khử trùng lặp danh sách `deferred_ids` và chạy lại `_run_chunks(retry_list, is_deferred=True)`. Ở lượt vét này, nếu vẫn gặp `429`, `_wait_arxiv_429` sẽ chờ theo `Retry-After` / stepped backoff (`15 s → 30 s → 60 s`, tối đa 4 lần thử).
-6. **Nhả kết nối tức thì:** Ngay khi tải xong byte cuối (hoặc ngắt ở 512 B), khối `with response:` đóng lại, giải phóng slot `RateLimiter` để nhịp `Start-to-Start 3,0 s` của gói kế tiếp không bị trễ bởi thời gian giải nén. Các gói $\ge 50\text{ MiB}$ hoặc sự kiện đứt stream/retry được ghi tự động vào `data/logs/diagnostics.jsonl` (**U5**). `DownloadResult` được đẩy vào `extract_queue`.
+6. **Nhả kết nối tức thì & Điều tiết RAM theo byte (`E4`):** Ngay khi tải xong byte cuối (hoặc ngắt ở 512 B), khối `with response:` đóng lại, giải phóng slot `RateLimiter` để nhịp `Start-to-Start 3,0 s` của gói kế tiếp không bị trễ bởi thời gian giải nén. Các gói $\ge 50\text{ MiB}$ hoặc sự kiện đứt stream/retry được ghi tự động vào `data/logs/diagnostics.jsonl` (**U5**). Trước khi đẩy `_ExtractJob` vào `extract_queue`, hàm `_enqueue_extract_job` kiểm tra hạn mức `extract_max_queue_bytes = 192 MiB` (`CRAWLER_EXTRACT_MAX_QUEUE_BYTES`, luôn cho phép ít nhất 1 gói đi qua để tránh deadlock) nhằm giữ trần RAM Colab an toàn tuyệt đối khi gặp chuỗi gói nặng liên tiếp.
 
-**B. Trên `extract-worker` (`_consume_extract_job` $\rightarrow$ `extract_tex_bib`):**
-1. **Đọc Zero-Copy (`_ZeroCopyBytesReader` — T5) & Giải nén 1-pass mở Gzip duy nhất 1 lần (`O4`):**
-   - Bọc `bytearray` bằng `_ZeroCopyBytesReader` sử dụng `memoryview` để đọc tuần tự mà không nhân bản bộ nhớ (`bytes(buf)`).
+**B. Trên Pool `extract-worker` (`_consume_extract_job` $\rightarrow$ `extract_tex_bib` — tối ưu `v3.4 Extract-Turbo E1–E5`):**
+1. **Giải nén luồng lớn `_FastGzipStream` (`512 KiB` — `E1`) & Giải nén 1-pass mở Gzip duy nhất 1 lần (`O4`):**
+   - Thay thế `gzip.GzipFile` mặc định của CPython (vốn đọc từng mảnh nhỏ `8 KiB` trong `_compression.DecompressReader` và tính `zlib.crc32` ở tầng Python, tốn ~12.800 vòng lặp cho mỗi gói 100 MB) bằng `_FastGzipStream`: cắt trực tiếp khối **`512 KiB`** từ `memoryview` zero-copy (hoặc file tạm có `buffering=512 KiB`) đưa vào `zlib.decompressobj(16 + zlib.MAX_WBITS)` (kiểm tra header Gzip + trailer 8-byte CRC32/ISIZE ngay trong mã C, hỗ trợ cả các luồng multi-member gzip nối tiếp).
    - Kiểm tra 512 bytes đầu: nếu là `%PDF` hoặc `ZIP` $\rightarrow$ trả về `Status.NO_SOURCE`.
-   - Nếu là Gzip (`\x1f\x8b`): mở `gzip.GzipFile` **một lần duy nhất**, đọc thử 512 bytes giải nén đầu tiên để kiểm tra header tar (`ustar` hoặc checksum octal hợp lệ) rồi ghép lại bằng `_PrefixedReader` để truyền thẳng vào `tarfile.open(fileobj=..., mode="r|")` hoặc bộ ghi file `.tex` đơn.
-2. **Lọc `.tex`/`.bib`/`.bbl` (`U4`) & An toàn giải nén:**
+   - Nếu là Gzip (`\x1f\x8b`): mở `_FastGzipStream` **một lần duy nhất**, đọc thử 512 bytes giải nén đầu tiên để kiểm tra header tar (`ustar` hoặc checksum octal hợp lệ) rồi ghép lại bằng `_PrefixedReader` để truyền thẳng vào `tarfile.open(fileobj=..., mode="r|", bufsize=512*1024)` hoặc bộ ghi file `.tex` đơn.
+2. **Lọc `.tex`/`.bib`/`.bbl` (`U4`), Cache thư mục cha (`E2`) & An toàn giải nén:**
    - Chặn triệt để path traversal (`..`, đường dẫn tuyệt đối, tên thiết bị Windows `CON`/`NUL`..., symlink/hardlink/device) và giới hạn dung lượng giải nén `max_extract_bytes = 2 GiB` (chống zip-bomb).
-   - Với member không phải `.tex`/`.bib`/`.bbl` (ảnh `.png`, `.pdf`, `.eps`...): cộng `member.size` vào `raw_uncompressed_bytes` và **bỏ qua ngay ở mức stream** (không đọc xuất ra đĩa, không băm `sha256`).
-   - Với member **`.tex`, `.bib` hoặc `.bbl` (file bibliography đã biên dịch phụ trợ — U4)**: vừa ghi vào `.vK.part/tex/<relative_path>`, vừa băm `sha256`. Nếu trong cùng một gói tar có 2 member trùng đường dẫn (ví dụ `JSSC.bib`), member sau **ghi đè an toàn** lên member trước theo đúng chuẩn POSIX tar (`S3`).
-   - Cuối luồng tar: đọc cạn các block đệm 0 còn lại trên cùng luồng gzip để kiểm tra trọn vẹn trailer CRC32/ISIZE mà không cần mở file lần hai.
+   - Với member không phải `.tex`/`.bib`/`.bbl` (ảnh `.png`, `.pdf`, `.eps`...): cộng `member.size` vào `raw_uncompressed_bytes` và **bỏ qua ngay ở mức stream `512 KiB`** (không đọc xuất ra đĩa, không băm `sha256`).
+   - Với member **`.tex`, `.bib` hoặc `.bbl` (file bibliography đã biên dịch phụ trợ — U4)**: cache tập thư mục đã tạo `created_dirs` để chỉ gọi `mkdir(parents=True, exist_ok=True)` và `parent.resolve().is_relative_to(stage_root)` đúng **1 lần trên mỗi thư mục con mới** (loại bỏ 95–99% syscall NTFS/Linux thừa trên các bài có hàng trăm file `.tex` con); vừa ghi vào `.vK.part/tex/<relative_path>`, vừa băm `sha256`. Nếu trong cùng một gói tar có 2 member trùng đường dẫn (ví dụ `JSSC.bib`), member sau **ghi đè an toàn** lên member trước theo đúng chuẩn POSIX tar (`S3`).
+   - Cuối luồng tar: đọc cạn các block đệm 0 còn lại theo khối `512 KiB` trên cùng luồng `_FastGzipStream` để kiểm tra trọn vẹn trailer CRC32/ISIZE mà không cần mở file lần hai. Ngay trong khối `finally` của bước giải nén, giải phóng `download.data = None` và trả lại hạn mức `extract_queued_bytes` (`_release_queued_bytes`).
    - Nếu gói hợp lệ nhưng không có file nguồn nào $\rightarrow$ `Status.OK_NO_TEX`; nếu có $\ge 1$ file $\rightarrow$ `Status.OK`; nếu archive hỏng hoặc vi phạm an toàn $\rightarrow$ `Status.CORRUPT`.
-3. **Cài đặt nguyên tử & Ghi Manifest sau cùng:**
-   - Ghi `.vK.part/meta.json` (kèm `version_date`, `crawled_at`, `s2_scope="paper"`). Nếu thư mục `vK/` cũ đã có `references.json` thì chép sang `.vK.part/`.
-   - Hoán đổi nguyên tử `.vK.part` $\rightarrow$ `vK/`.
+3. **Cài đặt nguyên tử Fast-Path (`E5`), Ghi Manifest sau cùng & Đồng bộ Đa luồng (`E3`):**
+   - Ghi `.vK.part/meta.json` (kèm `version_date`, `crawled_at`, `s2_scope="paper"`). Nếu thư mục `vK/` chưa tồn tại (99,9% trường hợp crawl mới), thực hiện thẳng `part.replace(final)` mà không tốn syscall kiểm tra/xóa `.vK.old`; nếu `vK/` đã tồn tại từ lần chạy trước thì bảo toàn `references.json` và hoán đổi qua `.vK.old`.
    - **Ghi `manifest.sqlite` ở bước cuối cùng:** đảm bảo nếu máy tắt giữa chừng, lần chạy sau sẽ tự động dọn `.vK.part` (bằng `os.scandir` nhanh) và tải lại sạch sẽ.
+   - **Bộ đếm hoàn tất bài nguyên tử (`paper_pending_versions` — `E3`):** Với `extract_workers = 2` (cấu hình qua `CRAWLER_EXTRACT_WORKERS`), hai phiên bản `v1` (rất nặng) và `v2` (nhẹ) của cùng một bài được giải nén song song trên 2 nhân CPU vào `.v1.part` và `.v2.part` độc lập. Khi mỗi worker hoàn tất một phiên bản, nó giảm `paper_pending_versions[arxiv_id]` đi 1 dưới khóa; chỉ worker nào giảm bộ đếm về **đúng `0`** mới tăng `papers_done` và đẩy `_S2Job` sang `s2_queue`, đảm bảo S2 luôn ghi `references.json` vào đầy đủ mọi phiên bản.
 
 ### 4.3. Semantic Scholar — Worker nền theo lô (`s2-worker`) & Chế độ `--s2-only` (`U2`)
 
@@ -322,6 +322,7 @@ Ký hiệu: $P$ là số bài cần crawl ($5.000$ ID/dải hoặc $25.000$ ID t
 | **T2 (v3.2/v3.3)** | Nối tiếp `HTTP Range (206 Partial Content)` theo tiến độ (`>= 512 KiB`, tới 12 nhịp) | ✅ Đã triển khai | `download_source` reset `stalled_attempts = 0` khi tiến thêm $\ge 512\text{ KiB}$, triệt tiêu `failed` |
 | **T4 (v3.2/v3.3)** | Đồng bộ hóa đồng hồ retry `schedule_retry_backoff` (kể cả sau `429 Fast-Defer`) | ✅ Đã triển khai | `RateLimiter.wait()` tính từ cả `_last_start_at` và `_last_done_at` (chặn bắn `GET` sau `4 ms`) |
 | **V3.3 (Thermal)** | Sàn nghỉ hậu tải `min_idle_gap = 0,50 s`, xoay vòng TCP mỗi `400` req (`0 ms` overhead) & Tản nhiệt chủ động `60 s` (`thermal_score >= 3,0`) | ✅ Đã triển khai | `RateLimiter` & `HostClient` trong `http.py`, `_handle_thermal_cooldown` trong `pipeline.py` |
+| **V3.4 (Extract-Turbo E1–E5)** | `_FastGzipStream` `512 KiB` (`zlib` C-level CRC), cache thư mục `created_dirs`, pool `extract_workers = 2` + `paper_pending_versions`, trần RAM queue `192 MiB` & fast-path `_install_version` | ✅ Đã triển khai | `_FastGzipStream` & `_write_tar_members_from_stream` trong `source.py`, pool `extract-worker` & `_enqueue_extract_job` trong `pipeline.py` |
 
 ---
 
@@ -369,7 +370,7 @@ ruff check . && ruff format . && pytest
 ## 11. Giới hạn đã biết & Lưu ý khi viết Báo cáo
 
 1. **Điểm nhấn kỹ thuật trong báo cáo Jupyter Book:**
-   - **Tuân thủ tuyệt đối chuẩn lịch sự (`Start-to-Start >= 3,0 s`, 1 kết nối tới `export.arxiv.org`)** nhưng vẫn kéo thời gian thực tế 5.000 ID về sát trần vật lý lý thuyết (`~6,85 – 6,95 giờ` khi mạng sạch và `~6,95 – 7,25 giờ` khi có throttle) nhờ kiến trúc **Producer–Consumer 5 luồng**, đệm RAM Zero-Copy `96 MiB` (`memoryview`), giải nén 1-pass giữ `.tex`/`.bib`/`.bbl`, nối luồng đứt bằng `HTTP 206 Range`, xóa phạt kép 429 và **Fast-Defer Queue (`0 s` chờ ở lần 429 đầu trên `/src/{id}vN`)**.
+   - **Tuân thủ tuyệt đối chuẩn lịch sự (`Start-to-Start >= 3,0 s`, 1 kết nối tới `export.arxiv.org`)** nhưng vẫn kéo thời gian thực tế 5.000 ID về sát trần vật lý lý thuyết (`~6,85 – 6,92 giờ` khi mạng sạch và `~6,92 – 7,15 giờ` giờ cao điểm) nhờ kiến trúc **Producer–Consumer đa luồng (`extract_workers = 2`)**, đệm RAM Zero-Copy `96 MiB` (`memoryview`, trần hàng đợi `192 MiB`), giải nén 1-pass `512 KiB` (`_FastGzipStream`) giữ `.tex`/`.bib`/`.bbl`, nối luồng đứt bằng `Progress-Aware HTTP 206 Range` (tới 12 nhịp), cảm biến nhiệt `thermal_score` + tản nhiệt chủ động `60 s`, xóa phạt kép 429 và **Fast-Defer Queue (`0 s` chờ ở lần 429 đầu trên `/src/{id}vN`)**.
    - **Thống kê đa phiên chuẩn xác (`benchmark_summary` & `cross_version_dedup`):** Bóc tách tường minh thời gian chạy thực (`active_wall_seconds`) khỏi thời gian nghỉ giữa các phiên Colab (`idle_gap_seconds`) và thời gian chờ phạt (`cooldown_retry_seconds`), đồng thời định lượng tỷ lệ trùng lặp mã nguồn giữa các phiên bản bằng `sha256` làm cầu nối sang Milestone 2.
 2. **Môi trường Windows:** Trình diệt virus (Windows Defender) đôi khi quét file trong `.vK.part` lúc `os.replace`; `pipeline.py` đã bọc bắt lỗi `OSError`, khôi phục bản cũ và đánh dấu `failed` để lần chạy sau tự retry (rủi ro R8).
 3. **Đóng băng nộp bài (R6):** Trước khi nộp link repo mã Milestone 1, cần dọn các file quản trị nội bộ (`STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/`, `project requirements/`) theo đúng quy định đề bài (chỉ giữ `.py`, `.ipynb`, `requirements.txt`, `README.md`).
