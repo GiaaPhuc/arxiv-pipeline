@@ -872,3 +872,42 @@ def test_workspace_mutex_blocks_concurrent_process_lock_and_stepped_429_backoff(
         with pytest.raises(RuntimeError, match="already running"):
             with pipeline._acquire_workspace_lock(tmp_path / "data"):
                 pass
+
+
+@responses.activate
+def test_fast_defer_skips_15s_wait_on_first_429_and_continues_immediately(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    # 2408.00004v1 succeeds; v2 hits a single 429 on pass 1 -> fast-deferred with 0s wait!
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", status=429)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v3", body=archive)
+    _mock_s2()
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        auto_resume_rate_limit=True,
+        rate_limit_cooldown_seconds=60.0,
+    )
+    # No _mock_fast_429_wait() needed because 1st 429 fast-defers with 0s wait & 0s cooldown:
+    summary = pipeline.run(["2408.00004", "2408.00002"], config)
+
+    assert summary["ok"] == 4
+    src_calls = _calls(f"{ARXIV}/src/")
+    assert src_calls == [
+        f"{ARXIV}/src/2408.00004v1",
+        f"{ARXIV}/src/2408.00004v2",
+        f"{ARXIV}/src/2408.00002v1",
+        f"{ARXIV}/src/2408.00004v2",
+        f"{ARXIV}/src/2408.00004v3",
+    ]
+    metrics_doc = _read(config.data_dir / "logs" / "metrics.json")
+    assert metrics_doc["arxiv"]["retry_wait_seconds"] == 0.0
+    assert metrics_doc["arxiv"]["cooldown_seconds"] == 0.0
+    assert metrics_doc["arxiv"]["auto_resumes"] == 1

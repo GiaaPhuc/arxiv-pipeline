@@ -97,7 +97,11 @@ class StopCrawl(Exception):
 
 
 class _DeferRateLimit(Exception):
-    """Internal signal (U1): defer the rate-limited paper/chunk and sleep cooldown."""
+    """Internal signal (U1): defer the rate-limited paper/chunk and optionally sleep cooldown."""
+
+    def __init__(self, message: str, *, need_cooldown: bool = True) -> None:
+        super().__init__(message)
+        self.need_cooldown = need_cooldown
 
 
 @contextlib.contextmanager
@@ -193,6 +197,7 @@ class _Run:
     metrics_flush_lock: threading.Lock = field(default_factory=threading.Lock)
     counters_lock: threading.Lock = field(default_factory=threading.Lock)
     in_deferred_pass: bool = False
+    consecutive_arxiv_429: int = 0
     counters: dict[str, int | float | str] = field(
         default_factory=lambda: {
             "session_started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -329,9 +334,11 @@ def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResu
                 context=f"for {arxiv_id}v{version}",
                 rate_attempt=rate_attempt,
                 download=download,
+                fast_defer=True,
             )
             continue
         if 200 <= download.http_status < 300:
+            run.consecutive_arxiv_429 = 0
             run.arxiv.limiter.note_success()
             if download.range_resumed:
                 _inc(run, "range_resumes")
@@ -738,10 +745,30 @@ def _wait_arxiv_429(
     rate_attempt: int,
     response: requests.Response | None = None,
     download: DownloadResult | None = None,
+    fast_defer: bool = False,
 ) -> None:
-    """Sleep after arXiv 429; defer (U1) or raise ``StopCrawl`` when retry budget exhausted."""
+    """Sleep after arXiv 429; fast-defer (U1) or raise ``StopCrawl`` when retry budget exhausted."""
     _inc(run, "arxiv_429")
     run.arxiv.limiter.note_429()
+    run.consecutive_arxiv_429 += 1
+    if fast_defer and run.config.auto_resume_rate_limit and not run.in_deferred_pass:
+        need_cooldown = run.consecutive_arxiv_429 >= 2
+        _diag(
+            run,
+            "arxiv_429_fast_defer",
+            context=context,
+            consecutive_429=run.consecutive_arxiv_429,
+            need_cooldown=need_cooldown,
+        )
+        logger.warning(
+            "arXiv 429 %s; fast-deferring to queue (%s), continuing next id",
+            context,
+            "cooldown after consecutive 429s" if need_cooldown else "0s extra wait",
+        )
+        raise _DeferRateLimit(
+            f"arXiv answered HTTP 429 {context}",
+            need_cooldown=need_cooldown,
+        )
     if rate_attempt >= _ARXIV_MAX_429_ATTEMPTS - 1:
         _diag(
             run,
@@ -822,6 +849,7 @@ def _handle_auto_resume_cooldown(run: _Run, context: str, deferred_count: int) -
     finally:
         if run.rate_state_path is not None:
             save_rate_state(run.rate_state_path, arxiv_cooldown_until=0.0)
+    run.consecutive_arxiv_429 = 0
     run.arxiv.limiter.reset_interval()
 
 
@@ -1085,7 +1113,10 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
                     _process_paper(run, paper)
                 except _DeferRateLimit as exc:
                     deferred_ids.append(paper.arxiv_id)
-                    _handle_auto_resume_cooldown(run, str(exc), 1)
+                    if exc.need_cooldown:
+                        _handle_auto_resume_cooldown(run, str(exc), 1)
+                    else:
+                        _inc(run, "arxiv_auto_resumes")
                     continue
             if not is_deferred:
                 seen += len(chunk)
@@ -1105,6 +1136,7 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
 
     _run_chunks(ids, is_deferred=False)
     if deferred_ids and not run.stop.is_set():
+        run.extract_queue.join()
         retry_list = list(dict.fromkeys(deferred_ids))
         deferred_ids.clear()
         logger.info("running deferred auto-resume pass for %d id(s)", len(retry_list))

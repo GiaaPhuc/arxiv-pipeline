@@ -88,9 +88,9 @@ class Config:
         auto_resume_raw = (
             os.environ.get("CRAWLER_AUTO_RESUME_RATE_LIMIT")
             or local_vars.get("CRAWLER_AUTO_RESUME_RATE_LIMIT")
-            or ""
+            or "1"
         ).strip()
-        auto_resume_rate_limit = auto_resume_raw.lower() in {"1", "true", "yes", "on"}
+        auto_resume_rate_limit = auto_resume_raw.lower() not in {"0", "false", "no", "off"}
 
         values = {
             "data_dir": Path(data_dir_raw),
