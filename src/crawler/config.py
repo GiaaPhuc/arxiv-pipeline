@@ -39,12 +39,12 @@ class Config:
     backup_dir: Path | None = None  # optional mirror for Colab / long runs
     backup_every_ids: int = 0  # 0 disables automatic checkpoint backups
     auto_resume_rate_limit: bool = False  # U1: defer rate-limited chunk & sleep cooldown
-    rate_limit_cooldown_seconds: float = 180.0  # U1: cooldown window (180s - 600s) before resume
+    rate_limit_cooldown_seconds: float = 120.0  # U1/v3.6: max implicit cooldown (30s - 120s)
     s2_only: bool = False  # U2: skip arXiv network calls and only backfill S2 references
     arxiv_min_idle_gap: float = 0.50  # v3.3: post-download idle floor after requests > 2.50s
     arxiv_socket_recycle_every: int = 400  # v3.3: recycle TCP session every N requests (0=off)
     arxiv_thermal_cooldown_seconds: float = (
-        60.0  # v3.3: proactive micro-cooldown on thermal trigger
+        30.0  # v3.6: base cooldown step (30 -> 60 -> 90 -> 120s)
     )
     arxiv_thermal_threshold: float = 3.0  # v3.3: thermal score threshold for proactive cooldown
     extract_workers: int = 2  # v3.4: parallel extract-worker threads for heavy archives

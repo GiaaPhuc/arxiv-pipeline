@@ -38,6 +38,8 @@ _STREAM_CHUNK_SIZE = 128 * 1024
 _MAX_STREAM_ATTEMPTS = 2
 _MAX_TOTAL_STREAM_ATTEMPTS = 4
 _MIN_PROGRESS_BYTES = 512 * 1024
+_HEAVY_STREAM_BREAK_BYTES = 4 * 1024 * 1024
+_HEAVY_STREAM_BREAK_BONUS = 3.0
 _KEEPALIVE_DRAIN_BYTES = 64 * 1024
 _STREAM_RETRY_ERRORS = (ChunkedEncodingError, ConnectionError, Timeout)
 _GZIP_MAGIC = b"\x1f\x8b"
@@ -332,14 +334,26 @@ def _stream_attempts(client: HostClient) -> int:
     return min(config.max_retries + 1, _MAX_STREAM_ATTEMPTS) if config is not None else 1
 
 
-def _stream_retry_backoff_seconds(limiter: Any, retry_number: int) -> float:
-    """Return End-to-Start backoff (>= 3.0 s on arXiv, escalating 3.0 -> 4.5 -> 6.0 s)."""
+def _stream_retry_backoff_seconds(
+    limiter: Any,
+    retry_number: int,
+    *,
+    bytes_written: int = 0,
+) -> float:
+    """Return End-to-Start backoff (>= 3.0 s on arXiv, +3.0 s cushion after >= 4 MiB drop)."""
     base_floor = float(getattr(limiter, "_base_floor", 0.0) or 0.0)
     if base_floor <= 0.0:
         return 0.0
     min_interval = float(getattr(limiter, "_min_interval", base_floor) or base_floor)
     floor = max(min_interval, 3.0)
-    return round(floor + 1.5 * max(retry_number - 1, 0), 4)
+    bonus = _HEAVY_STREAM_BREAK_BONUS if bytes_written >= _HEAVY_STREAM_BREAK_BYTES else 0.0
+    return round(floor + 1.5 * max(retry_number - 1, 0) + bonus, 4)
+
+
+def resume_partial_path(tmp_dir: Path, arxiv_id: str, version: int) -> Path:
+    """Deterministic path in ``tmp_dir`` for stashing partial bytes across 429/deferral."""
+    safe_id = arxiv_id.replace("/", "_")
+    return Path(tmp_dir) / f".resume-{safe_id}-v{version}.part"
 
 
 def _retry_after_seconds(response) -> float | None:
@@ -370,18 +384,22 @@ def download_source(
     tmp_dir: Path,
     *,
     spool_max_bytes: int = 0,
+    keep_partial_on_retryable: bool = False,
 ) -> DownloadResult:
     """Stream one source response into memory (when ``<= spool_max_bytes``) or ``tmp_dir``.
 
     HostClient owns rate limiting and HTTP retries. Transient body read errors
     (e.g. ``ChunkedEncodingError``) retry within the same budget, sending
     ``Range: bytes={written}-`` to resume via HTTP 206 Partial Content when supported (T2).
+    When ``keep_partial_on_retryable`` is True, partial bytes are stashed to ``tmp_dir``
+    on HTTP 429 or exhausted stream drops so the next attempt resumes from ``written``.
     Aborts the stream early once ``%PDF`` or ``ZIP`` magic bytes are detected (O5/S2),
     draining tiny remainders (``<= 64 KiB``) so keep-alive TLS sockets stay warm.
     """
     path = f"/src/{arxiv_id}v{version}"
     last_exc: BaseException | None = None
     tmp_dir = Path(tmp_dir)
+    resume_path = resume_partial_path(tmp_dir, arxiv_id, version)
     mem_buf = bytearray()
     temp_path: Path | None = None
     disk_out: BinaryIO | None = None
@@ -394,26 +412,82 @@ def download_source(
     stalled_attempts = 0
     total_attempts = 0
 
-    def _cleanup_partial() -> None:
+    if keep_partial_on_retryable and resume_path.is_file():
+        try:
+            existing_size = resume_path.stat().st_size
+            if existing_size > 0:
+                with resume_path.open("rb") as f:
+                    header.extend(f.read(512))
+                first_chunk_checked = len(header) >= 4
+                written = existing_size
+                range_resumed = True
+                if spool_max_bytes > 0 and existing_size <= spool_max_bytes:
+                    mem_buf.extend(resume_path.read_bytes())
+                    resume_path.unlink(missing_ok=True)
+                else:
+                    temp_path = resume_path
+        except OSError:
+            resume_path.unlink(missing_ok=True)
+            header.clear()
+            first_chunk_checked = False
+            written = 0
+            range_resumed = False
+
+    def _cleanup_partial(*, remove_resume: bool = True) -> None:
         nonlocal disk_out, temp_path
         if disk_out is not None:
             disk_out.close()
             disk_out = None
         if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+            if remove_resume or temp_path != resume_path:
+                temp_path.unlink(missing_ok=True)
             temp_path = None
+        if remove_resume and keep_partial_on_retryable:
+            resume_path.unlink(missing_ok=True)
         mem_buf.clear()
+
+    def _stash_partial() -> bool:
+        nonlocal disk_out, temp_path
+        if not keep_partial_on_retryable or written <= 0:
+            return False
+        try:
+            if disk_out is not None:
+                disk_out.flush()
+                disk_out.close()
+                disk_out = None
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            if temp_path is not None:
+                if temp_path != resume_path:
+                    temp_path.replace(resume_path)
+                temp_path = None
+            elif mem_buf:
+                resume_path.write_bytes(mem_buf)
+                mem_buf.clear()
+            else:
+                return False
+            logger.info(
+                "stashed %d partial bytes for %sv%d to resume on next attempt",
+                written,
+                arxiv_id,
+                version,
+            )
+            return True
+        except OSError:
+            return False
 
     while stalled_attempts < max_attempts and total_attempts < max_total_attempts:
         total_attempts += 1
         written_before = written
         req_kwargs: dict[str, Any] = {"stream": True}
-        if total_attempts > 1 and written > 0:
+        if written > 0:
             req_kwargs["headers"] = {"Range": f"bytes={written}-"}
         try:
             response = client.get(path, **req_kwargs)
         except BaseException:
-            _cleanup_partial()
+            if _stash_partial():
+                _cleanup_partial(remove_resume=False)
+            else:
+                _cleanup_partial()
             raise
         try:
             status = response.status_code
@@ -421,7 +495,10 @@ def download_source(
                 _cleanup_partial()
                 return DownloadResult(path=None, http_status=status)
             if status in (403, 429):
-                _cleanup_partial()
+                if status == 429 and _stash_partial():
+                    _cleanup_partial(remove_resume=False)
+                else:
+                    _cleanup_partial()
                 retry_after = _retry_after_seconds(response) if status == 429 else None
                 return DownloadResult(path=None, http_status=status, retry_after=retry_after)
             if status == 416 and written > 0:
@@ -501,12 +578,16 @@ def download_source(
                                 disk_out.write(stub)
                                 disk_out.close()
                                 disk_out = None
+                                if keep_partial_on_retryable and temp_path != resume_path:
+                                    resume_path.unlink(missing_ok=True)
                                 return DownloadResult(
                                     path=temp_path,
                                     http_status=200,
                                     raw_archive_bytes=written,
                                     range_resumed=range_resumed,
                                 )
+                            if keep_partial_on_retryable:
+                                resume_path.unlink(missing_ok=True)
                             return DownloadResult(
                                 path=None,
                                 http_status=200,
@@ -533,12 +614,16 @@ def download_source(
             if disk_out is not None:
                 disk_out.close()
                 disk_out = None
+                if keep_partial_on_retryable and temp_path != resume_path:
+                    resume_path.unlink(missing_ok=True)
                 return DownloadResult(
                     path=temp_path,
                     http_status=200,
                     raw_archive_bytes=written,
                     range_resumed=range_resumed,
                 )
+            if keep_partial_on_retryable:
+                resume_path.unlink(missing_ok=True)
             return DownloadResult(
                 path=None,
                 http_status=200,
@@ -562,10 +647,15 @@ def download_source(
             else:
                 stalled_attempts += 1
             if stalled_attempts >= max_attempts or total_attempts >= max_total_attempts:
-                _cleanup_partial()
+                if _stash_partial():
+                    _cleanup_partial(remove_resume=False)
+                else:
+                    _cleanup_partial()
                 raise
             retry_delay = _stream_retry_backoff_seconds(
-                getattr(client, "limiter", None), total_attempts
+                getattr(client, "limiter", None),
+                total_attempts,
+                bytes_written=written,
             )
             logger.warning(
                 "stream %sv%d failed at %d bytes (+%d B, %s); retry %d/%d in %.1fs (stalled %d/%d)",
@@ -591,7 +681,10 @@ def download_source(
                 disk_out.close()
                 disk_out = None
             response.close()
-    _cleanup_partial()
+    if _stash_partial():
+        _cleanup_partial(remove_resume=False)
+    else:
+        _cleanup_partial()
     assert last_exc is not None
     raise last_exc
 

@@ -844,6 +844,69 @@ def test_download_source_range_retry_enforces_at_least_3s_backoff_and_recycles_s
     assert sleeps == [3.0, 4.5, 6.0]
 
 
+def test_download_source_stashes_partial_bytes_across_429_and_resumes_with_206(
+    tar_gz_source: Path,
+    tmp_path: Path,
+) -> None:
+    from crawler.source import _stream_retry_backoff_seconds, resume_partial_path
+
+    payload = tar_gz_source.read_bytes()
+    split_at = len(payload) // 2
+    # Call 1: downloads first half (200 OK), breaks stream, then hits 429 on Range retry!
+    drop_1 = FakeResponse(
+        200,
+        [payload[:split_at]],
+        requests.exceptions.ChunkedEncodingError("cut at 50%"),
+    )
+    resp_429 = FakeResponse(429)
+    resp_429.headers = {"Retry-After": "30"}
+    client_1 = _RetryFakeClient([drop_1, resp_429])
+
+    tmp_dir = tmp_path / ".tmp-stash"
+    res_1 = download_source(
+        client_1,
+        "2408.15660",
+        1,
+        tmp_dir,
+        spool_max_bytes=len(payload) + 1024,
+        keep_partial_on_retryable=True,
+    )
+    assert res_1.http_status == 429
+    assert res_1.retry_after == 30.0
+    stashed = resume_partial_path(tmp_dir, "2408.15660", 1)
+    assert stashed.is_file()
+    assert stashed.read_bytes() == payload[:split_at]
+
+    # Call 2 (after cooldown): picks up stashed bytes and immediately sends Range: bytes={split_at}-
+    part_2 = FakeResponse(206, [payload[split_at:]])
+    client_2 = _RetryFakeClient([part_2])
+    res_2 = download_source(
+        client_2,
+        "2408.15660",
+        1,
+        tmp_dir,
+        spool_max_bytes=len(payload) + 1024,
+        keep_partial_on_retryable=True,
+    )
+    assert res_2.http_status == 200
+    assert res_2.range_resumed is True
+    assert res_2.raw_archive_bytes == len(payload)
+    assert bytes(res_2.data or b"") == payload
+    assert not stashed.exists()  # cleaned up on completion
+    assert client_2.calls == [
+        ("/src/2408.15660v1", {"stream": True, "headers": {"Range": f"bytes={split_at}-"}})
+    ]
+
+    # Heavy stream drop (>= 4 MiB written) adds +3.0s cushion to let CDN burst bucket refill:
+    class DummyLimiter:
+        _base_floor = 3.0
+        _min_interval = 3.0
+
+    assert _stream_retry_backoff_seconds(DummyLimiter(), 1, bytes_written=1024) == 3.0
+    assert _stream_retry_backoff_seconds(DummyLimiter(), 1, bytes_written=5 * 1024 * 1024) == 6.0
+    assert _stream_retry_backoff_seconds(DummyLimiter(), 2, bytes_written=5 * 1024 * 1024) == 7.5
+
+
 def test_fast_gzip_stream_handles_concatenated_multi_member_gzip_and_many_subdirs(
     tmp_path: Path,
 ) -> None:

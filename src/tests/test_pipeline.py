@@ -1090,16 +1090,21 @@ def test_escalating_429_cooldown_and_no_false_cooldown_on_slow_ok_downloads(tmp_
     )
     assert summary["ok"] == 5
     assert summary["no_source"] == 1
-    # Cooldowns escalated 60s -> 120s -> 240s, and NO extra 60s thermal sleeps ran after 200 OKs!
-    assert cooldown_sleeps == [60.0, 120.0, 240.0]
+    # Cooldowns escalated linearly 60s -> 120s -> 180s; no extra thermal sleeps after 200 OKs!
+    assert cooldown_sleeps == [60.0, 120.0, 180.0]
 
-    # Unit check on streak scaling helper:
+    # Unit check on streak scaling helper (default config: 30s -> 60s -> 90s -> 120s cap):
     from unittest.mock import MagicMock
 
+    default_cfg = Config(contact="test@example.com")
     dummy_run = MagicMock()
-    dummy_run.config = config
-    dummy_run.arxiv_429_streak = 4
-    assert pipeline._compute_arxiv_cooldown(dummy_run) == 600.0
+    dummy_run.config = default_cfg
+    dummy_run.arxiv_429_streak = 0
+    assert pipeline._compute_arxiv_cooldown(dummy_run) == 30.0
+    assert pipeline._compute_arxiv_cooldown(dummy_run) == 60.0
+    assert pipeline._compute_arxiv_cooldown(dummy_run) == 90.0
+    assert pipeline._compute_arxiv_cooldown(dummy_run) == 120.0
+    assert pipeline._compute_arxiv_cooldown(dummy_run) == 120.0
     dummy_run.arxiv_429_streak = 0
     assert pipeline._compute_arxiv_cooldown(dummy_run, retry_after=300.0) == 300.0
     dummy_run.arxiv_429_streak = 0
@@ -1194,3 +1199,55 @@ def test_exhausted_stream_drop_defers_paper_in_main_pass_and_recovers(tmp_path, 
     summary = pipeline.run(["2408.00002"], config)
     assert summary["ok"] == 1
     assert calls_00002 == 1
+
+
+@responses.activate
+def test_partial_download_persists_across_429_cooldown_and_streak_decays_after_2_oks(
+    tmp_path, monkeypatch, caplog
+):
+    from crawler.source import resume_partial_path
+
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    half = len(archive) // 2
+    # Pre-seed a stashed partial download (simulating 50% downloaded before a 429 on retry)
+    # for 2408.00002v1, and verify the pipeline sends Range: bytes={half}- and completes via 206:
+    tmp_dir = tmp_path / "data" / ".tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    resume_partial_path(tmp_dir, "2408.00002", 1).write_bytes(archive[:half])
+
+    seen_range_headers: list[str | None] = []
+
+    def handle_00002_v1(request):
+        seen_range_headers.append(request.headers.get("Range"))
+        return 206, {}, archive[half:]
+
+    responses.add_callback(responses.GET, f"{ARXIV}/src/2408.00002v1", callback=handle_00002_v1)
+    _mock_s2()
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=1,
+        auto_resume_rate_limit=True,
+        extract_workers=1,
+    )
+    summary = pipeline.run(["2408.00002"], config)
+    assert summary["ok"] == 1
+    assert seen_range_headers == [f"bytes={half}-"]
+    metrics_doc = _read(config.data_dir / "logs" / "metrics.json")
+    assert metrics_doc["arxiv"]["range_resumes"] == 1
+
+    # Also verify _sleep_interruptible logs once per 60s (NOT every 15s):
+    caplog.clear()
+    stop_evt = threading.Event()
+    monkeypatch.setattr(stop_evt, "wait", lambda _s: False)
+    with caplog.at_level("INFO", logger="crawler.pipeline"):
+        pipeline._sleep_interruptible(stop_evt, 60.0)
+        assert [r.message for r in caplog.records if "remaining" in r.message] == []
+        pipeline._sleep_interruptible(stop_evt, 120.0)
+        assert [r.message for r in caplog.records if "remaining" in r.message] == [
+            "auto-resume cooldown: 60s remaining..."
+        ]
