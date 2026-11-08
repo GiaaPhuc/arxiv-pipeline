@@ -87,12 +87,15 @@ S2_RAW_NAME = "s2_references.raw.json.gz"
 _S2_MAX_BATCH_ATTEMPTS = 4  # per batch, only consumed by HTTP 429
 _S2_MAX_RATE_LIMIT_WAIT = 30 * 60  # cumulative 429 wait without a success → stop S2 worker
 _S2_BATCH_FLUSH_SECONDS = 0.35  # wait briefly in fast tests so nearby papers share one batch POST
-_S2_LIVE_BATCH_FLUSH_SECONDS = 12.0  # live crawl coalesce window so 3-4 papers share one S2 POST
+_S2_LIVE_BATCH_FLUSH_SECONDS = 45.0  # v3.7: coalesce 10-14 live papers into one S2 batch POST
 _ARXIV_MAX_429_ATTEMPTS = 4  # wait Retry-After between attempts; then StopCrawl
 _STEPPED_429_BACKOFF = (15.0, 30.0, 60.0)  # T1: stepped backoff when Retry-After header is absent
 _ARXIV_COOLDOWN_MULTIPLIERS = (1.0, 2.0, 3.0, 4.0)  # escalating 30->60->90->120s (base=30s)
 _ARXIV_OK_STREAK_TO_DECAY = 2  # 2 clean 2xx downloads step down 429 escalation by 1
-_DEFER_DRAIN_AFTER_OK_PAPERS = 5  # retry deferred papers mid-chunk once 5 subsequent papers succeed
+_DEFER_DRAIN_AFTER_OK_PAPERS = 25  # v3.7: retry deferred papers mid-chunk after 25 clean papers
+_PRE_COOLDOWN_MIN_NEW_PAIRS = 100  # v3.7: min new final pairs before another pre-cooldown backup
+_PRE_COOLDOWN_MIN_INTERVAL_SECONDS = 900.0  # v3.7: min 15 min between pre-cooldown backups
+_HEAVY_TRANSFER_BREATHER_BYTES = 4 * 1024 * 1024  # v3.7: full End-to-Start breather after >= 4 MiB
 _FINAL_STATUS_NAMES = frozenset(s.value for s in Status if s.is_final)
 _GIANT_DIAGNOSTIC_BYTES = 50 * 1024 * 1024  # U5: log packages >= 50 MiB to diagnostics.jsonl
 
@@ -222,6 +225,7 @@ class _Run:
     arxiv_ok_since_429: int = 0
     consecutive_stream_failures: int = 0
     last_backup_signature: tuple[int, int] = (-1, -1)
+    last_backup_at: float = 0.0
     counters: dict[str, int | float | str] = field(
         default_factory=lambda: {
             "session_started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -372,6 +376,11 @@ def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResu
                 run.arxiv_429_streak -= 1
                 run.arxiv_ok_since_429 = 0
             run.arxiv.limiter.note_success()
+            if (
+                download.range_resumed
+                or download.raw_archive_bytes >= _HEAVY_TRANSFER_BREATHER_BYTES
+            ):
+                run.arxiv.limiter.schedule_retry_backoff(run.arxiv.limiter._min_interval)
             if download.range_resumed:
                 _inc(run, "range_resumes")
                 _diag(
@@ -1028,10 +1037,31 @@ def _handle_auto_resume_cooldown(
     _flush_metrics(run)
     if run.config.backup_dir is not None:
         current_sig = _workspace_progress_signature(run)
+        has_baseline = run.last_backup_signature != (-1, -1)
+        new_pairs = current_sig[0] - (run.last_backup_signature[0] if has_baseline else 0)
+        elapsed_since_backup = (
+            time.monotonic() - run.last_backup_at if run.last_backup_at > 0.0 else float("inf")
+        )
         if current_sig == run.last_backup_signature or current_sig == (0, 0):
             logger.info(
                 "skipping pre-cooldown backup (no new data since last backup: %d final pairs)",
                 current_sig[0],
+            )
+        elif has_baseline and new_pairs < _PRE_COOLDOWN_MIN_NEW_PAIRS:
+            logger.info(
+                "skipping pre-cooldown backup (+%d new final pairs < %d threshold)",
+                new_pairs,
+                _PRE_COOLDOWN_MIN_NEW_PAIRS,
+            )
+        elif (
+            has_baseline
+            and run.config.arxiv_min_interval >= 3.0
+            and elapsed_since_backup < _PRE_COOLDOWN_MIN_INTERVAL_SECONDS
+        ):
+            logger.info(
+                "skipping pre-cooldown backup (%.0fs since last backup < %.0fs min interval)",
+                elapsed_since_backup,
+                _PRE_COOLDOWN_MIN_INTERVAL_SECONDS,
             )
         elif run.checkpoint_thread is not None and run.checkpoint_thread.is_alive():
             logger.info("previous checkpoint backup still running; skipping pre-cooldown backup")
@@ -1155,13 +1185,8 @@ def _collect_s2_batch(
     return jobs
 
 
-def _requeue_s2_jobs(run: _Run, jobs: list[_S2Job]) -> None:
-    for job in jobs:
-        run.s2_queue.put(job)
-
-
 def _handle_s2_batch(run: _Run, jobs: list[_S2Job]) -> None:
-    """Fetch and store up to ``S2_BATCH_SIZE`` papers; re-queue on transient failure."""
+    """Fetch and store up to ``S2_BATCH_SIZE`` papers; leave failed batches for next run."""
     ids = [job.paper.arxiv_id for job in jobs]
     for _attempt in range(_S2_MAX_BATCH_ATTEMPTS):
         try:
@@ -1180,7 +1205,6 @@ def _handle_s2_batch(run: _Run, jobs: list[_S2Job]) -> None:
             status = _http_status(exc)
             if status == 429:
                 if _wait_s2_429(run, exc.response, rate_attempt=_attempt):
-                    _requeue_s2_jobs(run, jobs)
                     return
                 if run.s2_rate_limit_wait >= _S2_MAX_RATE_LIMIT_WAIT:
                     logger.error(
@@ -1188,23 +1212,21 @@ def _handle_s2_batch(run: _Run, jobs: list[_S2Job]) -> None:
                         _S2_MAX_RATE_LIMIT_WAIT,
                     )
                     run.s2_disabled = True
-                    _requeue_s2_jobs(run, jobs)
                     return
                 continue
             if status == 403:
                 logger.error("S2 answered 403 (invalid/expired key?); S2 worker switched off")
                 run.s2_disabled = True
-                _requeue_s2_jobs(run, jobs)
                 return
             logger.warning("S2 HTTP %s on batch; retried on next run", status)
-            _requeue_s2_jobs(run, jobs)
             return
         except (requests.RequestException, ValueError) as exc:
             logger.warning("S2 batch failed (%r); retried on next run", exc)
-            _requeue_s2_jobs(run, jobs)
             return
-    logger.warning("S2 batch gave up after %d rate-limited attempts", _S2_MAX_BATCH_ATTEMPTS)
-    _requeue_s2_jobs(run, jobs)
+    logger.warning(
+        "S2 batch gave up after %d rate-limited attempts; retried on next run",
+        _S2_MAX_BATCH_ATTEMPTS,
+    )
 
 
 def _s2_worker(run: _Run) -> None:
@@ -1223,7 +1245,6 @@ def _s2_worker(run: _Run) -> None:
             _handle_s2_batch(run, jobs)
         except Exception:
             logger.exception("S2 worker error on batch starting with %s", jobs[0].paper.arxiv_id)
-            _requeue_s2_jobs(run, jobs)
 
 
 # --------------------------------------------------------------------------- entry point
@@ -1248,12 +1269,16 @@ def _run_checkpoint_bg(
     skip_if_unchanged: bool = False,
 ) -> None:
     sig_before = _workspace_progress_signature(run)
+    prev_sig = run.last_backup_signature
+    run.last_backup_signature = sig_before
     try:
         _call_backup(data_dir, backup_dir, skip_if_unchanged=skip_if_unchanged)
-        run.last_backup_signature = sig_before
+        run.last_backup_signature = _workspace_progress_signature(run)
+        run.last_backup_at = time.monotonic()
         if ids_seen > run.checkpoint_last_seen:
             run.checkpoint_last_seen = ids_seen
     except OSError:
+        run.last_backup_signature = prev_sig
         logger.exception(
             "checkpoint backup failed (%s -> %s); crawl continues",
             data_dir,
@@ -1359,26 +1384,35 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
         retry_papers = list({p.arxiv_id: p for p in chunk_deferred}.values())
         chunk_deferred.clear()
         logger.info("running mid-chunk auto-resume pass for %d id(s)", len(retry_papers))
-        prev_deferred = run.in_deferred_pass
-        run.in_deferred_pass = True
-        try:
-            for d_paper in retry_papers:
-                if run.stop.is_set():
-                    return
-                try:
-                    _process_paper(run, d_paper, ids_seen=seen)
-                except StopCrawl as exc:
-                    if "403" in str(exc):
-                        raise
-                    logger.warning(
-                        "%s still rate-limited in mid-chunk retry; deferring to end of run",
-                        d_paper.arxiv_id,
+        for idx_retry, d_paper in enumerate(retry_papers):
+            if run.stop.is_set():
+                return
+            try:
+                _process_paper(run, d_paper, ids_seen=seen)
+            except StopCrawl as exc:
+                if "403" in str(exc):
+                    raise
+                logger.warning(
+                    "%s still rate-limited in mid-chunk retry; deferring to end of run",
+                    d_paper.arxiv_id,
+                )
+                deferred_ids.append(d_paper.arxiv_id)
+            except _DeferRateLimit as exc:
+                logger.warning(
+                    "%s rate-limited/broken in mid-chunk retry; deferring to end of run",
+                    d_paper.arxiv_id,
+                )
+                deferred_ids.extend(p.arxiv_id for p in retry_papers[idx_retry:])
+                if exc.need_cooldown:
+                    _handle_auto_resume_cooldown(
+                        run,
+                        str(exc),
+                        len(retry_papers) - idx_retry,
+                        retry_after=exc.retry_after,
                     )
-                    deferred_ids.append(d_paper.arxiv_id)
-                except _DeferRateLimit:
-                    deferred_ids.append(d_paper.arxiv_id)
-        finally:
-            run.in_deferred_pass = prev_deferred
+                else:
+                    _inc(run, "arxiv_auto_resumes")
+                break
 
     def _run_chunks(target_ids: list[str], *, is_deferred: bool = False) -> None:
         nonlocal seen
@@ -1584,7 +1618,7 @@ def run(
             summary = manifest.summary()
             if config.backup_dir and config.backup_every_ids:
                 try:
-                    backup_data_dir(data_dir, config.backup_dir)
+                    _call_backup(data_dir, config.backup_dir, skip_if_unchanged=True)
                 except OSError:
                     logger.exception("final checkpoint backup failed")
             manifest.close()

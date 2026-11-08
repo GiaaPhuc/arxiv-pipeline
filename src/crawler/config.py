@@ -6,7 +6,9 @@ Environment variables:
     CRAWLER_CONTACT  e-mail/URL put in the User-Agent (required for real crawling)
     S2_API_KEY       Semantic Scholar key (optional locally; Colab Secrets on Colab)
     CRAWLER_DATA_DIR output directory (default: ./data)
-    CRAWLER_ARXIV_MIN_INTERVAL  seconds between arXiv requests (default 3.0, min 3.0)
+    CRAWLER_ARXIV_MIN_INTERVAL  seconds between arXiv requests (default 3.15, min 3.0)
+    CRAWLER_ARXIV_MIN_IDLE_GAP  post-download idle floor after heavy requests (default 1.50)
+    CRAWLER_ARXIV_SOCKET_RECYCLE_EVERY recycle arXiv TCP session every N requests (default 120)
     CRAWLER_BACKUP_DIR          copy ``data/`` here periodically (Colab: Drive path)
     CRAWLER_BACKUP_EVERY_IDS    trigger backup every N base arXiv ids seen (default 0 = off)
     CRAWLER_AUTO_RESUME_RATE_LIMIT  1/true to defer 429-throttled ids and auto-resume after cooldown
@@ -29,7 +31,7 @@ class Config:
     data_dir: Path = Path("data")
     contact: str = ""
     s2_api_key: str | None = field(default=None, repr=False)  # repr=False: never log the key
-    arxiv_min_interval: float = 3.0  # seconds, Start-to-Start interval on 1 connection
+    arxiv_min_interval: float = 3.15  # v3.7: 3.15s Start-to-Start sweet spot on 1 connection
     s2_min_interval: float = 1.1  # S2 key: 1 req/s; small margin for network latency
     max_retries: int = 5
     max_extract_bytes: int = 2 * 1024**3  # zip-bomb guard (uncompressed total)
@@ -41,8 +43,8 @@ class Config:
     auto_resume_rate_limit: bool = False  # U1: defer rate-limited chunk & sleep cooldown
     rate_limit_cooldown_seconds: float = 120.0  # U1/v3.6: max implicit cooldown (30s - 120s)
     s2_only: bool = False  # U2: skip arXiv network calls and only backfill S2 references
-    arxiv_min_idle_gap: float = 0.50  # v3.3: post-download idle floor after requests > 2.50s
-    arxiv_socket_recycle_every: int = 400  # v3.3: recycle TCP session every N requests (0=off)
+    arxiv_min_idle_gap: float = 1.50  # v3.7: post-download idle floor after slow/heavy requests
+    arxiv_socket_recycle_every: int = 120  # v3.7: recycle TCP session every 120 requests (0=off)
     arxiv_thermal_cooldown_seconds: float = (
         30.0  # v3.6: base cooldown step (30 -> 60 -> 90 -> 120s)
     )
@@ -73,10 +75,34 @@ class Config:
             or local_vars.get("CRAWLER_ARXIV_MIN_INTERVAL")
             or ""
         )
-        arxiv_min_interval = 3.0
+        arxiv_min_interval = 3.15
         if arxiv_interval_raw:
             try:
                 arxiv_min_interval = max(float(arxiv_interval_raw), 3.0)
+            except ValueError:
+                pass
+
+        idle_gap_raw = (
+            os.environ.get("CRAWLER_ARXIV_MIN_IDLE_GAP")
+            or local_vars.get("CRAWLER_ARXIV_MIN_IDLE_GAP")
+            or ""
+        )
+        arxiv_min_idle_gap = 1.50
+        if idle_gap_raw:
+            try:
+                arxiv_min_idle_gap = max(float(idle_gap_raw), 0.0)
+            except ValueError:
+                pass
+
+        recycle_raw = (
+            os.environ.get("CRAWLER_ARXIV_SOCKET_RECYCLE_EVERY")
+            or local_vars.get("CRAWLER_ARXIV_SOCKET_RECYCLE_EVERY")
+            or ""
+        )
+        arxiv_socket_recycle_every = 120
+        if recycle_raw:
+            try:
+                arxiv_socket_recycle_every = max(int(recycle_raw), 0)
             except ValueError:
                 pass
 
@@ -131,6 +157,8 @@ class Config:
             "contact": os.environ.get("CRAWLER_CONTACT") or local_vars.get("CRAWLER_CONTACT") or "",
             "s2_api_key": os.environ.get("S2_API_KEY") or local_vars.get("S2_API_KEY") or None,
             "arxiv_min_interval": arxiv_min_interval,
+            "arxiv_min_idle_gap": arxiv_min_idle_gap,
+            "arxiv_socket_recycle_every": arxiv_socket_recycle_every,
             "backup_dir": Path(backup_dir_raw) if backup_dir_raw else None,
             "backup_every_ids": backup_every_ids,
             "auto_resume_rate_limit": auto_resume_rate_limit,

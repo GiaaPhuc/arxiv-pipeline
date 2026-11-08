@@ -1251,3 +1251,103 @@ def test_partial_download_persists_across_429_cooldown_and_streak_decays_after_2
         assert [r.message for r in caplog.records if "remaining" in r.message] == [
             "auto-resume cooldown: 60s remaining..."
         ]
+
+
+@responses.activate
+def test_v37_backup_throttle_s2_no_infinite_requeue_and_heavy_breather(tmp_path, monkeypatch):
+    from crawler.http import HostClient, RateLimiter
+
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    # 1) 2408.00004v1 succeeds (+1 final pair) -> v2 hits 429 #1 -> first pre-cooldown backup runs!
+    # 2) Pass 1 continues to 2408.00002v1 which succeeds (+1 new final pair since backup #1, < 100),
+    #    then 2408.00001v1 hits 429 #2 -> pre-cooldown backup MUST BE SKIPPED (< 100 new pairs)!
+    # 3) Deferred pass finishes 2408.00004v2, v3 and 2408.00001v1, v2.
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", status=429)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00001v1", status=429)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v3", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00001v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00001v2", body="no source")
+
+    # S2 returns 429 on every attempt during run 1 -> must give up after 4 attempts per batch
+    # WITHOUT re-queuing into an infinite loop within the same run!
+    s2_post_calls = 0
+
+    def always_429_s2(_request):
+        nonlocal s2_post_calls
+        s2_post_calls += 1
+        return 429, {"Retry-After": "15"}, "{}"
+
+    responses.add_callback(
+        responses.POST,
+        f"{S2}/graph/v1/paper/batch",
+        callback=always_429_s2,
+        content_type="application/json",
+    )
+
+    pre_cooldown_backups = 0
+
+    def spy_backup(source: Path, destination: Path, *, skip_if_unchanged: bool = False) -> None:
+        nonlocal pre_cooldown_backups
+        _ = (source, destination, skip_if_unchanged)
+        if "checkpoint-worker" in threading.current_thread().name:
+            pre_cooldown_backups += 1
+
+    monkeypatch.setattr(pipeline, "_sleep_interruptible", lambda _stop, _s: None)
+    monkeypatch.setattr(pipeline, "_wait_s2_429", lambda *_a, **_kw: False)
+    monkeypatch.setattr(pipeline, "backup_data_dir", spy_backup)
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        auto_resume_rate_limit=True,
+        backup_dir=tmp_path / "drive" / "arxiv-data.tar.gz",
+        backup_every_ids=500,
+        extract_workers=1,
+    )
+    summary = pipeline.run(["2408.00004", "2408.00002", "2408.00001"], config)
+    assert summary["ok"] == 5
+    # Only the 1st 429 triggered a pre-cooldown backup; the 2nd 429 (+1 new pair < 100) skipped it!
+    assert pre_cooldown_backups == 1
+    # S2 gave up after 4 attempts per batch instead of looping forever in run.s2_queue:
+    assert 4 <= s2_post_calls <= 12
+
+    # Also verify heavy download (>= 4 MiB) schedules a full End-to-Start breather on limiter:
+    limiter = RateLimiter(3.15, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=1.50)
+    heavy_client = HostClient(ARXIV, limiter, config)
+    dummy_run = pipeline._Run(
+        config=config,
+        manifest=pipeline.Manifest(tmp_path / "data" / "manifest.sqlite"),
+        arxiv=heavy_client,
+        s2=pipeline.make_s2_client(config),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    try:
+        monkeypatch.setattr(
+            pipeline,
+            "download_source",
+            lambda *_a, **_kw: pipeline.DownloadResult(
+                path=None,
+                http_status=200,
+                data=bytearray(b"x"),
+                raw_archive_bytes=5 * 1024 * 1024,
+            ),
+        )
+        paper_meta = pipeline.PaperMeta(
+            arxiv_id="2408.00002",
+            title="t",
+            authors=[],
+            submission_date="2024-08-01",
+            num_versions=1,
+        )
+        pipeline._download_version(dummy_run, paper_meta, 1)
+        assert limiter._retry_backoff == 3.15  # noqa: SLF001
+    finally:
+        dummy_run.manifest.close()
