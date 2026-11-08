@@ -277,31 +277,48 @@ def test_arxiv_rate_limiter_adapts_above_3s_floor_on_429_and_recovers():
         sleeps.append(round(seconds, 4))
         now[0] += seconds
 
-    limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep)
+    limiter = RateLimiter(3.15, clock=clock, sleep=fake_sleep)
     limiter.note_429()
-    assert limiter._min_interval == 3.15  # noqa: SLF001
+    assert limiter._min_interval == 3.65  # noqa: SLF001
+    limiter.note_429()
+    assert limiter._min_interval == 4.15  # noqa: SLF001
+    limiter.note_429()
+    assert limiter._min_interval == 4.65  # noqa: SLF001
     limiter.note_429()
     limiter.note_429()
-    assert limiter._min_interval == 3.30  # T1 cap: floor + 0.30s = 3.30s  # noqa: SLF001
+    assert limiter._min_interval == 5.0  # v3.8 cap: 5.0s  # noqa: SLF001
 
     limiter.wait()
     limiter.done()
     limiter.wait()
     limiter.done()
-    assert sleeps == [3.3]
+    assert sleeps == [5.0]
 
-    # Recover -0.15s after 3 successes, back to 3.0s after 6 successes (v3.3):
-    for _ in range(3):
+    # Fast step-down (-0.75s every 2 GET 200s) back to 3.15s floor (v3.8):
+    for _ in range(2):
         limiter.note_success()
-    assert limiter._min_interval == 3.15  # noqa: SLF001
-    for _ in range(3):
+    assert limiter._min_interval == 4.25  # noqa: SLF001
+    for _ in range(2):
         limiter.note_success()
-    assert limiter._min_interval == 3.0  # never drops below configured 3.0s floor  # noqa: SLF001
+    assert limiter._min_interval == 3.5  # noqa: SLF001
+    for _ in range(2):
+        limiter.note_success()
+    assert limiter._min_interval == 3.15  # never drops below configured 3.15s floor  # noqa: SLF001
 
     limiter.note_429()
-    assert limiter._min_interval == 3.15  # noqa: SLF001
+    assert limiter._min_interval == 3.65  # noqa: SLF001
     limiter.reset_interval()
-    assert limiter._min_interval == 3.0  # noqa: SLF001
+    assert limiter._min_interval == 3.15  # noqa: SLF001
+
+    # Verify jitter_max=0.30 adds random jitter in [0.0, 0.30] on subsequent requests:
+    sleeps.clear()
+    jitter_limiter = RateLimiter(3.15, clock=clock, sleep=fake_sleep, jitter_max=0.30)
+    jitter_limiter.wait()
+    jitter_limiter.done()
+    jitter_limiter.wait()
+    jitter_limiter.done()
+    assert len(sleeps) == 1
+    assert 3.15 <= sleeps[0] <= 3.45
 
 
 def test_unified_retry_clock_does_not_stack_retry_sleep_and_rate_limiter():

@@ -966,8 +966,8 @@ def test_fast_defer_429_enforces_post_done_gap_and_proactive_thermal_cooldown(tm
 
     summary = pipeline.run(["2408.00004", "2408.00002"], config, arxiv_client=arxiv_client)
     assert summary["ok"] == 4
-    # After 429 was held 10.9s (> 3.15s Start-to-Start), next GET waits 3.15s from _last_done_at!
-    assert 3.15 in sleeps
+    # After 429 was held 10.9s (> 3.5s Start-to-Start), next GET waits 3.5s from _last_done_at!
+    assert 3.5 in sleeps
 
 
 @responses.activate
@@ -1329,6 +1329,7 @@ def test_v37_backup_throttle_s2_no_infinite_requeue_and_heavy_breather(tmp_path,
         papers_dir=tmp_path / "data" / "papers",
         tmp_dir=tmp_path / "data" / ".tmp",
     )
+    real_download_source = pipeline.download_source
     try:
         monkeypatch.setattr(
             pipeline,
@@ -1350,4 +1351,28 @@ def test_v37_backup_throttle_s2_no_infinite_requeue_and_heavy_breather(tmp_path,
         pipeline._download_version(dummy_run, paper_meta, 1)
         assert limiter._retry_backoff == 3.15  # noqa: SLF001
     finally:
+        monkeypatch.setattr(pipeline, "download_source", real_download_source)
         dummy_run.manifest.close()
+
+    # Also verify v3.8 proactive 60s cooldown every N active IDs (reusing cooldown mechanism):
+    proactive_sleeps: list[float] = []
+    monkeypatch.setattr(
+        pipeline, "_sleep_interruptible", lambda _stop, s: proactive_sleeps.append(s)
+    )
+    responses.reset()
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    proactive_cfg = Config(
+        data_dir=tmp_path / "data_proactive",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        arxiv_proactive_cooldown_every_ids=2,
+        arxiv_proactive_cooldown_seconds=60.0,
+        extract_workers=1,
+    )
+    proactive_summary = pipeline.run(["2408.00001", "2408.00002", "2408.00004"], proactive_cfg)
+    assert proactive_summary["ok"] == 5
+    assert proactive_sleeps == [60.0]
