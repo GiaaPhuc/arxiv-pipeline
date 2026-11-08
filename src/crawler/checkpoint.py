@@ -112,7 +112,13 @@ def is_workspace_complete(data_dir: Path) -> bool:
     return actual_papers >= expected_papers
 
 
-def backup_data_dir(source: Path, destination: Path, *, allow_shrink: bool = False) -> None:
+def backup_data_dir(
+    source: Path,
+    destination: Path,
+    *,
+    allow_shrink: bool = False,
+    skip_if_unchanged: bool = False,
+) -> None:
     """Back up ``source`` into ``destination`` for resume after Colab disconnect.
 
     If ``destination`` ends with ``.tar`` / ``.tar.gz`` / ``.tgz``, packs the
@@ -126,16 +132,29 @@ def backup_data_dir(source: Path, destination: Path, *, allow_shrink: bool = Fal
     directories such as ``.v1.part``.
     """
     if is_archive_path(destination):
-        backup_tar_archive(source, destination, allow_shrink=allow_shrink)
+        backup_tar_archive(
+            source,
+            destination,
+            allow_shrink=allow_shrink,
+            skip_if_unchanged=skip_if_unchanged,
+        )
         return
 
     source = source.resolve()
     destination = destination.resolve()
+    src_db = source / "manifest.sqlite"
+    dst_db = destination / "manifest.sqlite"
+    if skip_if_unchanged and src_db.is_file() and dst_db.is_file():
+        if manifest_pair_counts(src_db) == manifest_pair_counts(dst_db) and (
+            _count_s2_raw_files(source) == _count_s2_raw_files(destination)
+        ):
+            logger.info("checkpoint mirror unchanged; skipping backup: %s", destination)
+            return
+
     destination.mkdir(parents=True, exist_ok=True)
 
-    src_db = source / "manifest.sqlite"
     if src_db.is_file():
-        _snapshot_sqlite(src_db, destination / "manifest.sqlite")
+        _snapshot_sqlite(src_db, dst_db)
 
     for name in _DATA_SUBDIRS:
         _copy_tree(source / name, destination / name)
@@ -148,6 +167,7 @@ def backup_tar_archive(
     destination: Path,
     *,
     allow_shrink: bool = False,
+    skip_if_unchanged: bool = False,
 ) -> dict[str, int]:
     """Pack ``source`` into a single ``.tar`` or ``.tar.gz`` at ``destination``."""
     source = source.resolve()
@@ -157,6 +177,7 @@ def backup_tar_archive(
 
     started = time.monotonic()
     use_gzip = destination.name.lower().endswith((".tar.gz", ".tgz"))
+    s2_raw_files = _count_s2_raw_files(source)
 
     with tempfile.TemporaryDirectory(prefix="arxiv-ckpt-") as tmp_str:
         tmp_dir = Path(tmp_str)
@@ -178,14 +199,36 @@ def backup_tar_archive(
             raise OSError(f"refusing to back up empty data directory: {source}")
 
         prev_meta = read_archive_meta(destination) if destination.is_file() else None
-        if destination.is_file() and not allow_shrink and prev_meta is not None:
+        if destination.is_file() and prev_meta is not None:
             prev_final = _int_field(prev_meta, "final_pairs")
-            if final_pairs < prev_final:
+            if not allow_shrink and final_pairs < prev_final:
                 raise OSError(
                     f"refusing to overwrite {destination} ({prev_final} final pairs) "
                     f"with smaller workspace ({final_pairs} final pairs); "
                     "run restore first or pass allow_shrink=True"
                 )
+            if (
+                skip_if_unchanged
+                and final_pairs == prev_final
+                and total_pairs == _int_field(prev_meta, "total_pairs")
+                and (
+                    "s2_raw_files" not in prev_meta
+                    or s2_raw_files == _int_field(prev_meta, "s2_raw_files")
+                )
+            ):
+                existing_bytes = destination.stat().st_size
+                logger.info(
+                    "checkpoint archive unchanged (%d final pairs); skipping repack: %s",
+                    final_pairs,
+                    destination,
+                )
+                return {
+                    "final_pairs": final_pairs,
+                    "total_pairs": total_pairs,
+                    "archive_bytes": existing_bytes,
+                    "s2_raw_files": s2_raw_files,
+                    "skipped": 1,
+                }
 
         destination.parent.mkdir(parents=True, exist_ok=True)
         part_path = destination.with_name(f"{destination.name}.part")
@@ -236,6 +279,7 @@ def backup_tar_archive(
     meta_payload = {
         "final_pairs": final_pairs,
         "total_pairs": total_pairs,
+        "s2_raw_files": s2_raw_files,
         "archive_bytes": archive_bytes,
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
@@ -252,6 +296,7 @@ def backup_tar_archive(
     return {
         "final_pairs": final_pairs,
         "total_pairs": total_pairs,
+        "s2_raw_files": s2_raw_files,
         "archive_bytes": archive_bytes,
     }
 
@@ -310,6 +355,22 @@ def _snapshot_sqlite(src_db: Path, dest_db: Path) -> None:
         raise OSError(f"sqlite backup failed ({src_db} -> {dest_db}): {exc}") from exc
     for suffix in ("-wal", "-shm"):
         Path(f"{dest_db}{suffix}").unlink(missing_ok=True)
+
+
+def _count_s2_raw_files(source: Path) -> int:
+    papers = source / "papers"
+    if not papers.is_dir():
+        return 0
+    count = 0
+    try:
+        with os.scandir(papers) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
+                    if os.path.isfile(os.path.join(entry.path, "s2_references.raw.json.gz")):
+                        count += 1
+    except OSError:
+        return count
+    return count
 
 
 def _has_any_clean_files(source: Path) -> bool:

@@ -456,10 +456,11 @@ def test_host_client_recycle_session_and_thermal_sensor():
     def clock() -> float:
         return now[0]
 
-    limiter = RateLimiter(0.0, clock=clock, sleep=lambda _s: None)
+    sleeps: list[float] = []
+    limiter = RateLimiter(3.0, clock=clock, sleep=sleeps.append)
     config = Config(
         contact="test@example.com",
-        arxiv_min_interval=0.0,
+        arxiv_min_interval=3.0,
         arxiv_socket_recycle_every=2,
         arxiv_thermal_threshold=3.0,
     )
@@ -486,14 +487,29 @@ def test_host_client_recycle_session_and_thermal_sensor():
     assert client.session_recycles == 1
     assert client._session is not first_session  # noqa: SLF001
 
-    # Thermal sensor: 1 slow TTFB (4.0s -> +1.0) + 1 HTTP 429 (+2.0) = 3.0 -> triggers cooldown
+    # Slow 200 OK header (4.0s) must NOT penalize thermal_score (no false cooldown on recovery):
     client._session.get = MagicMock(side_effect=make_resp(200, 4.0))  # noqa: SLF001
     client.get("/api/query?id_list=3")
-    assert client.thermal_score == 1.0
+    assert client.thermal_score == 0.0
     assert client.consume_thermal_trigger() is False
+
+    # Stream break (+1.5) + HTTP 429 (+2.0) = 3.5 -> reaches threshold; 200 OK decays by -0.5:
+    client.note_stream_break()
+    assert client.thermal_score == 1.5
+    client._session.get = MagicMock(side_effect=make_resp(200, 5.0))  # noqa: SLF001
+    client.get("/api/query?id_list=3b")
+    assert client.thermal_score == 1.0
 
     client._session.get = MagicMock(side_effect=make_resp(429, 8.0))  # noqa: SLF001
     client.get("/api/query?id_list=4")
     assert client.thermal_score == 3.0
     assert client.consume_thermal_trigger() is True
     assert client.thermal_score == 0.0
+
+    # Retry backoff on attempt 0 respects min_interval (3.0s) instead of 2**0 = 1.0s:
+    sleeps.clear()
+    client._sleep_for_retry(0)  # noqa: SLF001
+    assert limiter._retry_backoff == 3.0  # noqa: SLF001
+    client._session.get = MagicMock(side_effect=make_resp(200, 0.05))  # noqa: SLF001
+    client.get("/api/query?id_list=5")
+    assert sleeps == [3.0]

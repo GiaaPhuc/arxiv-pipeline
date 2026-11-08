@@ -228,3 +228,59 @@ def test_archive_backup_tolerates_concurrent_atomic_file_replacement(
     restore_data_dir(archive, restored)
     loaded = json.loads((restored / "papers" / "2408-00001" / "paper.json").read_text("utf-8"))
     assert loaded["arxiv_id"] == "2408.00001"
+
+
+def test_backup_skip_if_unchanged_avoids_redundant_archive_and_mirror_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crawler import checkpoint
+    from crawler.manifest import Manifest
+    from crawler.models import Status, VersionMeta
+
+    src = _make_sample_workspace(tmp_path / "data", ["2408.00001"])
+    archive = tmp_path / "drive" / "arxiv-data.tar.gz"
+    backup_data_dir(src, archive, skip_if_unchanged=True)
+    assert archive.is_file()
+
+    pack_calls = 0
+    orig_add = checkpoint._add_file_snapshot_to_tar
+
+    def counting_add(tf: tarfile.TarFile, file_path: Path, arcname: str) -> None:
+        nonlocal pack_calls
+        pack_calls += 1
+        orig_add(tf, file_path, arcname)
+
+    monkeypatch.setattr(checkpoint, "_add_file_snapshot_to_tar", counting_add)
+
+    # Second call with identical final_pairs / total_pairs / s2_raw_files skips completely:
+    backup_data_dir(src, archive, skip_if_unchanged=True)
+    assert pack_calls == 0
+
+    # Adding a new S2 raw marker triggers a fresh backup even if final_pairs is unchanged:
+    s2_raw = src / "papers" / "2408-00001" / "s2_references.raw.json.gz"
+    s2_raw.write_bytes(b"\x1f\x8b-fake-s2")
+    backup_data_dir(src, archive, skip_if_unchanged=True)
+    assert pack_calls > 0
+
+    # Mirror directory backup also skips unchanged state and updates on new manifest pair:
+    mirror = tmp_path / "drive-mirror"
+    backup_data_dir(src, mirror, skip_if_unchanged=True)
+    mirror_db_mtime = (mirror / "manifest.sqlite").stat().st_mtime_ns
+    backup_data_dir(src, mirror, skip_if_unchanged=True)
+    assert (mirror / "manifest.sqlite").stat().st_mtime_ns == mirror_db_mtime
+
+    (src / "papers" / "2408-00002").mkdir(parents=True, exist_ok=True)
+    m = Manifest(src / "manifest.sqlite")
+    try:
+        m.record(
+            VersionMeta(
+                arxiv_id="2408.00002",
+                version=1,
+                status=Status.OK,
+                crawled_at="2026-04-20T00:00:00Z",
+            )
+        )
+    finally:
+        m.close()
+    backup_data_dir(src, mirror, skip_if_unchanged=True)
+    assert checkpoint.manifest_pair_counts(mirror / "manifest.sqlite") == (2, 2)
