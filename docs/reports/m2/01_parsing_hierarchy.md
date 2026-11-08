@@ -177,6 +177,8 @@ root khi template trỏ sai và đường cha an toàn/đuôi `.TeX`. Trên Wind
 `TEMP`/`TMP` của tiến trình test dưới `.venv/m2c-temp` và basetemp pytest mới
 để tránh ký tự `#` trong Temp mặc định làm hỏng URI SQLite của test checkpoint.
 Đây là thời gian chạy unit test, không phải benchmark parser.
+Kiểm tra lại trước PR sau ghép main `ea13d45` (v3.9): Ruff đạt,
+**359 passed (24,94 s)**; thuật toán C/schema không đổi, giữ bằng chứng mẫu nền cũ.
 
 **Đã thử C độc lập trên 10 bài thật / 26 phiên bản**, thêm 3 phiên bản đối chứng
 (gồm `no_source` và `not_found`). Người dùng xác nhận corpus do leader cung cấp,

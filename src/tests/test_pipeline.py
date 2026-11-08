@@ -1180,7 +1180,7 @@ def test_exhausted_stream_drop_defers_paper_in_main_pass_and_recovers(tmp_path, 
         nonlocal calls_00002
         if arxiv_id == "2408.00002" and calls_00002 == 0:
             calls_00002 += 1
-            raise req_mod.exceptions.ChunkedEncodingError("exhausted 4 stream attempts")
+            raise req_mod.exceptions.ChunkedEncodingError("exhausted 2 stream attempts")
         return real_dl(client, arxiv_id, version, tmp_dir, **kwargs)
 
     responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", body=archive)

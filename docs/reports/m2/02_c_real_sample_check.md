@@ -1,6 +1,7 @@
 # Kiểm chứng phần C trên 10 bài thật — 08/11/2026
 
-> Nhánh `m2/c-gathering-hierarchy`, nền `ac2c174`; thay đổi C còn local, chưa commit/push.
+> Nhánh `m2/c-gathering-hierarchy`; lượt kiểm chứng mẫu chạy trên nền `ac2c174`.
+> C đã lưu ở commit `935b3dc`; main `ea13d45` (v3.9) được ghép khi chuẩn bị bàn giao.
 > Kết quả sau sửa chọn root: **26/26 phiên bản mẫu và 3/3 phiên bản đối chứng đạt các kiểm tra bên dưới**.
 > **M2-C vẫn 🟡**: dùng hook truyền nguyên văn, chưa tích hợp B/D thật hoặc validator E.
 > Bằng chứng máy đọc: [c_real_sample_check.json](c_real_sample_check.json), có thời điểm chạy,
@@ -103,6 +104,10 @@ Heuristic vẫn không phải trình biên dịch TeX hoặc bằng chứng mọ
 Đã thêm 6 trường hợp test tổng hợp: 5 biến thể include tái hiện template trỏ sai
 (vốn thất bại trước sửa) và trường hợp đường cha an toàn/đuôi `.TeX`.
 Kết quả: **98 test C**, toàn suite **359 passed (27,06 s)**; Ruff check/format đạt.
+Lượt trên chạy ở nền `ac2c174`. Khi chuẩn bị PR sau ghép main `ea13d45` (v3.9),
+Ruff đạt và suite chạy lại **359 passed (24,94 s)**. Hash C/Corpus/schema vẫn khớp JSON;
+không ghi đè bằng chứng mẫu cũ thành một lượt chạy thật mới.
+
 Thời gian này là unit test, không phải benchmark parser. TEMP/TMP ở `.venv/m2c-temp`;
 pytest dùng basetemp UUID mới, không đụng thư mục test hay worktree cũ.
 
@@ -119,8 +124,10 @@ Không tự tải bù, không suy bibliography từ references S2, không tạo 
 ## 5. Bàn giao phụ thuộc B/D/A/E
 
 Đây là danh sách để Quỳnh chuyển tiếp khi cần; **chưa gửi tin nhóm**.
-Tình trạng module chỉ được kiểm tra ở checkout `ac2c174` + thay đổi C local;
-chưa fetch/đối chiếu code mới trên remote.
+Đã đối chiếu GitHub và fetch main `ea13d45` (08/11): thay đổi mới chỉ thuộc M1 v3.9;
+schema/caller M2 và Corpus giữ nguyên. B/D, validator E chưa có trên main hoặc nhánh/PR
+repo nhóm tại thời điểm đối chiếu; repo sách `22abf38` chưa có phần M2. Không suy từ đó
+rằng các bạn chưa làm local. Bằng chứng JSON mẫu vẫn ghi đúng lượt chạy nền `ac2c174`.
 
 | Bên phối hợp | Việc cần làm / tiêu chí xác nhận |
 | --- | --- |
@@ -131,4 +138,5 @@ chưa fetch/đối chiếu code mới trên remote.
 | E | Nhận `01_parsing_hierarchy.md` và bằng chứng này; chạy validator trên đầu ra thật rồi ghép Book/build `-W`. Đối chiếu lại bibliography, cảm ơn/phụ lục với C sau khi có B/D thật. Chưa sửa/build repo sách trong lượt này. |
 
 M2-C giữ **🟡** trong STATUS: kiểm chứng cấu trúc C độc lập đã có bằng chứng, còn
-kiểm chứng với B/D thật và đường `.bbl`. Commit/push/PR là bước riêng theo yêu cầu người dùng.
+kiểm chứng với B/D thật và đường `.bbl`. Người dùng đã duyệt commit/push nhánh C;
+bước tạo PR trên trình duyệt do người dùng thực hiện.

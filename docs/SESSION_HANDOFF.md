@@ -1,6 +1,6 @@
 # SESSION HANDOFF — Quỳnh, phần C Milestone 2
 
-> Checkpoint: **08/11/2026, 17:37 Asia/Saigon**. Tài liệu này thay thế `handoff.md`
+> Checkpoint: **08/11/2026, 18:17 Asia/Saigon**. Tài liệu này thay thế `handoff.md`
 > ở gốc cho việc tiếp tục task M2; file gốc là lịch sử bàn giao M1 ngày 22/10.
 > **Đã xác minh** = đọc code/Git local hoặc kết quả tool trong phiên này.
 > **Chưa kiểm chứng** = không được coi là hoàn thành. Lệnh minh họa không phải
@@ -48,11 +48,12 @@ phối hợp B/D/A/E: `docs/reports/m2/02_c_real_sample_check.md` + JSON cùng t
   Phiếu gọi 13/11 là hạn Moodle nhưng chưa đối chiếu Moodle trực tiếp. Q&A thầy
   cho phép sửa Book đến hạn poster, giữ URL. Đừng tự kết luận các mốc là một.
 - Report: người dùng chọn **bản thảo giao E**, không sửa repo sách trực tiếp.
-- Commit, push và tạo PR là bước bàn giao riêng, **chưa được thực hiện** cho M2.
+- Người dùng đã duyệt commit/push nhánh C và nhận main mới; **người dùng tự tạo PR
+  trên trình duyệt**. Không tự gửi tin nhóm, tạo PR bằng API hoặc merge PR.
 
 ## 3. Completed Work
 
-Các file mới ở root checkout, còn **untracked**:
+Các tệp phần C đã lưu trong commit **`935b3dc`** ở root checkout:
 
 | File | Nội dung đã có |
 | --- | --- |
@@ -64,7 +65,8 @@ Các file mới ở root checkout, còn **untracked**:
 | `docs/reports/m2/02_c_real_sample_check.md` | Bảng 26 phiên bản + 3 đối chứng, lỗi root đã sửa, giới hạn và đầu việc B/D/A/E; chưa gửi nhóm |
 | `docs/reports/m2/c_real_sample_check.json` | Hash code/metadata, root, file/nút, đề mục đối chiếu và cảnh báo từng phiên bản |
 
-Hai file tracked đã sửa: **`STATUS.md`**, **`docs/du-an-va-luong-xu-ly-hien-tai-vi.md`**.
+Hai tệp tài liệu chung trong cùng commit: **`STATUS.md`**,
+**`docs/du-an-va-luong-xu-ly-hien-tai-vi.md`**.
 Đã ghi số test, tiến độ C và khoảng thiếu `.bbl`; thêm phần 12 mô tả luồng M2 C.
 Không sửa schema M1/M2, `corpus.py`, pipeline A, hoặc test của thành viên khác.
 
@@ -116,13 +118,16 @@ build_raw_hierarchy(unit: CompilationUnit,
 **Đã kiểm tra local trong lượt handoff:**
 
 - CWD: **`D:/Project_NMKHDL`**, branch **`m2/c-gathering-hierarchy`**.
-- HEAD: **`ac2c17462c1f3e02faec54840a549eb233331f9a`**, merge PR #23.
-  Đây là base đã fetch trước triển khai, **không khẳng định là GitHub mới nhất
-  tại lúc phiên mới chạy**. Handoff không fetch/pull hay đổi nhánh.
-- Chưa có commit riêng cho M2, chưa push nhánh M2. Đừng suy `git diff --stat`
-  chỉ có tài liệu là chưa viết code: bốn file Python mới vẫn **untracked**.
-- Tracked modified: STATUS và tài liệu luồng ở mục 3.
-- Untracked task: 7 file mới mục 3 + `docs/SESSION_HANDOFF.md` (tài liệu này).
+- Commit C: **`935b3dc`**, tác giả `Pham Truong Quynh`, gồm đúng 10 tệp task.
+- Main đã fetch: **`ea13d45776751dab65bda9eb11bd44836212205f`**, merge PR #24
+  (M1 v3.9); đi trước nền kiểm chứng mẫu `ac2c174` 2 commit. Schema/caller M2,
+  `corpus.py` và `run_parse.py` không đổi; `.bbl` vẫn chưa đi qua Corpus.
+- Đã nhận main bằng merge trên nhánh C, giữ lịch sử tác giả; chỉ STATUS conflict,
+  gộp nội dung M1 v3.9 và kết quả C. Tài liệu luồng tự gộp, không sửa thuật toán
+  crawler/test M1 ngoài thay đổi nguyên bản từ main. HEAD cụ thể xem `git log -1`.
+- Checkpoint tài liệu chuẩn bị push: người dùng đã duyệt push nhánh C và sẽ tự nhấn
+  Create pull request trên trình duyệt. Kiểm tra remote/PR trước khi làm lại thao tác;
+  không tự tạo PR hoặc merge. Bản nháp PR đặt ngoài commit trong thư mục backup cục bộ.
 - Untracked **có sẵn của người dùng**, không stage/dọn: `Plans/`, `handoff.md`,
   `milestone2-phan-cong-task-B-E-vi.md`, `project_requirements/`, `project_statement.html`.
 - **`arxiv-data/` do leader cung cấp, untracked:** dữ liệu cần giữ ngoài commit, không
@@ -139,13 +144,16 @@ build_raw_hierarchy(unit: CompilationUnit,
 
 `.venv` chứa cả interpreter, worktree và backup, **không được xóa/tạo lại như cache**.
 Backup lịch sử có tại `.venv/handoff-backups/status-review-20261025/`.
+Backup trước commit/merge C: `.venv/handoff-backups/m2c-pr-20261108-181033/`,
+gồm bản sao 10 tệp task, diff tracked và trạng thái/hash thay đổi của 4 worktree cũ.
 Người dùng muốn giữ nhánh bàn giao/lịch sử; không tự xóa nhánh/worktree.
 
 ## 6. Pending Tasks (ưu tiên)
 
 1. **B/D/A tích hợp module thật**: B cung cấp đủ 4 `CleanerHooks`; D trích tham khảo,
    dedup/export; A nối `default_stages()`. Checkout hiện chưa có thuật toán B/D;
-   chưa đối chiếu remote, không suy thành các bạn chưa làm. Chạy lại đủ 26 phiên bản
+   đã đối chiếu main/nhánh/PR repo nhóm ở `ea13d45`, chưa thấy B/D được công bố;
+   không suy thành các bạn chưa làm local. Chạy lại đủ 26 phiên bản
    sau khi có code thật; lượt identity không chứng minh macro/math/split hoặc dedup.
 2. **A/D xác minh bibliography và nối BBL**: `2408.11045` v1–v3 thiếu `references`,
    `2408.11053` v1 thiếu `ref`, `2408.11111` v1/v2 thiếu `CVs/Math/RB/mk` trong subset.
@@ -157,8 +165,8 @@ Người dùng muốn giữ nhánh bàn giao/lịch sử; không tự xóa nhán
    Không tải lại 25k; `data/papers` mặc định không có, dùng `arxiv-data` thực tế.
 4. **E ghép bản thảo và build Book**. Bảng kiểm chứng mục 5 đã có nội dung bàn giao;
    chưa gửi tin nhóm, chưa sửa/build repo sách.
-5. Bàn giao Git riêng khi người dùng giao: rà diff, chỉ stage file task, commit
-   bằng danh tính Quỳnh, push branch, chuẩn bị PR. User thường tự Create PR/merge.
+5. Hoàn tất push theo phạm vi đã duyệt và đưa link so sánh + bản nháp PR cho người dùng;
+   **người dùng tự Create PR trên trình duyệt**. Không gửi tin nhóm hoặc merge PR.
 
 ## 7. Known Issues / chưa kiểm chứng
 
@@ -175,12 +183,20 @@ Người dùng muốn giữ nhánh bàn giao/lịch sử; không tự xóa nhán
   SQLite của checkpoint bị cắt. Không sửa checkpoint/export để né lỗi; dùng Temp
   trong workspace (mục 8).
 - **Chưa biết:** tính toàn vẹn toàn bộ 1.000 bài/gói gốc, chất lượng sau B/D thật,
-  corpus 25k đã hoàn tất chưa, Moodle đã nộp gì, code mới các thành viên trên remote.
+  corpus 25k đã hoàn tất chưa, Moodle đã nộp gì, code chưa được các thành viên công bố.
   Không suy từ kiểm hash mẫu hoặc metadata `ok` thành toàn bộ dữ liệu đạt.
 
 ## 8. Testing Status
 
-**Kết quả lượt kiểm chứng/sửa root 08/11:**
+**Kiểm tra trước push sau ghép main `ea13d45` (08/11):**
+
+- Ruff check đạt; Ruff format: **63 files left unchanged**.
+- Toàn suite **359 passed, 24,94 s**, không skip; 98 trường hợp C giữ nguyên.
+- Bốn worktree cũ khớp trạng thái/hash trước bàn giao; hash code C, Corpus và schema
+  khớp bằng chứng mẫu thật. Crawler/test M1 giống nguyên bản main.
+- Basetemp UUID mới dưới `.venv`; log test và bản nháp PR ở thư mục backup trước merge.
+
+**Lịch sử lượt kiểm chứng/sửa root trên nền `ac2c174` (08/11):**
 
 - Ruff check đạt; Ruff format: **62 files left unchanged**.
 - Thêm 6 trường hợp C: 5 regression template/include đều fail trước sửa; sau sửa
@@ -228,7 +244,8 @@ Không chạy lại chỉ để tái tạo số test nếu chưa có thay đổi
 4. Đọc bảng kiểm chứng và JSON trước khi chạy lại: nguồn gốc đã được người dùng
    xác nhận, kiểm chứng C độc lập đã làm. Tiếp tục các gate B/D/BBL/E mục 6;
    không yêu cầu API key cho nguồn đã tải hoặc tự đánh dấu M2-C ✅.
-5. Khi người dùng giao bàn giao: rà diff và bằng chứng, chỉ chuẩn bị Git trong
-   phạm vi được duyệt. Không tự commit/push/PR, gửi tin nhóm hoặc sửa repo sách.
+5. Người dùng đã duyệt commit/push trong lượt bàn giao này. Phiên mới cần đối chiếu
+   trạng thái thực tế trước khi làm tiếp; không tự tạo/merge PR, gửi tin nhóm hoặc
+   sửa repo sách. Mọi thao tác Create PR trên trình duyệt để người dùng thực hiện.
 
 Không dùng subagent trong task này theo lựa chọn trước của người dùng.
