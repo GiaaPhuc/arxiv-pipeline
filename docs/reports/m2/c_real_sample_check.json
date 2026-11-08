@@ -1,0 +1,2346 @@
+{
+  "checked_at": "2026-11-08T17:30:15+07:00",
+  "scope": "Chỉ C, hook truyền nguyên văn; mỗi đoạn không rỗng trả một câu; chưa kiểm chứng B/D, chất lượng chuẩn hóa/tách câu hoặc hiệu năng.",
+  "corpus_origin": "Người dùng xác nhận leader cung cấp và đã giải nén cục bộ; chưa đối chiếu gói nén gốc.",
+  "corpus_root": "arxiv-data",
+  "source_sha256": {
+    "src/parsing/gathering.py": "254608dfa52f26c559a07403912342fbe236892d0fd54e1df31479df8a4d8cf9",
+    "src/parsing/hierarchy.py": "de9e14716c3f33f13c0119bcf5647facf02675af315cb8a3d54ff411466c438e",
+    "src/parsing/models.py": "7f31e7308709dee19ff875b563422faf1274d32e6e36f3c468f2869051b67f30",
+    "src/corpus.py": "886699acfb0c7bea99aca0df1fe0a5e056692781410a31320ee38bc51012cc7f"
+  },
+  "sample_ids": [
+    "2408.11045",
+    "2408.11047",
+    "2408.11048",
+    "2408.11049",
+    "2408.11051",
+    "2408.11052",
+    "2408.11053",
+    "2408.11081",
+    "2408.11111",
+    "2408.11954"
+  ],
+  "summary": {
+    "sample_papers": 10,
+    "sample_versions": 26,
+    "control_versions": 3,
+    "integrity_files_checked": 349,
+    "integrity_issues": 0,
+    "exceptions": 0,
+    "total_tex_files": 324,
+    "used_tex_files": 265,
+    "unused_tex_files": 59,
+    "sample_versions_with_warnings": 6,
+    "control_versions_with_warnings": 1
+  },
+  "versions": [
+    {
+      "arxiv_id": "2408.11045",
+      "version": 1,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 1,
+      "used_tex_files": 1,
+      "unused_tex_files": 0,
+      "bib_files": [],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "heading": 46,
+        "paragraph": 337,
+        "sentence": 337,
+        "block_formula": 182,
+        "list": 9,
+        "item": 24
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "The Action of Non-Invertible Symmetry on States",
+        "The Circle and the Tube Algebra",
+        "Open Spatial Manifolds and the Strip Algebra",
+        "Summary of Results and Applications",
+        "The Structure of the Strip Algebra",
+        "The Category of Representations",
+        "Properties of the Strip Algebra",
+        "Semisimplicity and \\texorpdfstring{$C^*$}{C star}-Weak Hopf Structure",
+        "Relation to the Tube Algebra",
+        "Examples",
+        "\\texorpdfstring{$G$}{G} Symmetry: Unbroken",
+        "\\texorpdfstring{$G$}{G} Symmetry: Spontaneously Broken",
+        "Anomalous \\texorpdfstring{$G$}{G} Symmetry",
+        "Fibonacci",
+        "Fibonacci: Reducible Case",
+        "\\texorpdfstring{$\\Z_2$}{Z2} Tambara-Yamagami",
+        "A Systematic Approach to Study",
+        "Representation Theory and the Symmetry TQFT",
+        "The Dual Category",
+        "Weak Hopf Algebras from the Symmetry TQFT",
+        "Multiplets",
+        "Quivers from Representations",
+        "Invertible Symmetry",
+        "\\texorpdfstring{$G$}{G} Symmetry: Unbroken",
+        "\\texorpdfstring{$G$}{G} Symmetry: Spontaneously Broken",
+        "Anomalous \\texorpdfstring{$G$}{G} Symmetry",
+        "No Symmetry",
+        "Fibonacci",
+        "Application: Tricritical Ising \\texorpdfstring{$+ \\;\\phi_{2,1}$}{plus phi21}",
+        "\\texorpdfstring{$\\Z_2$}{Z2} Tambara-Yamagami",
+        "Application: Tricritical Ising \\texorpdfstring{$- \\;\\phi_{1,3}$}{minus phi13}",
+        "\\texorpdfstring{$su(2)_k$}{su2k}",
+        "Application: \\texorpdfstring{$WZW_{su(2)_k}  -  J\\bar{J}$}{SU(2)k WZW minus JbarJ}",
+        "Selection Rules",
+        "Selection Rules from Fibonacci",
+        "Selection Rules from \\texorpdfstring{$\\Z_2$}{Z2} Tambara-Yamagami",
+        "Acknowledgements",
+        "Fusion Category and its Module Category",
+        "Fusion Categories",
+        "Module Categories",
+        "Weak Hopf Algebras",
+        "Axioms of Weak Hopf Algebra",
+        "\\texorpdfstring{$C^*$}{Cstar}-Weak Hopf Algebras",
+        "Module and Representation Category"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "main.tex",
+            "line": 195
+          }
+        ],
+        "Module Categories": [
+          {
+            "path": "main.tex",
+            "line": 1292
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [
+        "2408.11045 v1 [main.tex]: missing bibliography: references"
+      ],
+      "meta_sha256": "06cf59f696494fb93df369856f0e866df141c124bf3c11a0507fc0bf4e1cf55d"
+    },
+    {
+      "arxiv_id": "2408.11045",
+      "version": 2,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 1,
+      "used_tex_files": 1,
+      "unused_tex_files": 0,
+      "bib_files": [],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "heading": 46,
+        "paragraph": 339,
+        "sentence": 339,
+        "block_formula": 183,
+        "list": 9,
+        "item": 24
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "The Action of Non-Invertible Symmetry on States",
+        "The Circle and the Tube Algebra",
+        "Open Spatial Manifolds and the Strip Algebra",
+        "Summary of Results and Applications",
+        "The Structure of the Strip Algebra",
+        "The Category of Representations",
+        "Properties of the Strip Algebra",
+        "Semisimplicity and \\texorpdfstring{$C^*$}{C star}-Weak Hopf Structure",
+        "Relation to the Tube Algebra",
+        "Examples",
+        "\\texorpdfstring{$G$}{G} Symmetry: Unbroken",
+        "\\texorpdfstring{$G$}{G} Symmetry: Spontaneously Broken",
+        "Anomalous \\texorpdfstring{$G$}{G} Symmetry",
+        "Fibonacci",
+        "Fibonacci: Reducible Case",
+        "\\texorpdfstring{$\\Z_2$}{Z2} Tambara-Yamagami",
+        "A Systematic Approach to Study",
+        "Representation Theory and the Symmetry TQFT",
+        "The Dual Category",
+        "Weak Hopf Algebras from the Symmetry TQFT",
+        "Multiplets",
+        "Quivers from Representations",
+        "Invertible Symmetry",
+        "\\texorpdfstring{$G$}{G} Symmetry: Unbroken",
+        "\\texorpdfstring{$G$}{G} Symmetry: Spontaneously Broken",
+        "Anomalous \\texorpdfstring{$G$}{G} Symmetry",
+        "No Symmetry",
+        "Fibonacci",
+        "Application: Tricritical Ising \\texorpdfstring{$+ \\;\\phi_{2,1}$}{plus phi21}",
+        "\\texorpdfstring{$\\Z_2$}{Z2} Tambara-Yamagami",
+        "Application: Tricritical Ising \\texorpdfstring{$- \\;\\phi_{1,3}$}{minus phi13}",
+        "\\texorpdfstring{$su(2)_k$}{su2k}",
+        "Application: \\texorpdfstring{$WZW_{su(2)_k}  -  J\\bar{J}$}{SU(2)k WZW minus JbarJ}",
+        "Selection Rules",
+        "Selection Rules from Fibonacci",
+        "Selection Rules from \\texorpdfstring{$\\Z_2$}{Z2} Tambara-Yamagami",
+        "Acknowledgements",
+        "Fusion Categories and their Module Categories",
+        "Fusion Categories",
+        "Module Categories",
+        "Weak Hopf Algebras",
+        "Axioms of a Weak Hopf Algebra",
+        "\\texorpdfstring{$C^*$}{Cstar}-Weak Hopf Algebras",
+        "Modules and Representation Categories"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "main.tex",
+            "line": 195
+          }
+        ],
+        "Module Categories": [
+          {
+            "path": "main.tex",
+            "line": 1299
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [
+        "2408.11045 v2 [main.tex]: missing bibliography: references"
+      ],
+      "meta_sha256": "683ab36404adb052d0fb3402795fc0847b9d355a98fe277ebec1c309e601da23"
+    },
+    {
+      "arxiv_id": "2408.11045",
+      "version": 3,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 1,
+      "used_tex_files": 1,
+      "unused_tex_files": 0,
+      "bib_files": [],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "heading": 46,
+        "paragraph": 348,
+        "sentence": 348,
+        "block_formula": 191,
+        "list": 9,
+        "item": 24
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "The Action of Non-Invertible Symmetry on States",
+        "The Circle and the Tube Algebra",
+        "Open Spatial Manifolds and the Strip Algebra",
+        "Summary of Results and Applications",
+        "The Structure of the Strip Algebra",
+        "The Category of Representations",
+        "Properties of the Strip Algebra",
+        "Semisimplicity and \\texorpdfstring{$C^*$}{C star}-Weak Hopf Structure",
+        "Relation to the Tube Algebra",
+        "Examples",
+        "\\texorpdfstring{$G$}{G} Symmetry: Unbroken",
+        "\\texorpdfstring{$G$}{G} Symmetry: Spontaneously Broken",
+        "Anomalous \\texorpdfstring{$G$}{G} Symmetry",
+        "Fibonacci",
+        "Fibonacci: Reducible Case",
+        "\\texorpdfstring{$\\Z_2$}{Z2} Tambara-Yamagami",
+        "A Systematic Approach to Study",
+        "Representation Theory and the Symmetry TQFT",
+        "The Dual Category",
+        "Weak Hopf Algebras from the Symmetry TQFT",
+        "Multiplets",
+        "Quivers from Representations",
+        "Invertible Symmetry",
+        "\\texorpdfstring{$G$}{G} Symmetry: Unbroken",
+        "\\texorpdfstring{$G$}{G} Symmetry: Spontaneously Broken",
+        "Anomalous \\texorpdfstring{$G$}{G} Symmetry",
+        "No Symmetry",
+        "Fibonacci",
+        "Application: Tricritical Ising \\texorpdfstring{$+ \\;\\phi_{2,1}$}{plus phi21}",
+        "\\texorpdfstring{$\\Z_2$}{Z2} Tambara-Yamagami",
+        "Application: Tricritical Ising \\texorpdfstring{$- \\;\\phi_{1,3}$}{minus phi13}",
+        "\\texorpdfstring{$su(2)_k$}{su2k}",
+        "Application: \\texorpdfstring{$WZW_{su(2)_k}  -  J\\bar{J}$}{SU(2)k WZW minus JbarJ}",
+        "Selection Rules",
+        "Selection Rules from Fibonacci",
+        "Selection Rules from \\texorpdfstring{$\\Z_2$}{Z2} Tambara-Yamagami",
+        "Acknowledgements",
+        "Fusion Categories and their Module Categories",
+        "Fusion Categories",
+        "Module Categories",
+        "Weak Hopf Algebras",
+        "Axioms of a Weak Hopf Algebra",
+        "\\texorpdfstring{$C^*$}{Cstar}-Weak Hopf Algebras",
+        "Modules and Representation Categories"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "main.tex",
+            "line": 194
+          }
+        ],
+        "Module Categories": [
+          {
+            "path": "main.tex",
+            "line": 1323
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [
+        "2408.11045 v3 [main.tex]: missing bibliography: references"
+      ],
+      "meta_sha256": "a93e889b50b29b9139e61f1b923aee58ee09764ca83b1d7853e96fddabea9711"
+    },
+    {
+      "arxiv_id": "2408.11047",
+      "version": 1,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 1,
+      "used_tex_files": 1,
+      "unused_tex_files": 0,
+      "bib_files": [
+        "references.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 232,
+        "sentence": 232,
+        "heading": 48,
+        "list": 4,
+        "item": 14,
+        "figure": 11,
+        "block_formula": 106
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Application domains for quantum anomaly detection",
+        "Quantum algorithms and quantum advantage",
+        "Encoding data with quantum systems",
+        "From bits to qubits",
+        "Encoding bits into qubits",
+        "Qudits",
+        "Qumodes (Continuous Variables)",
+        "Operations in the frame of Continuous Variables",
+        "Embedding into QUBO problems",
+        "Processing quantum information with quantum computers",
+        "Circuital model",
+        "Adiabatic quantum model",
+        "Emulation of quantum computing resources by High-Performance Computing",
+        "Generalization of neural networks in quantum circuits",
+        "Variational approach",
+        "Neuron into qubits",
+        "Quantum supervised learning",
+        "Quantum feed-forward Neural Network for binary decisions",
+        "Quantum restricted Boltzmann Machine",
+        "Neural networks in Continuous Variables",
+        "CV neural networks for fraud detection",
+        "Potential advantages of CV neural networks",
+        "Classification with qudits",
+        "The DMKDC circuit",
+        "Classical and Quantum Support Vector Machines",
+        "Kernel models",
+        "From hard to soft margins",
+        "Quantum advantage due to HHL algorithm",
+        "Natively quantum kernel methods",
+        "Kernel methods applied to continuous variables",
+        "Quantum unsupervised learning",
+        "QGAN for anomaly detection",
+        "Training the NNs as competitors",
+        "Quantum variational circuit for generative models",
+        "Other approaches to quantum anomaly detection by unsupervised learning methods",
+        "Quantum auto-encoders",
+        "Amplitude estimation-based method",
+        "Natively quantum kernels and hardware benchmarking",
+        "Quantum Approximate Optimization Algorithm",
+        "The MaxCut problem",
+        "QAOA formulation",
+        "Quantum reinforcement learning",
+        "Quantum adaptation algorithm",
+        "Concluding remarks",
+        "The HHL algorithm",
+        "Distance between two hyperplanes"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "main.tex",
+            "line": 178
+          }
+        ],
+        "Concluding remarks": [
+          {
+            "path": "main.tex",
+            "line": 1549
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "db9102fbc71947f88ff7f0f881f51771aa80639fb5ade568275ed4dd2b16b29e"
+    },
+    {
+      "arxiv_id": "2408.11047",
+      "version": 2,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 1,
+      "used_tex_files": 1,
+      "unused_tex_files": 0,
+      "bib_files": [],
+      "reference_blocks": 1,
+      "bibitems": 198,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 233,
+        "sentence": 233,
+        "heading": 48,
+        "list": 4,
+        "item": 14,
+        "figure": 12,
+        "block_formula": 106
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Application domains for quantum anomaly detection",
+        "Quantum algorithms and quantum advantage",
+        "Encoding data with quantum systems",
+        "From bits to qubits",
+        "Encoding bits into qubits",
+        "Qudits",
+        "Qumodes (Continuous Variables)",
+        "Operations in the frame of Continuous Variables",
+        "Embedding into QUBO problems",
+        "Processing quantum information with quantum computers",
+        "Circuital model",
+        "Adiabatic quantum model",
+        "Emulation of quantum computing resources by High-Performance Computing",
+        "Generalization of neural networks in quantum circuits",
+        "Variational approach",
+        "Neurons into qubits",
+        "Quantum supervised learning",
+        "Quantum feed-forward Neural Network for binary decisions",
+        "Quantum restricted Boltzmann Machine",
+        "Neural networks in Continuous Variables",
+        "CV neural networks for fraud detection",
+        "Potential advantages of CV neural networks",
+        "Classification with qudits",
+        "The DMKDC circuit",
+        "Classical and Quantum Support Vector Machines",
+        "Kernel models",
+        "From hard to soft margins",
+        "Quantum advantage due to HHL algorithm",
+        "Natively quantum kernel methods",
+        "Kernel methods applied to continuous variables",
+        "Quantum unsupervised learning",
+        "QGAN for anomaly detection",
+        "Training the NNs as competitors",
+        "Quantum variational circuit for generative models",
+        "Other approaches to quantum anomaly detection by unsupervised learning methods",
+        "Quantum auto-encoders",
+        "Amplitude estimation-based method",
+        "Natively quantum kernels and hardware benchmarking",
+        "Quantum Approximate Optimization Algorithm",
+        "The MaxCut problem",
+        "QAOA formulation",
+        "Quantum reinforcement learning",
+        "Quantum adaptation algorithm",
+        "Concluding remarks",
+        "The HHL algorithm",
+        "Distance between two hyperplanes"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "main.tex",
+            "line": 178
+          }
+        ],
+        "Concluding remarks": [
+          {
+            "path": "main.tex",
+            "line": 1595
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "ef4c4bb16fa196b349478183bcdaf012077a9904668fae79e3121de3c7543f1b"
+    },
+    {
+      "arxiv_id": "2408.11047",
+      "version": 3,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 1,
+      "used_tex_files": 1,
+      "unused_tex_files": 0,
+      "bib_files": [],
+      "reference_blocks": 1,
+      "bibitems": 198,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 233,
+        "sentence": 233,
+        "heading": 48,
+        "list": 4,
+        "item": 14,
+        "figure": 12,
+        "block_formula": 106
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Application domains for quantum anomaly detection",
+        "Quantum algorithms and quantum advantage",
+        "Encoding data with quantum systems",
+        "From bits to qubits",
+        "Encoding bits into qubits",
+        "Qudits",
+        "Qumodes (Continuous Variables)",
+        "Operations in the frame of Continuous Variables",
+        "Embedding into QUBO problems",
+        "Processing quantum information with quantum computers",
+        "Circuital model",
+        "Adiabatic quantum model",
+        "Emulation of quantum computing resources by High-Performance Computing",
+        "Generalization of neural networks in quantum circuits",
+        "Variational approach",
+        "Neurons into qubits",
+        "Quantum supervised learning",
+        "Quantum feed-forward Neural Network for binary decisions",
+        "Quantum restricted Boltzmann Machine",
+        "Neural networks in Continuous Variables",
+        "CV neural networks for fraud detection",
+        "Potential advantages of CV neural networks",
+        "Classification with qudits",
+        "The DMKDC circuit",
+        "Classical and Quantum Support Vector Machines",
+        "Kernel models",
+        "From hard to soft margins",
+        "Quantum advantage due to HHL algorithm",
+        "Natively quantum kernel methods",
+        "Kernel methods applied to continuous variables",
+        "Quantum unsupervised learning",
+        "QGAN for anomaly detection",
+        "Training the NNs as competitors",
+        "Quantum variational circuit for generative models",
+        "Other approaches to quantum anomaly detection by unsupervised learning methods",
+        "Quantum auto-encoders",
+        "Amplitude estimation-based method",
+        "Natively quantum kernels and hardware benchmarking",
+        "Quantum Approximate Optimization Algorithm",
+        "The MaxCut problem",
+        "QAOA formulation",
+        "Quantum reinforcement learning",
+        "Quantum adaptation algorithm",
+        "Concluding remarks",
+        "The HHL algorithm",
+        "Distance between two hyperplanes"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "main.tex",
+            "line": 178
+          }
+        ],
+        "Concluding remarks": [
+          {
+            "path": "main.tex",
+            "line": 1595
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "0911d997e9ea19ce9619bdaea094a84f74c0d02c240474e70e5879bdabed8fa5"
+    },
+    {
+      "arxiv_id": "2408.11048",
+      "version": 1,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 2,
+      "used_tex_files": 2,
+      "unused_tex_files": 0,
+      "bib_files": [
+        "example.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 63,
+        "sentence": 63,
+        "heading": 25,
+        "figure": 16,
+        "list": 2,
+        "item": 8,
+        "block_formula": 3
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Work",
+        "Background",
+        "Large-Scale Motion Dataset Collection",
+        "Piano Playing without Human Fingering Labels",
+        "Analysis of Specialist RL Agents",
+        "RP1M Dataset",
+        "Benchmarking Results",
+        "Limitations \\& Conclusion",
+        "Appendix",
+        "RP1M Dataset Collection Details",
+        "Reward formulation",
+        "Training details",
+        "Observation Space",
+        "Training Algorithm \\& Hyperparameters",
+        "Computational resources",
+        "MuJoCo XLA Implementation",
+        "Multitask Benchmarking Details",
+        "Baselines and hyperparameters",
+        "BC",
+        "IBC",
+        "BC-RNN",
+        "Diffusion Policy",
+        "Training and evaluation"
+      ],
+      "checked_heading_anchors": {
+        "Related Work": [
+          {
+            "path": "main.tex",
+            "line": 101
+          }
+        ],
+        "Background": [
+          {
+            "path": "main.tex",
+            "line": 161
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "44dcfeb78aa9d6044f5deb249d0dcc05b201d7d8402a85874899b6567e1d78f6"
+    },
+    {
+      "arxiv_id": "2408.11048",
+      "version": 2,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 2,
+      "used_tex_files": 2,
+      "unused_tex_files": 0,
+      "bib_files": [
+        "example.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 67,
+        "sentence": 67,
+        "heading": 25,
+        "figure": 15,
+        "list": 2,
+        "item": 8,
+        "block_formula": 3
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Work",
+        "Background",
+        "Large-Scale Motion Dataset Collection",
+        "Piano Playing without Human Fingering Labels",
+        "Analysis of Specialist RL Agents",
+        "RP1M Dataset",
+        "Benchmarking Results",
+        "Limitations \\& Conclusion",
+        "Appendix",
+        "More Related Work",
+        "RP1M Dataset Collection Details",
+        "Reward Formulation",
+        "Training Details",
+        "Observation Space",
+        "Training Algorithm \\& Hyperparameters",
+        "Computational Resources",
+        "MuJoCo XLA Implementation",
+        "Multitask Benchmarking Details",
+        "Baselines and Hyperparameters",
+        "Behavior Cloning",
+        "BeT",
+        "Diffusion Policy",
+        "Training and Evaluation"
+      ],
+      "checked_heading_anchors": {
+        "Related Work": [
+          {
+            "path": "main.tex",
+            "line": 104
+          }
+        ],
+        "Background": [
+          {
+            "path": "main.tex",
+            "line": 167
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "75e72de012e8df2a933c97f211cdebb3f2681f0cb20ca31ecb823d7754c812e6"
+    },
+    {
+      "arxiv_id": "2408.11049",
+      "version": 1,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 16,
+      "used_tex_files": 7,
+      "unused_tex_files": 9,
+      "bib_files": [
+        "references.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 61,
+        "sentence": 61,
+        "heading": 20,
+        "figure": 8,
+        "list": 4,
+        "item": 10,
+        "block_formula": 4
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Work",
+        "Theoretical Analysis",
+        "Mathematical Formulation of Speedup",
+        "Factors Affecting Speculative Decoding Speedup",
+        "\\textit{{1. Draft to Target Cost Ratio \\(({T_D}/{T_T})\\) :}}",
+        "\\textit{{2. Verification to Target Decoding Cost Ratio \\(\\left( T_V(\\gamma)/T_T\\right)\\) :}}",
+        "\\textit{{3. The expected generation length $(\\Omega(\\gamma, \\alpha))$:}}",
+        "Speculative Decoding Speedup Analysis",
+        "Factors Affecting \\(S_\\text{inflection}\\):",
+        "Draft Model Design",
+        "{Self-Speculation.}",
+        "{Standalone GQA Draft Models.}",
+        "Experiments",
+        "Experimental Setup",
+        "System Implementation",
+        "Optimized Group Query Attention:",
+        "Results",
+        "Conclusion"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "Sections/introduction.tex",
+            "line": 1
+          }
+        ],
+        "Conclusion": [
+          {
+            "path": "Sections/conclusion.tex",
+            "line": 1
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "94af4ceee70b76780d2a808e9796d108425803180a4f69efe537468b4c791941"
+    },
+    {
+      "arxiv_id": "2408.11049",
+      "version": 2,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 16,
+      "used_tex_files": 8,
+      "unused_tex_files": 8,
+      "bib_files": [
+        "references.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 63,
+        "sentence": 63,
+        "heading": 22,
+        "figure": 9,
+        "list": 4,
+        "item": 10,
+        "block_formula": 4
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Work",
+        "Theoretical Analysis",
+        "Mathematical Formulation of Speedup",
+        "Factors Affecting Speculative Decoding Speedup",
+        "\\textit{{1. Draft to Target Cost Ratio \\(({T_D}/{T_T})\\) :}}",
+        "\\textit{{2. Verification to Target Decoding Cost Ratio \\(\\left( T_V(\\gamma)/T_T\\right)\\) :}}",
+        "\\textit{{3. The expected generation length $(\\Omega(\\gamma, \\alpha))$:}}",
+        "Speculative Decoding Speedup Analysis",
+        "Factors Affecting \\(S_\\text{inflection}\\):",
+        "Draft Model Design",
+        "{Self-Speculation.}",
+        "{Standalone GQA Draft Models.}",
+        "Experiments",
+        "Experimental Setup",
+        "System Implementation",
+        "Optimized Group Query Attention:",
+        "Results",
+        "Conclusion",
+        "Appendix",
+        "Additional Results"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "Sections/introduction.tex",
+            "line": 1
+          }
+        ],
+        "Conclusion": [
+          {
+            "path": "Sections/conclusion.tex",
+            "line": 1
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "27fce7a0ea5a87ae850c26d7392f9f8361dbfa66297b44f6e1515e29d21bcca8"
+    },
+    {
+      "arxiv_id": "2408.11049",
+      "version": 3,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 16,
+      "used_tex_files": 8,
+      "unused_tex_files": 8,
+      "bib_files": [
+        "references.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 62,
+        "sentence": 62,
+        "heading": 22,
+        "figure": 9,
+        "list": 4,
+        "item": 10,
+        "block_formula": 4
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Work",
+        "Theoretical Analysis",
+        "Mathematical Formulation of Speedup",
+        "Factors Affecting Speculative Decoding Speedup",
+        "\\textit{{1. Draft to Target Cost Ratio \\(({T_D}/{T_T})\\) :}}",
+        "\\textit{{2. Verification to Target Decoding Cost Ratio \\(\\left( T_V(\\gamma)/T_T\\right)\\) :}}",
+        "\\textit{{3. The expected generation length $(\\Omega(\\gamma, \\alpha))$:}}",
+        "Speculative Decoding Speedup Analysis",
+        "Factors Affecting \\(S_\\text{inflection}\\):",
+        "Draft Model Design",
+        "{Self-Speculation.}",
+        "{Standalone GQA Draft Models.}",
+        "Experiments",
+        "Experimental Setup",
+        "System Implementation",
+        "Optimized Group Query Attention:",
+        "Results",
+        "Conclusion",
+        "Appendix",
+        "Additional Results"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "Sections/introduction.tex",
+            "line": 1
+          }
+        ],
+        "Conclusion": [
+          {
+            "path": "Sections/conclusion.tex",
+            "line": 1
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "53945974c521133507e27ff7b3d284b1bd0654d7437350f21da0b35735920f84"
+    },
+    {
+      "arxiv_id": "2408.11049",
+      "version": 4,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 14,
+      "used_tex_files": 8,
+      "unused_tex_files": 6,
+      "bib_files": [
+        "iclr2025_conference.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 82,
+        "sentence": 82,
+        "heading": 25,
+        "figure": 16,
+        "list": 2,
+        "item": 5,
+        "block_formula": 5
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Works",
+        "Theoretical Analysis",
+        "Speculative Decoding Speedup Analysis",
+        "KV Cache Bottleneck Enables Speculative Decoding Speedup",
+        "Compressed KV Cache Enables More Efficient Speculation",
+        "MagicDec",
+        "General Formulation of Speedup with Compressed KV-based drafting",
+        "Draft Model Size Selection",
+        "Draft KV Budget Selection",
+        "Comparative study on KV selection strategies",
+        "Evaluations",
+        "End-to-End Speedup",
+        "Comparing Different KV Compression Methods",
+        "Ablation Study",
+        "Conclusion And Limitation",
+        "Acknowledgements",
+        "Appendix",
+        "System Implementation",
+        "Results of Various Batch Size and Context Length on A100",
+        "Comparison With MLC-LLM Results",
+        "Further SnapKV and StreamingLLM Results",
+        "Results of Qwen and Mistral Models",
+        "TinyLlama1.1B-Llama2-7B-32K Results"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "Sections/introduction.tex",
+            "line": 1
+          },
+          {
+            "path": "Sections/introduction_new.tex",
+            "line": 33
+          },
+          {
+            "path": "Sections/intro_ranajoy.tex",
+            "line": 1
+          }
+        ],
+        "Conclusion And Limitation": [
+          {
+            "path": "Sections/conclusion.tex",
+            "line": 1
+          }
+        ],
+        "Acknowledgements": [
+          {
+            "path": "Sections/conclusion.tex",
+            "line": 4
+          }
+        ],
+        "Appendix": [
+          {
+            "path": "main.tex",
+            "line": 115
+          },
+          {
+            "path": "ICLR_2025_Template/main_ranajoy.tex",
+            "line": 97
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "7357b5f2d96e1c26a2758e966a3e762120d0d38ad46c0a79ffd7e850e050d656"
+    },
+    {
+      "arxiv_id": "2408.11049",
+      "version": 5,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 14,
+      "used_tex_files": 8,
+      "unused_tex_files": 6,
+      "bib_files": [
+        "iclr2025_conference.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 82,
+        "sentence": 82,
+        "heading": 25,
+        "figure": 16,
+        "list": 2,
+        "item": 5,
+        "block_formula": 5
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Works",
+        "Theoretical Analysis",
+        "Speculative Decoding Speedup Analysis",
+        "KV Cache Bottleneck Enables Speculative Decoding Speedup",
+        "Compressed KV Cache Enables More Efficient Speculation",
+        "MagicDec",
+        "General Formulation of Speedup with Compressed KV-based drafting",
+        "Draft Model Size Selection",
+        "Draft KV Budget Selection",
+        "Comparative study on KV selection strategies",
+        "Evaluations",
+        "End-to-End Speedup",
+        "Comparing Different KV Compression Methods",
+        "Ablation Study",
+        "Conclusion And Limitation",
+        "Acknowledgements",
+        "Appendix",
+        "System Implementation",
+        "Results of Various Batch Size and Context Length on A100",
+        "Comparison With MLC-LLM Results",
+        "Further SnapKV and StreamingLLM Results",
+        "Results of Qwen and Mistral Models",
+        "TinyLlama1.1B-Llama2-7B-32K Results"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "Sections/introduction.tex",
+            "line": 1
+          },
+          {
+            "path": "Sections/introduction_new.tex",
+            "line": 33
+          },
+          {
+            "path": "Sections/intro_ranajoy.tex",
+            "line": 1
+          }
+        ],
+        "Conclusion And Limitation": [
+          {
+            "path": "Sections/conclusion.tex",
+            "line": 1
+          }
+        ],
+        "Acknowledgements": [
+          {
+            "path": "Sections/conclusion.tex",
+            "line": 4
+          }
+        ],
+        "Appendix": [
+          {
+            "path": "main.tex",
+            "line": 115
+          },
+          {
+            "path": "ICLR_2025_Template/main_ranajoy.tex",
+            "line": 97
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "bdf0e09105f74c8973573b227efde29084d08deed80a821093d222717f864ae4"
+    },
+    {
+      "arxiv_id": "2408.11051",
+      "version": 1,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 6,
+      "used_tex_files": 6,
+      "unused_tex_files": 0,
+      "bib_files": [
+        "aaai25.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 52,
+        "sentence": 52,
+        "heading": 32,
+        "figure": 9,
+        "list": 3,
+        "item": 7,
+        "block_formula": 8
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Works",
+        "Vision-and-Language Navigation",
+        "Multimodal Large Language Models",
+        "Data Augmentation in Vision-and-Language Navigation",
+        "Method",
+        "Task Formulation",
+        "FLAME Architecture",
+        "Strided Cross-Attention",
+        "Action Prediction",
+        "Three-Phase Tuning for Navigation",
+        "Single Perception Tuning",
+        "Multiple Perception Tuning",
+        "End-to-End Navigation Tuning",
+        "Synthetic Data Generation",
+        "Street View Caption Generation",
+        "Trajectory Summary Generation",
+        "Rationale Generation for VLN Datasets",
+        "Experiments",
+        "Experiment Setup",
+        "Datasets",
+        "Metrics",
+        "Implementation Details",
+        "Comparison with SOTAs",
+        "Reasoning Performance",
+        "Metric Calculation",
+        "Analyses",
+        "Effect of Strided Cross Attention",
+        "Effectiveness of Three-Phase Tuning Technique",
+        "Qualitative Analysis of Navigation",
+        "Conclusion"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "sec/1_intro.tex",
+            "line": 1
+          }
+        ],
+        "Conclusion": [
+          {
+            "path": "sec/5_conclusion.tex",
+            "line": 1
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "8b931af52ecc0eac78986a5179d2c9665286ee8b556ebed19e04b5864c44e945"
+    },
+    {
+      "arxiv_id": "2408.11051",
+      "version": 2,
+      "status": "ok",
+      "control": false,
+      "root": "aaai25.tex",
+      "total_tex_files": 1,
+      "used_tex_files": 1,
+      "unused_tex_files": 0,
+      "bib_files": [
+        "aaai25.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 54,
+        "sentence": 54,
+        "heading": 33,
+        "figure": 9,
+        "list": 3,
+        "item": 7,
+        "block_formula": 10
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Works",
+        "Vision-and-Language Navigation",
+        "Multimodal Large Language Models",
+        "Data Augmentation in Vision-and-Language Navigation",
+        "Method",
+        "Task Formulation",
+        "FLAME Architecture",
+        "Strided Cross-Attention",
+        "Action Prediction",
+        "Three-Phase Tuning for Navigation",
+        "Single Perception Tuning",
+        "Multiple Perception Tuning",
+        "End-to-End Navigation Tuning",
+        "Synthetic Data Generation",
+        "Street View Caption Generation",
+        "Route Summary Generation",
+        "Rationale Generation for VLN Datasets",
+        "Experiments",
+        "Experiment Setup",
+        "Datasets",
+        "Metrics",
+        "Implementation Details",
+        "Comparison with SOTAs",
+        "Reasoning Performance",
+        "Metric Calculation",
+        "Analyses",
+        "Effect of Strided Cross Attention",
+        "Effectiveness of Three-Phase Tuning Technique",
+        "Qualitative Analysis of Navigation",
+        "Conclusion",
+        "Acknowledgments"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "aaai25.tex",
+            "line": 131
+          }
+        ],
+        "Conclusion": [
+          {
+            "path": "aaai25.tex",
+            "line": 449
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "6e65d18c642bb536bee3eae49235a4b430aca19c03fbc3935202ce840aa05b1f"
+    },
+    {
+      "arxiv_id": "2408.11052",
+      "version": 1,
+      "status": "ok",
+      "control": false,
+      "root": "neurips_2020.tex",
+      "total_tex_files": 2,
+      "used_tex_files": 2,
+      "unused_tex_files": 0,
+      "bib_files": [
+        "references.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 85,
+        "sentence": 85,
+        "heading": 36,
+        "figure": 14,
+        "block_formula": 2,
+        "list": 1,
+        "item": 8
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Work",
+        "Goal-Conditioned Reinforcement Learning",
+        "Accelerating Deep Reinforcement Learning",
+        "Self-Supervised RL and Intrinsic Motivation",
+        "RL Benchmarks",
+        "Self-Supervision through Goal-Conditioned Reinforcement Learning",
+        "Contrastive Representations for Goal-Reaching",
+        "Policy Learning",
+        "New Implementation and Benchmark",
+        "Training speedup from environment vectorization on a single GPU",
+        "Benchmark",
+        "Empirical Experiments with \\texttt{JaxGCRL}",
+        "Contrastive RL design choices",
+        "Energy functions",
+        "Contrastive losses",
+        "Architecture scaling.",
+        "Layer Normalization.",
+        "Experimental Setup",
+        "Energy Function Comparison",
+        "Contrastive losses comparison",
+        "Scaling the Architecture",
+        "Effect of layer normalization",
+        "Scaling the data",
+        "Benchmark baselines",
+        "Conclusion",
+        "Limitations.",
+        "Acknowledgments.",
+        "Experimental Details",
+        "Speedup comparison across various numbers of parallel environments",
+        "Energy functions",
+        "Technical details",
+        "Environment details",
+        "Benchmark parameters",
+        "Random Goals"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "neurips_2020.tex",
+            "line": 129
+          }
+        ],
+        "Random Goals": [
+          {
+            "path": "neurips_2020.tex",
+            "line": 1331
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "c770413c21aea5c759c3bdb4ed8144e035f839aaa3d636fce048bb41232baeae"
+    },
+    {
+      "arxiv_id": "2408.11052",
+      "version": 2,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 2,
+      "used_tex_files": 2,
+      "unused_tex_files": 0,
+      "bib_files": [
+        "references.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 102,
+        "sentence": 102,
+        "heading": 50,
+        "figure": 13,
+        "list": 3,
+        "item": 8,
+        "block_formula": 3
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Work",
+        "Goal-Conditioned Reinforcement Learning",
+        "Accelerating Deep Reinforcement Learning",
+        "Self-Supervised RL",
+        "RL Benchmarks",
+        "Preliminaries",
+        "Contrastive Critic Learning",
+        "Policy Learning",
+        "\\texttt{JaxGCRL}: A New Benchmark and Implementation",
+        "\\texttt{JaxGCRL} speedup on a single GPU",
+        "\\texttt{JaxGCRL} Environments in the Benchmark",
+        "Reacher~\\citep{brockman2022openai}.",
+        "Half Cheetah~\\citep{wawrzynskiCatLikeRobotRealTime2009}.",
+        "Pusher~\\citep{brockman2022openai}.",
+        "Ant~\\citep{schulman2015highdimensional}.",
+        "Ant Maze~\\citep{fu2020d4rl}.",
+        "Ant Soccer~\\citep{tunyasuvunakool2020}.",
+        "Ant Push~\\citep{nachum2018data}.",
+        "Humanoid~\\citep{tassa2012synthesis}.",
+        "Contrastive RL design choices",
+        "Energy functions.",
+        "Contrastive losses.",
+        "Architecture scaling.",
+        "Examples of Fast Experiments Possible with the New Benchmark",
+        "Experimental Setup",
+        "\\texttt{JaxGCRL} benchmark results",
+        "Contrastive objectives and energy functions comparison",
+        "Scaling the Architecture",
+        "Scaling the data",
+        "Gradient updates to data ratio",
+        "Key takeaways from empirical experiments:",
+        "Conclusion",
+        "Limitations.",
+        "Reproducibility Statement.",
+        "Additional Results",
+        "Speedup comparison across various numbers of parallel environments",
+        "Energy functions and contrastive objectives",
+        "Energy functions results",
+        "Benchmark performance",
+        "Hindsight experience replay details",
+        "Technical details",
+        "Environment details",
+        "Benchmark parameters",
+        "Random Goals",
+        "Proofs",
+        "Q-function is probability",
+        "Failed Experiments",
+        "Pseudocode"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "main.tex",
+            "line": 173
+          }
+        ],
+        "Random Goals": [
+          {
+            "path": "main.tex",
+            "line": 1480
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "9d7c32724ce21e1ef5027323a98468f7ce625baa2cfd0aa3538fcb837247bba6"
+    },
+    {
+      "arxiv_id": "2408.11052",
+      "version": 3,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 2,
+      "used_tex_files": 2,
+      "unused_tex_files": 0,
+      "bib_files": [
+        "references.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 107,
+        "sentence": 107,
+        "heading": 53,
+        "figure": 15,
+        "list": 3,
+        "item": 8,
+        "block_formula": 3
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Work",
+        "Goal-Conditioned Reinforcement Learning",
+        "Accelerating Deep Reinforcement Learning",
+        "Self-Supervised RL",
+        "RL Benchmarks",
+        "Preliminaries",
+        "Contrastive Critic Learning",
+        "Policy Learning",
+        "\\texttt{JaxGCRL}: A New Benchmark and Implementation",
+        "\\texttt{JaxGCRL} speedup on a single GPU",
+        "\\texttt{JaxGCRL} Environments in the Benchmark",
+        "Reacher~\\citep{brockman2022openai}.",
+        "Half Cheetah~\\citep{wawrzynskiCatLikeRobotRealTime2009}.",
+        "Pusher~\\citep{brockman2022openai}.",
+        "Ant~\\citep{schulman2016highdimensionala}.",
+        "Ant Maze~\\citep{fu2021d4rl}.",
+        "Ant Soccer~\\citep{tunyasuvunakool2020}.",
+        "Ant Push~\\citep{fu2021d4rl}.",
+        "Humanoid~\\citep{tassa2012synthesis}.",
+        "Contrastive RL design choices",
+        "Energy functions.",
+        "Contrastive losses.",
+        "Architecture scaling.",
+        "Examples of Fast Experiments Possible with the New Benchmark",
+        "Experimental Setup",
+        "\\texttt{JaxGCRL} benchmark results",
+        "Contrastive objectives and energy functions comparison",
+        "Scaling the Architecture",
+        "Scaling the data",
+        "Gradient updates to data ratio",
+        "Key takeaways from empirical experiments:",
+        "Conclusion",
+        "Limitations.",
+        "Reproducibility Statement.",
+        "Acknowledgments.",
+        "Additional Results",
+        "Speedup comparison across various numbers of parallel environments",
+        "Energy functions and contrastive objectives",
+        "Energy functions results",
+        "Benchmark performance",
+        "Hindsight experience replay details",
+        "\\rebuttal{Scaled-up CRL architecture in data-rich setting}",
+        "Technical details",
+        "Environment details",
+        "\\rebuttal{Benchmark details}",
+        "Benchmark parameters",
+        "Random Goals",
+        "Proofs",
+        "Q-function is probability",
+        "Failed Experiments",
+        "Pseudocode"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "main.tex",
+            "line": 173
+          }
+        ],
+        "Random Goals": [
+          {
+            "path": "main.tex",
+            "line": 1505
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "2e488a435ca5d5ff85ba54e1d9b6de7455cba502c0870e8a5fa29b1d9068dd3c"
+    },
+    {
+      "arxiv_id": "2408.11052",
+      "version": 4,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 2,
+      "used_tex_files": 2,
+      "unused_tex_files": 0,
+      "bib_files": [
+        "references.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 107,
+        "sentence": 107,
+        "heading": 53,
+        "figure": 15,
+        "list": 3,
+        "item": 8,
+        "block_formula": 3
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Work",
+        "Goal-Conditioned Reinforcement Learning",
+        "Accelerating Deep Reinforcement Learning",
+        "Self-Supervised RL",
+        "RL Benchmarks",
+        "Preliminaries",
+        "Contrastive Critic Learning",
+        "Policy Learning",
+        "\\texttt{JaxGCRL}: A New Benchmark and Implementation",
+        "\\texttt{JaxGCRL} speedup on a single GPU",
+        "\\texttt{JaxGCRL} Environments in the Benchmark",
+        "Reacher~\\citep{brockman2022openai}.",
+        "Half Cheetah~\\citep{wawrzynskiCatLikeRobotRealTime2009}.",
+        "Pusher~\\citep{brockman2022openai}.",
+        "Ant~\\citep{schulman2016highdimensionala}.",
+        "Ant Maze~\\citep{fu2021d4rl}.",
+        "Ant Soccer~\\citep{tunyasuvunakool2020}.",
+        "Ant Push~\\citep{fu2021d4rl}.",
+        "Humanoid~\\citep{tassa2012synthesis}.",
+        "Contrastive RL design choices",
+        "Energy functions.",
+        "Contrastive losses.",
+        "Architecture scaling.",
+        "Examples of Fast Experiments Possible with the New Benchmark",
+        "Experimental Setup",
+        "\\texttt{JaxGCRL} benchmark results",
+        "Contrastive objectives and energy functions comparison",
+        "Scaling the Architecture",
+        "Scaling the data",
+        "Gradient updates to data ratio",
+        "Key takeaways from empirical experiments:",
+        "Conclusion",
+        "Limitations.",
+        "Reproducibility Statement.",
+        "Acknowledgments.",
+        "Additional Results",
+        "Speedup comparison across various numbers of parallel environments",
+        "Energy functions and contrastive objectives",
+        "Energy functions results",
+        "Benchmark performance",
+        "Hindsight experience replay details",
+        "\\rebuttal{Scaled-up CRL architecture in data-rich setting}",
+        "Technical details",
+        "Environment details",
+        "\\rebuttal{Benchmark details}",
+        "Benchmark parameters",
+        "Random Goals",
+        "Proofs",
+        "Q-function is probability",
+        "Failed Experiments",
+        "Pseudocode"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "main.tex",
+            "line": 173
+          }
+        ],
+        "Random Goals": [
+          {
+            "path": "main.tex",
+            "line": 1505
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "fcfec9f6e7c5ea8c73409020b2e19cafacf84340c8d6bc87914bdb14c84a4aaa"
+    },
+    {
+      "arxiv_id": "2408.11053",
+      "version": 1,
+      "status": "ok",
+      "control": false,
+      "root": "conference_101719.tex",
+      "total_tex_files": 6,
+      "used_tex_files": 6,
+      "unused_tex_files": 0,
+      "bib_files": [],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 54,
+        "sentence": 54,
+        "heading": 13,
+        "list": 2,
+        "item": 15,
+        "figure": 5
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Benchmark Improvements",
+        "Specification-to-RTL Task Support",
+        "Support for In-Context Learning Examples",
+        "Support for Failure Classification",
+        "Other Infrastructural Improvements",
+        "Benchmark Evaluation",
+        "Impact of ICL on Pass Rates and Failures",
+        "Higher-Shot ICL Results",
+        "Failure Analysis",
+        "Conclusions",
+        "Acknowledgment"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "sections/intro.tex",
+            "line": 2
+          }
+        ],
+        "Conclusions": [
+          {
+            "path": "sections/conclusions.tex",
+            "line": 1
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [
+        "2408.11053 v1 [conference_101719.tex]: missing bibliography: ref"
+      ],
+      "meta_sha256": "78a2b35b5cc2426147f0eda1727cdb980231023116aa45e84a103bd6488dc357"
+    },
+    {
+      "arxiv_id": "2408.11053",
+      "version": 2,
+      "status": "ok",
+      "control": false,
+      "root": "conference_101719.tex",
+      "total_tex_files": 8,
+      "used_tex_files": 8,
+      "unused_tex_files": 0,
+      "bib_files": [
+        "ref.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 98,
+        "sentence": 98,
+        "heading": 18,
+        "list": 2,
+        "item": 15,
+        "block_formula": 1,
+        "figure": 7
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "VerilogEval v1 Revisited",
+        "VerilogEval v2 Improvements",
+        "Specification-to-RTL Task Support",
+        "Support for In-Context Learning Examples",
+        "Support for Failure Classification",
+        "Other Infrastructural Improvements",
+        "VerilogEval v2 Evaluation",
+        "Impact of ICL on Pass Rates and Failures",
+        "Increased In-Context Learning Examples",
+        "Case Study: Problem 9 and Problem 34",
+        "Aggregate Failure Analysis",
+        "Future Work",
+        "Agent-based Code Generation",
+        "Related Hardware Design Tasks",
+        "Conclusions",
+        "Acknowledgment"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "sections/intro.tex",
+            "line": 2
+          }
+        ],
+        "Conclusions": [
+          {
+            "path": "sections/conclusions.tex",
+            "line": 1
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "85fdf62b8823d97c6a88c35455778416168ef2cea65f0cccfdb32282a719a3ae"
+    },
+    {
+      "arxiv_id": "2408.11081",
+      "version": 1,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 50,
+      "used_tex_files": 49,
+      "unused_tex_files": 1,
+      "bib_files": [
+        "anthology.bib",
+        "references.bib",
+        "custom.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 183,
+        "sentence": 183,
+        "heading": 67,
+        "figure": 31,
+        "block_formula": 13
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Work",
+        "Code generation benchmarks.",
+        "Code evaluation metrics.",
+        "Functional Equivalence of Programs",
+        "The \\dataset~Dataset",
+        "Benchmark Construction",
+        "Semantic-Preserving Transformations",
+        "Rename Variables (RV) \\typetwo",
+        "Dead Code Insertion (DCI) \\typethree",
+        "Operand Swap (OS) \\typethree",
+        "Loop Transformation (LT) \\typefour",
+        "Semantic-Altering Transformations",
+        "Arithmetic Operators Misuse (AOM).",
+        "Dissimilar Code Selection (DCS).",
+        "Identity Operators Misuse (IOM).",
+        "Boolean Operators Misuse (BOM).",
+        "Logical Operators Misuse (LOM).",
+        "Comparison Operators Misuse (COM).",
+        "Experiments",
+        "Models",
+        "Llama 2~\\citep{touvron_llama_2023}",
+        "StarCoder~\\citep{li_starcoder_2023}",
+        "Code Llama~\\citep{roziere_code_2024}",
+        "RQ1: Match-based vs. LLM-based Metrics Performance",
+        "RQ2: Impact of Semantic Transformations",
+        "RQ3: Impact of Finetuning",
+        "Conclusion",
+        "Limitations",
+        "Details of Evaluation Metrics",
+        "Based on Lexical Overlap",
+        "ROUGE~\\citep{lin-2004-rouge}",
+        "BLEU~\\citep{papineni-etal-2002-bleu}",
+        "CodeBLEU~\\citep{ren_codebleu_2020}",
+        "CrystalBLEU~\\citep{eghbali_crystalbleu_2023}",
+        "Meteor~\\citep{denkowski-lavie-2014-meteor}",
+        "ChrF~\\citep{popovic-2015-chrf}",
+        "Based on Pre-trained LLMs",
+        "COMET~\\citep{rei-etal-2020-comet}",
+        "BERTScore~\\citep{zhang_bertscore_2020}",
+        "CodeBERTScore~\\citep{zhou_codebertscore_2023}",
+        "Based on Execution",
+        "Pass@$k$~\\citep{chen_evaluating_2021}",
+        "CodeScore~\\citep{dong_codescore_2023}",
+        "AvgPassRatio~\\citep{hendrycks_measuring_2021}",
+        "Details of Correlation Metrics",
+        "Kendall-Tau ($\\tau$)",
+        "Pearson ($r_p$)",
+        "Spearman ($r_s$)",
+        "Argument about Representing Functional Equivalence with Neural Networks",
+        "Training Details",
+        "Model Generate",
+        "Confidence Scores from LLMs",
+        "Finetuning Experiments",
+        "Low-rank Adaptation (LoRA;~\\citealt{hu_lora_2021})",
+        "Adaptive Low-rank Adaptation (AdaLoRA;~\\citealt{zhang_adalora_2023})",
+        "Prefix Tuning~\\citep{li-liang-2021-prefix}",
+        "Transformation Counts",
+        "Prompt Template",
+        "Additional Prompting Results",
+        "Execution-based Functional Correctness",
+        "\\dataset{} Transformation Examples",
+        "Other Works",
+        "Robustness against adversarial attacks.",
+        "Code Clone Detection and Code Obfuscation",
+        "Examples"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "source/01_introduction.tex",
+            "line": 1
+          }
+        ],
+        "Examples": [
+          {
+            "path": "source/appendix/prediction-examples/example.tex",
+            "line": 1
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "1a99fe2d02fbdde07ae0529102496c7e91871689f831453b0576f12909371d95"
+    },
+    {
+      "arxiv_id": "2408.11081",
+      "version": 2,
+      "status": "ok",
+      "control": false,
+      "root": "main.tex",
+      "total_tex_files": 52,
+      "used_tex_files": 51,
+      "unused_tex_files": 1,
+      "bib_files": [
+        "anthology.bib",
+        "references.bib",
+        "custom.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 201,
+        "sentence": 201,
+        "heading": 73,
+        "figure": 32,
+        "block_formula": 13
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Related Work",
+        "Code generation benchmarks.",
+        "Code evaluation metrics.",
+        "Functional Equivalence of Programs",
+        "The \\dataset~Dataset",
+        "Semantic-Preserving Transformations",
+        "Rename Variables (RV) \\typetwo",
+        "Dead Code Insertion (DCI) \\typethree",
+        "Operand Swap (OS) \\typethree",
+        "Loop Transformation (LT) \\typefour",
+        "Semantic-Altering Transformations",
+        "Arithmetic Operators Misuse (AOM).",
+        "Dissimilar Code Selection (DCS).",
+        "Identity Operators Misuse (IOM).",
+        "Boolean Operators Misuse (BOM).",
+        "Logical Operators Misuse (LOM).",
+        "Comparison Operators Misuse (COM).",
+        "Experiments",
+        "RQ1:",
+        "RQ2:",
+        "RQ3:",
+        "Models",
+        "RQ1: Match-based vs. LLM-based Metrics Performance",
+        "RQ2: Impact of Semantic Transformations",
+        "RQ3: Impact of Finetuning",
+        "Conclusion",
+        "Limitations",
+        "Acknowledgements",
+        "Details of Evaluation Metrics",
+        "Based on Lexical Overlap",
+        "ROUGE~\\citep{lin-2004-rouge}",
+        "BLEU~\\citep{papineni-etal-2002-bleu}",
+        "CodeBLEU~\\citep{ren_codebleu_2020}",
+        "CrystalBLEU~\\citep{eghbali_crystalbleu_2023}",
+        "Meteor~\\citep{denkowski-lavie-2014-meteor}",
+        "ChrF~\\citep{popovic-2015-chrf}",
+        "Based on Pre-trained LLMs",
+        "COMET~\\citep{rei-etal-2020-comet}",
+        "BERTScore~\\citep{zhang_bertscore_2020}",
+        "CodeBERTScore~\\citep{zhou_codebertscore_2023}",
+        "Based on Execution",
+        "Pass@$k$~\\citep{chen_evaluating_2021}",
+        "CodeScore~\\citep{dong_codescore_2023}",
+        "AvgPassRatio~\\citep{hendrycks_measuring_2021}",
+        "Details of Correlation Metrics",
+        "Kendall-Tau ($\\tau$)",
+        "Pearson ($r_p$)",
+        "Spearman ($r_s$)",
+        "Argument about Representing Functional Equivalence with Neural Networks",
+        "Training Details",
+        "Model Generate",
+        "Confidence Scores from LLMs",
+        "Finetuning Experiments",
+        "Low-rank Adaptation (LoRA;~\\citealt{hu2022lora})",
+        "Adaptive Low-rank Adaptation (AdaLoRA;~\\citealt{zhang_adalora_2023})",
+        "Prefix Tuning~\\citep{li-liang-2021-prefix}",
+        "Model Details",
+        "Llama2~\\citep{touvron_llama_2023}",
+        "StarCoder2~\\citep{lozhkov:starcoder-stack-2}",
+        "Code Llama~\\citep{roziere_code_2024}",
+        "Transformation Counts",
+        "Prompt Template",
+        "Additional Prompting Results",
+        "Execution-based Functional Correctness",
+        "\\dataset{} Transformation Examples",
+        "Other Work",
+        "Robustness against adversarial attacks.",
+        "Novelty of our approach compared to existing works",
+        "Motivation.",
+        "Code Clone Detection and Code Obfuscation",
+        "Examples"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "source/01_introduction.tex",
+            "line": 1
+          }
+        ],
+        "Examples": [
+          {
+            "path": "source/appendix/prediction-examples/example.tex",
+            "line": 1
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "ba76f266f6a1096c744039a6bf0c344cad08cb7570ab1cbf341a2e48f51c1e0d"
+    },
+    {
+      "arxiv_id": "2408.11111",
+      "version": 1,
+      "status": "ok",
+      "control": false,
+      "root": "passive_RB.tex",
+      "total_tex_files": 3,
+      "used_tex_files": 3,
+      "unused_tex_files": 0,
+      "bib_files": [],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 375,
+        "sentence": 375,
+        "heading": 41,
+        "block_formula": 163,
+        "list": 5,
+        "item": 18,
+        "figure": 4
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Main results",
+        "Notation",
+        "The passive randomized benchmarking protocol",
+        "Description of the protocol",
+        "Decay rates and fidelities",
+        "Details of the protocol",
+        "Estimation of particle loss rates",
+        "Analysis and guarantees",
+        "The RB signal",
+        "Choice of input state",
+        "Evaluation of the filter function",
+        "Sampling complexity",
+        "Discussion",
+        "Summary and open questions",
+        "Extensions of the protocol",
+        "Parallel work",
+        "Background",
+        "Representations of \\texorpdfstring{$\\SU(\\nmodes)$}{SU(m)}",
+        "Gelfand-Tsetlin patterns.",
+        "Dual GT patterns.",
+        "Symmetric irreps in \\texorpdfstring{$\\SU(\\nmodes)$}{SU(m)}.",
+        "Clebsch-Gordan coefficients.",
+        "Filtered randomized benchmarking",
+        "Filter functions.",
+        "Non-uniform sampling",
+        "Further notations",
+        "Passive RB with Fock states and measurements",
+        "Clebsch-Gordan decomposition of the reference representation",
+        "Filter function for passive RB with PNR measurements",
+        "Moments of the filter function for PNR measurement settings",
+        "A worked out example",
+        "Appendices",
+        "Littlewood-Richardson's rules",
+        "Proof of Proposition \\ref{prop:dimension_lambda_k}",
+        "Proof of Lemma \\ref{lem:weight_space_zero}",
+        "Proof of Lemma \\ref{lem:lambda_two_copies_decomp}",
+        "Passive RB with heterodyne measurement",
+        "Moments for the heterodyne measurement setting",
+        "Additional details on numerical experiments"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "passive_RB.tex",
+            "line": 159
+          }
+        ],
+        "Additional details on numerical experiments": [
+          {
+            "path": "passive_RB.tex",
+            "line": 3501
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [
+        "2408.11111 v1 [passive_RB.tex]: missing bibliography: ../CVs",
+        "2408.11111 v1 [passive_RB.tex]: missing bibliography: ../Math",
+        "2408.11111 v1 [passive_RB.tex]: missing bibliography: ../RB",
+        "2408.11111 v1 [passive_RB.tex]: missing bibliography: ../mk"
+      ],
+      "meta_sha256": "982e36d3791c725f9affdd0f74730e37b2fd83155b0554120dbc51e670e69402"
+    },
+    {
+      "arxiv_id": "2408.11111",
+      "version": 2,
+      "status": "ok",
+      "control": false,
+      "root": "passive_RB.tex",
+      "total_tex_files": 3,
+      "used_tex_files": 3,
+      "unused_tex_files": 0,
+      "bib_files": [],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 380,
+        "sentence": 380,
+        "heading": 41,
+        "block_formula": 163,
+        "list": 5,
+        "item": 18,
+        "figure": 4
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Main results",
+        "Notation",
+        "The passive randomized benchmarking protocol",
+        "Description of the protocol",
+        "Decay rates and fidelities",
+        "Details of the protocol",
+        "Estimation of particle loss rates",
+        "Analysis and guarantees",
+        "The RB signal",
+        "Choice of input state",
+        "Evaluation of the filter function",
+        "Sampling complexity",
+        "Discussion",
+        "Summary and open questions",
+        "Extensions of the protocol",
+        "Parallel work",
+        "Technical Background",
+        "Representations of \\texorpdfstring{$\\SU(\\nmodes)$}{SU(m)}",
+        "Gelfand-Tsetlin patterns.",
+        "Dual GT patterns.",
+        "Symmetric irreps in \\texorpdfstring{$\\SU(\\nmodes)$}{SU(m)}.",
+        "Clebsch-Gordan coefficients.",
+        "Filtered randomized benchmarking",
+        "Filter functions.",
+        "Non-uniform sampling",
+        "Further notations",
+        "Technical details and proofs",
+        "Clebsch-Gordan decomposition of the reference representation",
+        "Filter function for passive RB with PNR measurements",
+        "Moments of the filter function for PNR measurement settings",
+        "A worked out example",
+        "Appendices",
+        "Littlewood-Richardson's rules",
+        "Proof of Proposition \\ref{prop:dimension_lambda_k}",
+        "Proof of Lemma \\ref{lem:weight_space_zero}",
+        "Proof of Lemma \\ref{lem:lambda_two_copies_decomp}",
+        "Passive RB with heterodyne measurement",
+        "Moments for the heterodyne measurement setting",
+        "Additional details on numerical experiments"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "passive_RB.tex",
+            "line": 147
+          }
+        ],
+        "Additional details on numerical experiments": [
+          {
+            "path": "passive_RB.tex",
+            "line": 3498
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [
+        "2408.11111 v2 [passive_RB.tex]: missing bibliography: CVs",
+        "2408.11111 v2 [passive_RB.tex]: missing bibliography: Math",
+        "2408.11111 v2 [passive_RB.tex]: missing bibliography: RB",
+        "2408.11111 v2 [passive_RB.tex]: missing bibliography: mk"
+      ],
+      "meta_sha256": "7fb54b076cec1515d85cc7b4490fcf49d6eda04dbe8cd08bc668da8406d89a40"
+    },
+    {
+      "arxiv_id": "2408.11954",
+      "version": 1,
+      "status": "ok",
+      "control": false,
+      "root": "master.tex",
+      "total_tex_files": 101,
+      "used_tex_files": 81,
+      "unused_tex_files": 20,
+      "bib_files": [
+        "bib.bib"
+      ],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 715,
+        "sentence": 715,
+        "heading": 36,
+        "block_formula": 64,
+        "figure": 72,
+        "list": 115,
+        "item": 329
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Language",
+        "Syntax",
+        "Environments and stores",
+        "Dependencies",
+        "Collection semantics",
+        "Type system for data-flow analysis",
+        "Types",
+        "Basis and type environment",
+        "The type system",
+        "Soundness",
+        "Type rules for values",
+        "Agreement",
+        "Properties",
+        "Conclusion",
+        "discussion",
+        "Future work",
+        "Implementation of a type checker",
+        "Polymorphism",
+        "Extending references",
+        "Type inference",
+        "Extending with more language constructs",
+        "Collection Semantics",
+        "Pattern matching",
+        "number and boolean",
+        "variables",
+        "patterns",
+        "wildcard and fail",
+        "Extending $w$",
+        "Type system Judgement",
+        "$\\sigma$ function",
+        "Proofs of theorems and lemmas",
+        "History",
+        "Strengthening",
+        "Soundness"
+      ],
+      "checked_heading_anchors": {
+        "Introduction": [
+          {
+            "path": "sections/intro.tex",
+            "line": 3
+          }
+        ],
+        "Soundness": [
+          {
+            "path": "sections/appendix/proof.tex",
+            "line": 23
+          },
+          {
+            "path": "sections/Proof/index.tex",
+            "line": 3
+          }
+        ]
+      },
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "dbf7da68925da97469312269683fd9807bd2936d796360d3a55731f186688f77"
+    },
+    {
+      "arxiv_id": "2408.11059",
+      "version": 1,
+      "status": "no_source",
+      "control": true,
+      "root": null,
+      "total_tex_files": 0,
+      "used_tex_files": 0,
+      "unused_tex_files": 0,
+      "bib_files": [],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {},
+      "headings": [],
+      "checked_heading_anchors": {},
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "ce1751fc35e96ec199b31497b15752aa0df3b53c5d2253f5856a695868621479"
+    },
+    {
+      "arxiv_id": "2408.11176",
+      "version": 1,
+      "status": "ok",
+      "control": true,
+      "root": "UnirationalFib.tex",
+      "total_tex_files": 1,
+      "used_tex_files": 1,
+      "unused_tex_files": 0,
+      "bib_files": [],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {
+        "document": 1,
+        "paragraph": 72,
+        "sentence": 72,
+        "heading": 5,
+        "list": 6,
+        "item": 17,
+        "block_formula": 5
+      },
+      "headings": [
+        "Abstract",
+        "Introduction",
+        "Conventions",
+        "Beginning Definitions and Recollections.",
+        "Proof of The Main Theorems"
+      ],
+      "checked_heading_anchors": {},
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [
+        "2408.11176 v1 [UnirationalFib.tex]: missing bibliography: UnirationalFib"
+      ],
+      "meta_sha256": "4607df3fd53ae93c7eaf5da481d6141d6ae7c8999559591424454a2e4ceb80c2"
+    },
+    {
+      "arxiv_id": "2408.11176",
+      "version": 2,
+      "status": "not_found",
+      "control": true,
+      "root": null,
+      "total_tex_files": 0,
+      "used_tex_files": 0,
+      "unused_tex_files": 0,
+      "bib_files": [],
+      "reference_blocks": 0,
+      "bibitems": 0,
+      "node_counts": {},
+      "headings": [],
+      "checked_heading_anchors": {},
+      "reference_leak_candidates": [],
+      "checks": "pass",
+      "warnings": [],
+      "meta_sha256": "f62d0408cd76787b6aa20661b9a824aca0fcba9803fa46fa08b4ccfd1ef6bc3c"
+    }
+  ],
+  "corpus_inventory": {
+    "papers": 1000,
+    "versions": 1678,
+    "metadata_statuses": {
+      "ok": 1526,
+      "no_source": 148,
+      "not_found": 4
+    },
+    "papers_with_version_count_mismatch": 0,
+    "actual_bbl_files": 0,
+    "scope": "Kiểm kê metadata và tệp BBL; chỉ 349 tệp của mẫu 10 bài được đối chiếu kích thước/SHA-256."
+  },
+  "unit_tests": {
+    "c_passed": 98,
+    "suite_passed": 359,
+    "suite_seconds": 27.06,
+    "ruff_check": "pass",
+    "ruff_format": "62 files left unchanged"
+  }
+}
