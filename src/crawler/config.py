@@ -45,6 +45,9 @@ class Config:
     s2_only: bool = False  # U2: skip arXiv network calls and only backfill S2 references
     arxiv_min_idle_gap: float = 1.50  # v3.7: post-download idle floor after slow/heavy requests
     arxiv_socket_recycle_every: int = 120  # v3.7: recycle TCP session every 120 requests (0=off)
+    arxiv_jitter_max: float = 0.30  # v3.8: random Start-to-Start jitter 0..0.30s on arXiv
+    arxiv_proactive_cooldown_every_ids: int = 300  # v3.8: 60s breather every 300 active IDs (0=off)
+    arxiv_proactive_cooldown_seconds: float = 60.0  # v3.8: proactive breather duration (60s)
     arxiv_thermal_cooldown_seconds: float = (
         30.0  # v3.6: base cooldown step (30 -> 60 -> 90 -> 120s)
     )
@@ -106,6 +109,42 @@ class Config:
             except ValueError:
                 pass
 
+        jitter_raw = (
+            os.environ.get("CRAWLER_ARXIV_JITTER_MAX")
+            or local_vars.get("CRAWLER_ARXIV_JITTER_MAX")
+            or ""
+        )
+        arxiv_jitter_max = 0.30
+        if jitter_raw:
+            try:
+                arxiv_jitter_max = max(float(jitter_raw), 0.0)
+            except ValueError:
+                pass
+
+        proactive_every_raw = (
+            os.environ.get("CRAWLER_ARXIV_PROACTIVE_COOLDOWN_EVERY_IDS")
+            or local_vars.get("CRAWLER_ARXIV_PROACTIVE_COOLDOWN_EVERY_IDS")
+            or ""
+        )
+        arxiv_proactive_cooldown_every_ids = 300
+        if proactive_every_raw:
+            try:
+                arxiv_proactive_cooldown_every_ids = max(int(proactive_every_raw), 0)
+            except ValueError:
+                pass
+
+        proactive_sec_raw = (
+            os.environ.get("CRAWLER_ARXIV_PROACTIVE_COOLDOWN_SECONDS")
+            or local_vars.get("CRAWLER_ARXIV_PROACTIVE_COOLDOWN_SECONDS")
+            or ""
+        )
+        arxiv_proactive_cooldown_seconds = 60.0
+        if proactive_sec_raw:
+            try:
+                arxiv_proactive_cooldown_seconds = max(float(proactive_sec_raw), 0.0)
+            except ValueError:
+                pass
+
         backup_dir_raw = (
             os.environ.get("CRAWLER_BACKUP_DIR") or local_vars.get("CRAWLER_BACKUP_DIR") or ""
         ).strip()
@@ -159,6 +198,9 @@ class Config:
             "arxiv_min_interval": arxiv_min_interval,
             "arxiv_min_idle_gap": arxiv_min_idle_gap,
             "arxiv_socket_recycle_every": arxiv_socket_recycle_every,
+            "arxiv_jitter_max": arxiv_jitter_max,
+            "arxiv_proactive_cooldown_every_ids": arxiv_proactive_cooldown_every_ids,
+            "arxiv_proactive_cooldown_seconds": arxiv_proactive_cooldown_seconds,
             "backup_dir": Path(backup_dir_raw) if backup_dir_raw else None,
             "backup_every_ids": backup_every_ids,
             "auto_resume_rate_limit": auto_resume_rate_limit,

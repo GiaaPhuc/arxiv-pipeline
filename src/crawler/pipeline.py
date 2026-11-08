@@ -224,6 +224,7 @@ class _Run:
     arxiv_429_streak: int = 0
     arxiv_ok_since_429: int = 0
     consecutive_stream_failures: int = 0
+    proactive_cooldown_papers: int = 0
     last_backup_signature: tuple[int, int] = (-1, -1)
     last_backup_at: float = 0.0
     counters: dict[str, int | float | str] = field(
@@ -588,7 +589,7 @@ def _extract_worker(run: _Run) -> None:
             run.extract_queue.task_done()
 
 
-def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) -> None:
+def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) -> bool:
     paper_dir = _paper_dir(run, paper.arxiv_id)
     _clean_stale(paper_dir)
     pending_versions: list[int] = []
@@ -603,14 +604,14 @@ def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) 
         _inc(run, "papers_done")
         if not (paper_dir / S2_RAW_NAME).is_file():
             run.s2_queue.put(_S2Job(paper, paper_dir))
-        return
+        return False
 
     with run.counters_lock:
         run.paper_pending_versions[paper.arxiv_id] = len(pending_versions)
 
     for idx, version in enumerate(pending_versions):
         if run.stop.is_set():
-            return
+            return False
         is_last = idx == len(pending_versions) - 1
         try:
             download = _download_version(run, paper, version)
@@ -678,6 +679,7 @@ def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) 
                 ),
             )
     del ids_seen  # never sleep thermal cooldown after a completed download
+    return True
 
 
 # --------------------------------------------------------------------------- discovery
@@ -1029,8 +1031,10 @@ def _handle_auto_resume_cooldown(
     deferred_count: int,
     *,
     retry_after: float | None = None,
+    proactive_seconds: float | None = None,
 ) -> None:
-    """Drain extract queue, start background backup if changed, and sleep escalating cooldown."""
+    """Drain extract queue, start background backup if changed, and sleep cooldown."""
+    run.proactive_cooldown_papers = 0
     run.arxiv.recycle_session()
     run.arxiv.thermal_score = 0.0
     run.extract_queue.join()
@@ -1079,27 +1083,44 @@ def _handle_auto_resume_cooldown(
             )
             run.checkpoint_thread = thread
             thread.start()
-    cooldown = _compute_arxiv_cooldown(run, retry_after=retry_after)
-    _inc(run, "arxiv_auto_resumes")
-    _inc(run, "arxiv_cooldown_seconds", cooldown)
-    _diag(
-        run,
-        "auto_resume_cooldown",
-        context=context,
-        cooldown_seconds=cooldown,
-        streak=run.arxiv_429_streak,
-        deferred_ids=deferred_count,
-    )
+    if proactive_seconds is not None:
+        cooldown = max(float(proactive_seconds), 0.0)
+        run.arxiv.limiter.reset_interval()
+        _inc(run, "arxiv_thermal_cooldowns")
+        _inc(run, "arxiv_cooldown_seconds", cooldown)
+        _diag(
+            run,
+            "proactive_cooldown",
+            context=context,
+            cooldown_seconds=cooldown,
+        )
+        logger.info(
+            "proactive cooldown (v3.8) %s: recycling session and sleeping %.0fs breather",
+            context,
+            cooldown,
+        )
+    else:
+        cooldown = _compute_arxiv_cooldown(run, retry_after=retry_after)
+        _inc(run, "arxiv_auto_resumes")
+        _inc(run, "arxiv_cooldown_seconds", cooldown)
+        _diag(
+            run,
+            "auto_resume_cooldown",
+            context=context,
+            cooldown_seconds=cooldown,
+            streak=run.arxiv_429_streak,
+            deferred_ids=deferred_count,
+        )
+        logger.warning(
+            "auto-resume rate-limit (U1) %s: deferred %d id(s); "
+            "sleeping escalating cooldown %.0fs (streak %d)",
+            context,
+            deferred_count,
+            cooldown,
+            run.arxiv_429_streak,
+        )
     if run.rate_state_path is not None and cooldown > 0:
         save_rate_state(run.rate_state_path, arxiv_cooldown_until=time.time() + cooldown)
-    logger.warning(
-        "auto-resume rate-limit (U1) %s: deferred %d id(s); "
-        "sleeping escalating cooldown %.0fs (streak %d)",
-        context,
-        deferred_count,
-        cooldown,
-        run.arxiv_429_streak,
-    )
     try:
         _sleep_interruptible(run.stop, cooldown)
     except StopCrawl as exc:
@@ -1434,16 +1455,34 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
                 continue
             chunk_deferred: list[PaperMeta] = []
             papers_ok_since_defer = 0
-            for paper in planned:
+            for idx_paper, paper in enumerate(planned):
                 if run.stop.is_set():
                     return
                 try:
-                    _process_paper(run, paper, ids_seen=seen)
+                    did_download = _process_paper(run, paper, ids_seen=seen)
                     if chunk_deferred:
                         papers_ok_since_defer += 1
                         if papers_ok_since_defer >= _DEFER_DRAIN_AFTER_OK_PAPERS:
                             _drain_chunk_deferred(chunk_deferred)
                             papers_ok_since_defer = 0
+                    if did_download:
+                        run.proactive_cooldown_papers += 1
+                        every_ids = run.config.arxiv_proactive_cooldown_every_ids
+                        has_more_papers = (idx_paper + 1 < len(planned)) or (
+                            seen + len(chunk) < total
+                        )
+                        if (
+                            every_ids > 0
+                            and has_more_papers
+                            and (run.config.arxiv_min_interval >= 3.0 or every_ids < 300)
+                            and run.proactive_cooldown_papers >= every_ids
+                        ):
+                            _handle_auto_resume_cooldown(
+                                run,
+                                f"after {run.proactive_cooldown_papers} active ids",
+                                0,
+                                proactive_seconds=run.config.arxiv_proactive_cooldown_seconds,
+                            )
                 except _DeferRateLimit as exc:
                     if is_deferred:
                         deferred_ids.append(paper.arxiv_id)
