@@ -708,31 +708,21 @@ def test_download_source_resumes_with_http_206_byte_range_on_mid_stream_drop(
     )
 
 
-def test_download_source_progress_aware_range_resume_caps_at_4_total_attempts(
+def test_download_source_progress_aware_range_resume_caps_at_2_total_attempts(
     tmp_path: Path,
 ) -> None:
-    # 3 consecutive drops that each progress >= 512 KiB reset stalled_attempts to 0,
-    # completing on the 4th request (exceeding the 2-attempt stalled cap) without hammering arXiv.
+    # 1 drop that progresses >= 512 KiB resets stalled_attempts to 0,
+    # completing on the 2nd request via HTTP 206 Range without hammering arXiv (v3.9).
     segment = b"x" * (600 * 1024)  # 600 KiB >= 512 KiB _MIN_PROGRESS_BYTES
-    payload = b"\x1f\x8b" + segment * 3 + b"tail-end"
-    cuts = [len(b"\x1f\x8b") + len(segment) * i for i in range(1, 4)]
+    payload = b"\x1f\x8b" + segment + b"tail-end"
+    cut = len(b"\x1f\x8b") + len(segment)
     responses_seq = [
         FakeResponse(
             200,
-            [payload[: cuts[0]]],
+            [payload[:cut]],
             requests.exceptions.ChunkedEncodingError("cut 1"),
         ),
-        FakeResponse(
-            206,
-            [payload[cuts[0] : cuts[1]]],
-            requests.exceptions.ChunkedEncodingError("cut 2"),
-        ),
-        FakeResponse(
-            206,
-            [payload[cuts[1] : cuts[2]]],
-            requests.exceptions.ChunkedEncodingError("cut 3"),
-        ),
-        FakeResponse(206, [payload[cuts[2] :]]),
+        FakeResponse(206, [payload[cut:]]),
     ]
     client = _RetryFakeClient(responses_seq)
     client._config = Config(contact="test@example.com", max_retries=5)  # noqa: SLF001
@@ -748,25 +738,25 @@ def test_download_source_progress_aware_range_resume_caps_at_4_total_attempts(
     assert res.range_resumed is True
     assert res.raw_archive_bytes == len(payload)
     assert bytes(res.data or b"") == payload
-    assert len(client.calls) == 4
+    assert len(client.calls) == 2
     assert client.calls[-1] == (
         "/src/2408.14782v1",
-        {"stream": True, "headers": {"Range": f"bytes={cuts[2]}-"}},
+        {"stream": True, "headers": {"Range": f"bytes={cut}-"}},
     )
 
-    # A 4th consecutive cut hits _MAX_TOTAL_STREAM_ATTEMPTS == 4 and aborts cleanly:
+    # A 2nd consecutive cut hits _MAX_TOTAL_STREAM_ATTEMPTS == 2 and aborts cleanly:
     too_many_cuts = [
         FakeResponse(
             200 if i == 0 else 206,
             [segment],
             requests.exceptions.ChunkedEncodingError(f"cut {i + 1}"),
         )
-        for i in range(4)
+        for i in range(2)
     ]
     client_cap = _RetryFakeClient(too_many_cuts)
-    with pytest.raises(requests.exceptions.ChunkedEncodingError, match="cut 4"):
+    with pytest.raises(requests.exceptions.ChunkedEncodingError, match="cut 2"):
         download_source(client_cap, "2408.15601", 1, tmp_path / ".tmp-cap")
-    assert len(client_cap.calls) == 4
+    assert len(client_cap.calls) == 2
 
 
 def test_download_source_range_retry_enforces_at_least_3s_backoff_and_recycles_session(
@@ -786,8 +776,8 @@ def test_download_source_range_retry_enforces_at_least_3s_backoff_and_recycles_s
 
     limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep, min_idle_gap=0.50)
     segment = b"x" * (600 * 1024)  # >= 512 KiB so stalled_attempts resets to 0 every time!
-    payload = b"\x1f\x8b" + segment * 3 + b"done"
-    cuts = [len(b"\x1f\x8b") + len(segment) * i for i in range(1, 4)]
+    payload = b"\x1f\x8b" + segment + b"done"
+    cut = len(b"\x1f\x8b") + len(segment)
 
     class TimedRangeClient:
         def __init__(self) -> None:
@@ -799,20 +789,10 @@ def test_download_source_range_retry_enforces_at_least_3s_backoff_and_recycles_s
             self._seq = [
                 FakeResponse(
                     200,
-                    [payload[: cuts[0]]],
+                    [payload[:cut]],
                     requests.exceptions.ChunkedEncodingError("drop 1"),
                 ),
-                FakeResponse(
-                    206,
-                    [payload[cuts[0] : cuts[1]]],
-                    requests.exceptions.ChunkedEncodingError("drop 2"),
-                ),
-                FakeResponse(
-                    206,
-                    [payload[cuts[1] : cuts[2]]],
-                    requests.exceptions.ChunkedEncodingError("drop 3"),
-                ),
-                FakeResponse(206, [payload[cuts[2] :]]),
+                FakeResponse(206, [payload[cut:]]),
             ]
 
         def recycle_session(self) -> None:
@@ -838,10 +818,10 @@ def test_download_source_range_retry_enforces_at_least_3s_backoff_and_recycles_s
         spool_max_bytes=len(payload) + 1024,
     )
     assert res.http_status == 200
-    assert client.recycles == 3
-    assert client.stream_breaks == 3
-    # Every retry waited >= 3.0s End-to-Start (3.0s -> 4.5s -> 6.0s), NEVER 1.5s!
-    assert sleeps == [3.0, 4.5, 6.0]
+    assert client.recycles == 1
+    assert client.stream_breaks == 1
+    # First retry waited >= 3.0s End-to-Start (3.0s):
+    assert sleeps == [3.0]
 
 
 def test_download_source_stashes_partial_bytes_across_429_and_resumes_with_206(

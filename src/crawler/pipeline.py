@@ -635,7 +635,7 @@ def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) 
                 if idx == 0:
                     with run.counters_lock:
                         run.paper_pending_versions.pop(paper.arxiv_id, None)
-                need_cd = run.consecutive_stream_failures >= 2
+                need_cd = run.consecutive_stream_failures >= 3
                 _diag(
                     run,
                     "arxiv_stream_defer",
