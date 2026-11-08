@@ -2,7 +2,7 @@
 
 > **Mục đích tài liệu:** Mô tả kiến trúc và luồng end-to-end **đúng 100% với mã nguồn** sau các đợt tối ưu **O1–O6**, **S1–S7**, kiến trúc **v3 Producer–Consumer**, **v3.1 Resilience & QA Alignment (`U1–U6`)**, **v3.2 Sub-7h Speed Tuning (`T1–T5` + Fast-Defer Queue)**, **v3.3 Thermal-Aware Pacing**, **v3.4 Extract-Turbo (`E1–E5`)**, **v3.5 Anti-Cascade 429 & Smart Backup**, **v3.6 Persistent Partial Resume, Linear Short Cooldown & Live S2 Batching**, **v3.7 3.15s Sweet-Spot Pacing, Backup Storm Throttle & S2 Anti-Requeue Loop** và **v3.8 5.0s Fast-Recovery Pacing, 0..0.30s Jitter & 300-ID Proactive Cooldown** (cập nhật **08/11/2026**). Nền tảng phân tích hiệu năng và thiết kế chi tiết xem tại `docs/plans/Plan-toi-uu-luong-crawl-5000-id-vi.md` và `docs/plans/Plan-chong-qua-nhiet-ip-va-crawl-lien-tuc-vi.md`.
 >
-> **Trạng thái code:** **261 unit tests pass**, `ruff` sạch; Pilot 30 ID hoàn tất ✅ (`57` cặp phiên bản: `51` `ok`, `6` `no_source`, `0` `failed`); đang chạy **Milestone 1 Phase 2** (crawl 25.000 ID trên một máy) và đã khởi động **Milestone 2 Phase 0** (khóa `src/parsing/models.py` + khung pipeline đa nhân). Chi tiết đối chiếu đề bài: `STATUS.md` mục 0.
+> **Trạng thái code:** **359 unit tests pass** (261 nền + 98 test C M2; B/D trong test tích hợp là giả), `ruff` sạch; C đã thử độc lập 10 bài / 26 phiên bản thật bằng hook truyền nguyên văn, còn chờ B/D thật. Pilot 30 ID hoàn tất ✅ (`57` cặp phiên bản: `51` `ok`, `6` `no_source`, `0` `failed`); đang chạy **Milestone 1 Phase 2** (crawl 25.000 ID trên một máy) và đã khởi động **Milestone 2 Phase 0** (khóa `src/parsing/models.py` + khung pipeline đa nhân). Chi tiết đối chiếu đề bài: `STATUS.md` mục 0.
 
 ---
 
@@ -379,5 +379,46 @@ ruff check . && ruff format . && pytest
 3. **Đóng băng nộp bài (R6):** Trước khi nộp link repo mã Milestone 1, cần dọn các file quản trị nội bộ (`STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md`, `docs/`, `project requirements/`) theo đúng quy định đề bài (chỉ giữ `.py`, `.ipynb`, `requirements.txt`, `README.md`).
 
 ---
+
+## 12. Phần C của M2: gom nguồn và dựng cây (08/11)
+
+`parsing.pipeline.process_paper` đã có điểm gọi hai module C thật:
+
+```text
+Corpus.tex_files(id, version)
+  → gathering.gather_compilation_unit(id, version, raw_files)
+  → CompilationUnit
+  → hierarchy.build_raw_hierarchy(unit, CleanerHooks của B)
+  → RawNode[] + bibliography bổ sung → các stage tham khảo/dedup của D
+```
+
+- Gathering chỉ đọc từ điển bytes đầu vào: giải mã, khử comment có bảo vệ literal,
+  chọn root đa tín hiệu, DFS include có chặn chu trình/độ sâu 15 và đếm file duy nhất.
+  Điểm include chỉ cộng khi đích tìm được trong mapping từ thư mục root ứng viên;
+  không thưởng include thiếu của file mẫu. Sửa root sai ở `2408.11049` v4/v5:
+  từ template dùng 1/14 TeX sang `main.tex` dùng 8/14 TeX và nhận bibliography.
+  Không tải lại mạng, không thực thi TeX, không sửa corpus. Lỗi include được log
+  với ID/version/path; có cảnh báo đồng nghĩa kết quả có thể chỉ là một phần.
+- Hierarchy dùng stack cấp bậc, có list/item lồng nhau và lá sentence/formula/figure.
+  Gọi `CleanerHooks` được inject, không import trực tiếp module B. Giữ Abstract,
+  Acknowledgements và Appendix; tách References khỏi mọi nội dung nút, kể cả list/item.
+  Phiên bản không có root trả `([], [])`; lỗi hook được đưa lên pipeline.
+- Môi trường thiếu dấu đóng được phục hồi tại đề mục tiếp theo; cấu trúc lồng quá
+  64 mức báo lỗi rõ ràng, không âm thầm tạo cây sai. Đây là parser giới hạn theo
+  đặc tả, không mô phỏng toàn bộ lệnh/điều kiện/package TeX.
+- `.bbl` liên quan được xử lý khi có trong `raw_files`, nhưng `Corpus.tex_files()`
+  hiện vẫn lọc `.tex/.bib`: cần A/D nối đường truyền `.bbl` trước tích hợp đầy đủ.
+  Schema và module các owner khác được giữ nguyên trong phần C.
+- Unit test C và test tích hợp `Stages` dùng nguồn tổng hợp, B/D giả: **98 test C**,
+  toàn suite **359 passed**. Không gọi mạng trong unit test.
+- Corpus leader cung cấp ở `arxiv-data/`: metadata **1.000 bài / 1.678 phiên bản**;
+  349 tệp của mẫu 10 bài khớp kích thước/SHA-256. Đã gọi trực tiếp hai hàm C trên
+  **26 phiên bản + 3 đối chứng** với hook truyền nguyên văn: cây/marker References đạt,
+  dùng **265/324 TeX**. Sáu phiên bản mẫu thiếu bibliography trong subset; không có
+  `.bbl` để thử đường dữ liệu thật. Chưa đối chiếu gói gốc hoặc validate toàn subset.
+- M2-C còn 🟡: chưa chứng minh clean/math/split B, tham khảo/dedup/export D, validator E,
+  pipeline end-to-end hoặc benchmark Colab. Bản thảo giao E:
+  `docs/reports/m2/01_parsing_hierarchy.md`; bằng chứng và đầu việc tích hợp ở
+  `docs/reports/m2/02_c_real_sample_check.md` + `c_real_sample_check.json`.
 
 *Tài liệu được rà soát và đồng bộ với mã nguồn `arxiv-pipeline` ngày **08/11/2026**.*
