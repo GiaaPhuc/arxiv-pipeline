@@ -708,41 +708,21 @@ def test_download_source_resumes_with_http_206_byte_range_on_mid_stream_drop(
     )
 
 
-def test_download_source_progress_aware_range_resume_exceeds_3_attempts(
+def test_download_source_progress_aware_range_resume_caps_at_2_total_attempts(
     tmp_path: Path,
 ) -> None:
-    # 5 consecutive drops that each progress >= 512 KiB reset stalled_attempts to 0,
-    # completing on the 6th request via HTTP 206 Range instead of failing at attempt 3.
+    # 1 drop that progresses >= 512 KiB resets stalled_attempts to 0,
+    # completing on the 2nd request via HTTP 206 Range without hammering arXiv (v3.9).
     segment = b"x" * (600 * 1024)  # 600 KiB >= 512 KiB _MIN_PROGRESS_BYTES
-    payload = b"\x1f\x8b" + segment * 5 + b"tail-end"
-    cuts = [len(b"\x1f\x8b") + len(segment) * i for i in range(1, 6)]
+    payload = b"\x1f\x8b" + segment + b"tail-end"
+    cut = len(b"\x1f\x8b") + len(segment)
     responses_seq = [
         FakeResponse(
             200,
-            [payload[: cuts[0]]],
+            [payload[:cut]],
             requests.exceptions.ChunkedEncodingError("cut 1"),
         ),
-        FakeResponse(
-            206,
-            [payload[cuts[0] : cuts[1]]],
-            requests.exceptions.ChunkedEncodingError("cut 2"),
-        ),
-        FakeResponse(
-            206,
-            [payload[cuts[1] : cuts[2]]],
-            requests.exceptions.ChunkedEncodingError("cut 3"),
-        ),
-        FakeResponse(
-            206,
-            [payload[cuts[2] : cuts[3]]],
-            requests.exceptions.ChunkedEncodingError("cut 4"),
-        ),
-        FakeResponse(
-            206,
-            [payload[cuts[3] : cuts[4]]],
-            requests.exceptions.ChunkedEncodingError("cut 5"),
-        ),
-        FakeResponse(206, [payload[cuts[4] :]]),
+        FakeResponse(206, [payload[cut:]]),
     ]
     client = _RetryFakeClient(responses_seq)
     client._config = Config(contact="test@example.com", max_retries=5)  # noqa: SLF001
@@ -758,8 +738,194 @@ def test_download_source_progress_aware_range_resume_exceeds_3_attempts(
     assert res.range_resumed is True
     assert res.raw_archive_bytes == len(payload)
     assert bytes(res.data or b"") == payload
-    assert len(client.calls) == 6
+    assert len(client.calls) == 2
     assert client.calls[-1] == (
         "/src/2408.14782v1",
-        {"stream": True, "headers": {"Range": f"bytes={cuts[4]}-"}},
+        {"stream": True, "headers": {"Range": f"bytes={cut}-"}},
     )
+
+    # A 2nd consecutive cut hits _MAX_TOTAL_STREAM_ATTEMPTS == 2 and aborts cleanly:
+    too_many_cuts = [
+        FakeResponse(
+            200 if i == 0 else 206,
+            [segment],
+            requests.exceptions.ChunkedEncodingError(f"cut {i + 1}"),
+        )
+        for i in range(2)
+    ]
+    client_cap = _RetryFakeClient(too_many_cuts)
+    with pytest.raises(requests.exceptions.ChunkedEncodingError, match="cut 2"):
+        download_source(client_cap, "2408.15601", 1, tmp_path / ".tmp-cap")
+    assert len(client_cap.calls) == 2
+
+
+def test_download_source_range_retry_enforces_at_least_3s_backoff_and_recycles_session(
+    tmp_path: Path,
+) -> None:
+    from crawler.http import RateLimiter, _StreamResponse
+
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(round(seconds, 4))
+        now[0] += seconds
+
+    limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep, min_idle_gap=0.50)
+    segment = b"x" * (600 * 1024)  # >= 512 KiB so stalled_attempts resets to 0 every time!
+    payload = b"\x1f\x8b" + segment + b"done"
+    cut = len(b"\x1f\x8b") + len(segment)
+
+    class TimedRangeClient:
+        def __init__(self) -> None:
+            self.limiter = limiter
+            self._config = Config(contact="test@example.com", max_retries=3)
+            self.recycles = 0
+            self.stream_breaks = 0
+            self._idx = 0
+            self._seq = [
+                FakeResponse(
+                    200,
+                    [payload[:cut]],
+                    requests.exceptions.ChunkedEncodingError("drop 1"),
+                ),
+                FakeResponse(206, [payload[cut:]]),
+            ]
+
+        def recycle_session(self) -> None:
+            self.recycles += 1
+
+        def note_stream_break(self) -> None:
+            self.stream_breaks += 1
+
+        def get(self, _path: str, **_kwargs: object) -> _StreamResponse:
+            self.limiter.wait()
+            # Simulate a slow 5.0s broken stream (> 3.0s Start-to-Start):
+            now[0] += 5.0
+            resp = self._seq[self._idx]
+            self._idx += 1
+            return _StreamResponse(resp, self.limiter)  # type: ignore[arg-type]
+
+    client = TimedRangeClient()
+    res = download_source(
+        client,
+        "2408.15601",
+        1,
+        tmp_path / ".tmp-timed",
+        spool_max_bytes=len(payload) + 1024,
+    )
+    assert res.http_status == 200
+    assert client.recycles == 1
+    assert client.stream_breaks == 1
+    # First retry waited >= 3.0s End-to-Start (3.0s):
+    assert sleeps == [3.0]
+
+
+def test_download_source_stashes_partial_bytes_across_429_and_resumes_with_206(
+    tar_gz_source: Path,
+    tmp_path: Path,
+) -> None:
+    from crawler.source import _stream_retry_backoff_seconds, resume_partial_path
+
+    payload = tar_gz_source.read_bytes()
+    split_at = len(payload) // 2
+    # Call 1: downloads first half (200 OK), breaks stream, then hits 429 on Range retry!
+    drop_1 = FakeResponse(
+        200,
+        [payload[:split_at]],
+        requests.exceptions.ChunkedEncodingError("cut at 50%"),
+    )
+    resp_429 = FakeResponse(429)
+    resp_429.headers = {"Retry-After": "30"}
+    client_1 = _RetryFakeClient([drop_1, resp_429])
+
+    tmp_dir = tmp_path / ".tmp-stash"
+    res_1 = download_source(
+        client_1,
+        "2408.15660",
+        1,
+        tmp_dir,
+        spool_max_bytes=len(payload) + 1024,
+        keep_partial_on_retryable=True,
+    )
+    assert res_1.http_status == 429
+    assert res_1.retry_after == 30.0
+    stashed = resume_partial_path(tmp_dir, "2408.15660", 1)
+    assert stashed.is_file()
+    assert stashed.read_bytes() == payload[:split_at]
+
+    # Call 2 (after cooldown): picks up stashed bytes and immediately sends Range: bytes={split_at}-
+    part_2 = FakeResponse(206, [payload[split_at:]])
+    client_2 = _RetryFakeClient([part_2])
+    res_2 = download_source(
+        client_2,
+        "2408.15660",
+        1,
+        tmp_dir,
+        spool_max_bytes=len(payload) + 1024,
+        keep_partial_on_retryable=True,
+    )
+    assert res_2.http_status == 200
+    assert res_2.range_resumed is True
+    assert res_2.raw_archive_bytes == len(payload)
+    assert bytes(res_2.data or b"") == payload
+    assert not stashed.exists()  # cleaned up on completion
+    assert client_2.calls == [
+        ("/src/2408.15660v1", {"stream": True, "headers": {"Range": f"bytes={split_at}-"}})
+    ]
+
+    # Heavy stream drop (>= 4 MiB written) adds +3.0s cushion to let CDN burst bucket refill:
+    class DummyLimiter:
+        _base_floor = 3.0
+        _min_interval = 3.0
+
+    assert _stream_retry_backoff_seconds(DummyLimiter(), 1, bytes_written=1024) == 3.0
+    assert _stream_retry_backoff_seconds(DummyLimiter(), 1, bytes_written=5 * 1024 * 1024) == 6.0
+    assert _stream_retry_backoff_seconds(DummyLimiter(), 2, bytes_written=5 * 1024 * 1024) == 7.5
+
+
+def test_fast_gzip_stream_handles_concatenated_multi_member_gzip_and_many_subdirs(
+    tmp_path: Path,
+) -> None:
+    import gzip
+
+    # Build a tar archive with multiple files sharing nested directories (exercises E2 dir cache)
+    # and compress it as two concatenated gzip members plus trailing NUL padding (exercises E1).
+    raw_tar = io.BytesIO()
+    members = [
+        ("sections/s1/intro.tex", b"\\section{Intro}\n"),
+        ("sections/s1/method.tex", b"\\section{Method}\n"),
+        ("sections/s1/figure.pdf", b"%PDF-1.5 heavy ignored figure" + b"0" * 4096),
+        ("sections/s2/results.tex", b"\\section{Results}\n"),
+        ("sections/s2/discussion.tex", b"\\section{Discussion}\n"),
+        ("refs.bib", b"@article{k, title={T}}\n"),
+    ]
+    with tarfile.open(fileobj=raw_tar, mode="w") as archive:
+        for name, data in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    tar_bytes = raw_tar.getvalue()
+    mid = len(tar_bytes) // 2
+    concatenated_gz = gzip.compress(tar_bytes[:mid]) + gzip.compress(tar_bytes[mid:]) + b"\x00" * 16
+
+    dest = tmp_path / "multi-member-out"
+    meta = extract_tex_bib(
+        bytearray(concatenated_gz),
+        dest,
+        Config(max_extract_bytes=1_000_000),
+        arxiv_id="2408.06045",
+        version=1,
+    )
+    assert meta.status is Status.OK
+    assert {e.path for e in meta.files} == {
+        "sections/s1/intro.tex",
+        "sections/s1/method.tex",
+        "sections/s2/results.tex",
+        "sections/s2/discussion.tex",
+        "refs.bib",
+    }
+    assert not (dest / "sections" / "s1" / "figure.pdf").exists()

@@ -277,31 +277,48 @@ def test_arxiv_rate_limiter_adapts_above_3s_floor_on_429_and_recovers():
         sleeps.append(round(seconds, 4))
         now[0] += seconds
 
-    limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep)
+    limiter = RateLimiter(3.15, clock=clock, sleep=fake_sleep)
     limiter.note_429()
-    assert limiter._min_interval == 3.15  # noqa: SLF001
+    assert limiter._min_interval == 3.65  # noqa: SLF001
+    limiter.note_429()
+    assert limiter._min_interval == 4.15  # noqa: SLF001
+    limiter.note_429()
+    assert limiter._min_interval == 4.65  # noqa: SLF001
     limiter.note_429()
     limiter.note_429()
-    assert limiter._min_interval == 3.30  # T1 cap: floor + 0.30s = 3.30s  # noqa: SLF001
+    assert limiter._min_interval == 5.0  # v3.8 cap: 5.0s  # noqa: SLF001
 
     limiter.wait()
     limiter.done()
     limiter.wait()
     limiter.done()
-    assert sleeps == [3.3]
+    assert sleeps == [5.0]
 
-    # Recover -0.15s after 3 successes, back to 3.0s after 6 successes (v3.3):
-    for _ in range(3):
+    # Fast step-down (-0.75s every 2 GET 200s) back to 3.15s floor (v3.8):
+    for _ in range(2):
         limiter.note_success()
-    assert limiter._min_interval == 3.15  # noqa: SLF001
-    for _ in range(3):
+    assert limiter._min_interval == 4.25  # noqa: SLF001
+    for _ in range(2):
         limiter.note_success()
-    assert limiter._min_interval == 3.0  # never drops below configured 3.0s floor  # noqa: SLF001
+    assert limiter._min_interval == 3.5  # noqa: SLF001
+    for _ in range(2):
+        limiter.note_success()
+    assert limiter._min_interval == 3.15  # never drops below configured 3.15s floor  # noqa: SLF001
 
     limiter.note_429()
-    assert limiter._min_interval == 3.15  # noqa: SLF001
+    assert limiter._min_interval == 3.65  # noqa: SLF001
     limiter.reset_interval()
-    assert limiter._min_interval == 3.0  # noqa: SLF001
+    assert limiter._min_interval == 3.15  # noqa: SLF001
+
+    # Verify jitter_max=0.30 adds random jitter in [0.0, 0.30] on subsequent requests:
+    sleeps.clear()
+    jitter_limiter = RateLimiter(3.15, clock=clock, sleep=fake_sleep, jitter_max=0.30)
+    jitter_limiter.wait()
+    jitter_limiter.done()
+    jitter_limiter.wait()
+    jitter_limiter.done()
+    assert len(sleeps) == 1
+    assert 3.15 <= sleeps[0] <= 3.45
 
 
 def test_unified_retry_clock_does_not_stack_retry_sleep_and_rate_limiter():
@@ -456,10 +473,11 @@ def test_host_client_recycle_session_and_thermal_sensor():
     def clock() -> float:
         return now[0]
 
-    limiter = RateLimiter(0.0, clock=clock, sleep=lambda _s: None)
+    sleeps: list[float] = []
+    limiter = RateLimiter(3.0, clock=clock, sleep=sleeps.append)
     config = Config(
         contact="test@example.com",
-        arxiv_min_interval=0.0,
+        arxiv_min_interval=3.0,
         arxiv_socket_recycle_every=2,
         arxiv_thermal_threshold=3.0,
     )
@@ -486,14 +504,29 @@ def test_host_client_recycle_session_and_thermal_sensor():
     assert client.session_recycles == 1
     assert client._session is not first_session  # noqa: SLF001
 
-    # Thermal sensor: 1 slow TTFB (4.0s -> +1.0) + 1 HTTP 429 (+2.0) = 3.0 -> triggers cooldown
+    # Slow 200 OK header (4.0s) must NOT penalize thermal_score (no false cooldown on recovery):
     client._session.get = MagicMock(side_effect=make_resp(200, 4.0))  # noqa: SLF001
     client.get("/api/query?id_list=3")
-    assert client.thermal_score == 1.0
+    assert client.thermal_score == 0.0
     assert client.consume_thermal_trigger() is False
+
+    # Stream break (+1.5) + HTTP 429 (+2.0) = 3.5 -> reaches threshold; 200 OK decays by -0.5:
+    client.note_stream_break()
+    assert client.thermal_score == 1.5
+    client._session.get = MagicMock(side_effect=make_resp(200, 5.0))  # noqa: SLF001
+    client.get("/api/query?id_list=3b")
+    assert client.thermal_score == 1.0
 
     client._session.get = MagicMock(side_effect=make_resp(429, 8.0))  # noqa: SLF001
     client.get("/api/query?id_list=4")
     assert client.thermal_score == 3.0
     assert client.consume_thermal_trigger() is True
     assert client.thermal_score == 0.0
+
+    # Retry backoff on attempt 0 respects min_interval (3.0s) instead of 2**0 = 1.0s:
+    sleeps.clear()
+    client._sleep_for_retry(0)  # noqa: SLF001
+    assert limiter._retry_backoff == 3.0  # noqa: SLF001
+    client._session.get = MagicMock(side_effect=make_resp(200, 0.05))  # noqa: SLF001
+    client.get("/api/query?id_list=5")
+    assert sleeps == [3.0]

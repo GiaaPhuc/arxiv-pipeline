@@ -108,14 +108,17 @@ class RateLimiter:
         sleep: Callable[[float], None] = _default_sleep,
         *,
         min_idle_gap: float = 0.0,
+        jitter_max: float = 0.0,
     ) -> None:
         self._base_floor = min_interval
         self._min_interval = min_interval
         self._min_idle_gap = max(float(min_idle_gap), 0.0)
-        # T1 (v3.2) + v3.3: nudge +0.15 s (cap floor + 0.30 s = 3.30 s), recover after 3 successes.
-        self._adaptive_step = 0.15
-        self._max_adaptive_interval = round(min_interval + 0.30, 4) if min_interval > 0 else 0.0
-        self._recover_streak = 3
+        self._jitter_max = max(float(jitter_max), 0.0)
+        # v3.8: widen +0.50 s on 429 up to 5.0 s cap; step down -0.75 s every 2 GET 200s.
+        self._adaptive_step = 0.50
+        self._recover_step = 0.75
+        self._max_adaptive_interval = max(round(min_interval, 4), 5.0) if min_interval > 0 else 0.0
+        self._recover_streak = 2
         self._adaptive_streak = 0
         self._retry_backoff = 0.0
         self._cooldown_until = 0.0
@@ -162,7 +165,12 @@ class RateLimiter:
         self._acquire_slot()
         try:
             retry_backoff = self._retry_backoff
-            effective_interval = max(self._min_interval, retry_backoff)
+            jitter = (
+                random.uniform(0.0, self._jitter_max)
+                if (self._jitter_max > 0.0 and self._last_request_at is not None)
+                else 0.0
+            )
+            effective_interval = max(self._min_interval + jitter, retry_backoff)
             self._retry_backoff = 0.0
             cooldown_rem = self._consume_cooldown_remaining()
             now = self._clock()
@@ -199,7 +207,7 @@ class RateLimiter:
             self._lock.release()
 
     def note_429(self) -> None:
-        """Gently widen the Start-to-Start interval (+0.15 s, cap floor + 0.30 s) on 429 (T1)."""
+        """Widen Start-to-Start interval (+0.50 s, cap 5.0 s) on 429 (v3.8)."""
         self._adaptive_streak = 0
         if self._max_adaptive_interval > 0:
             self._min_interval = round(
@@ -207,13 +215,13 @@ class RateLimiter:
             )
 
     def note_success(self) -> None:
-        """Ease adaptive penalty back down toward ``_base_floor`` (>= 3.0 s on arXiv) (T1)."""
+        """Fast step-down (-0.75 s every 2 GET 200s) back to ``_base_floor`` (v3.8)."""
         if self._min_interval <= self._base_floor:
             return
         self._adaptive_streak += 1
         if self._adaptive_streak >= self._recover_streak:
             self._min_interval = round(
-                max(self._base_floor, self._min_interval - self._adaptive_step), 4
+                max(self._base_floor, self._min_interval - self._recover_step), 4
             )
             self._adaptive_streak = 0
 
@@ -322,14 +330,13 @@ class HostClient:
             self.recycle_session()
 
     def _update_thermal_on_response(self, status: int, header_elapsed: float) -> None:
+        del header_elapsed  # slow 2xx headers are normal on large tarballs; never penalize ok
         if self._is_s2:
             return
         if status == 429 or self._is_transient_server_error(status):
             self.thermal_score = round(self.thermal_score + 2.0, 4)
-        elif header_elapsed >= 3.5:
-            self.thermal_score = round(self.thermal_score + 1.0, 4)
-        elif 200 <= status < 300 and header_elapsed < 1.5:
-            self.thermal_score = round(max(0.0, self.thermal_score - 0.35), 4)
+        elif 200 <= status < 300:
+            self.thermal_score = round(max(0.0, self.thermal_score - 0.5), 4)
 
     def note_stream_break(self) -> None:
         """Record a mid-stream disconnect (ChunkedEncodingError/ConnectionError) (v3.3)."""
@@ -360,7 +367,7 @@ class HostClient:
         return 500 <= status < 600
 
     def _sleep_for_retry(self, attempt: int) -> None:
-        delay = min(float(2**attempt), 60.0)
+        delay = max(self.limiter._min_interval, min(float(2**attempt), 60.0))
         self.limiter.schedule_retry_backoff(delay)
 
     def get(self, path: str, **kwargs) -> requests.Response:
@@ -527,7 +534,12 @@ def make_arxiv_client(config: Config) -> HostClient:
         if config.arxiv_min_interval > 0
         else 0.0
     )
-    limiter = RateLimiter(config.arxiv_min_interval, min_idle_gap=idle_gap)
+    jitter_max = config.arxiv_jitter_max if config.arxiv_min_interval >= 3.0 else 0.0
+    limiter = RateLimiter(
+        config.arxiv_min_interval,
+        min_idle_gap=idle_gap,
+        jitter_max=jitter_max,
+    )
     return HostClient(f"https://{ARXIV_API_HOST}", limiter, config)
 
 

@@ -35,9 +35,11 @@ _CHUNK_SIZE = 256 * 1024
 _GIANT_CHUNK_SIZE = 512 * 1024
 _GIANT_ARCHIVE_THRESHOLD = 25 * 1024 * 1024
 _STREAM_CHUNK_SIZE = 128 * 1024
-_MAX_STREAM_ATTEMPTS = 3
-_MAX_TOTAL_STREAM_ATTEMPTS = 12
+_MAX_STREAM_ATTEMPTS = 2
+_MAX_TOTAL_STREAM_ATTEMPTS = 2  # v3.9: 1 initial + 1 Range to avoid per-URL 429
 _MIN_PROGRESS_BYTES = 512 * 1024
+_HEAVY_STREAM_BREAK_BYTES = 4 * 1024 * 1024
+_HEAVY_STREAM_BREAK_BONUS = 3.0
 _KEEPALIVE_DRAIN_BYTES = 64 * 1024
 _STREAM_RETRY_ERRORS = (ChunkedEncodingError, ConnectionError, Timeout)
 _GZIP_MAGIC = b"\x1f\x8b"
@@ -128,10 +130,161 @@ class _ZeroCopyBytesReader(io.RawIOBase):
         return n
 
 
-def _open_gzip_reader(archive: Path | bytes | bytearray) -> gzip.GzipFile:
-    if isinstance(archive, (bytes, bytearray)):
-        return gzip.GzipFile(fileobj=io.BufferedReader(_ZeroCopyBytesReader(archive)), mode="rb")
-    return gzip.open(archive, "rb")
+class _FastGzipStream:
+    """High-throughput RFC-1952 gzip reader using 512 KiB blocks and C-level zlib CRC check (E1).
+
+    Replaces ``gzip.GzipFile``'s 8 KiB ``_compression.DecompressReader`` loop with
+    512 KiB memoryview/file reads and ``zlib.decompressobj(16 + zlib.MAX_WBITS)``, cutting
+    Python loop and buffer-copy overhead on heavy figure-laden archives while still
+    validating gzip headers, multi-member streams, and 8-byte CRC32/ISIZE trailers.
+    """
+
+    def __init__(self, archive: Path | bytes | bytearray | Any) -> None:
+        self._view: memoryview | None = None
+        self._fp: BinaryIO | Any | None = None
+        self._owns_fp = False
+        if isinstance(archive, (bytes, bytearray)):
+            self._view = memoryview(archive)
+        elif isinstance(archive, (Path, os.PathLike, str)):
+            self._fp = Path(archive).open("rb", buffering=_GIANT_CHUNK_SIZE)
+            self._owns_fp = True
+        else:
+            self._fp = archive
+        self._pos = 0
+        self._decomp = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        self._in_member = False
+        self._members_done = 0
+        self._pending_in: bytes | memoryview = b""
+        self._out_buf = bytearray()
+        self._out_pos = 0
+        self._eof = False
+
+    def __enter__(self) -> _FastGzipStream:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._view is not None:
+            self._view = None
+        if self._owns_fp and self._fp is not None:
+            self._fp.close()
+            self._fp = None
+
+    def readable(self) -> bool:
+        return True
+
+    def _next_compressed_chunk(self) -> bytes | memoryview:
+        if self._pending_in:
+            chunk = self._pending_in
+            self._pending_in = b""
+            return chunk
+        if self._view is not None:
+            if self._pos >= len(self._view):
+                return b""
+            end = min(self._pos + _GIANT_CHUNK_SIZE, len(self._view))
+            chunk = self._view[self._pos : end]
+            self._pos = end
+            return chunk
+        if self._fp is not None:
+            return self._fp.read(_GIANT_CHUNK_SIZE)
+        return b""
+
+    def _append_out(self, data: bytes) -> None:
+        if not data:
+            return
+        if self._out_pos > 0:
+            if self._out_pos >= len(self._out_buf):
+                self._out_buf.clear()
+            else:
+                del self._out_buf[: self._out_pos]
+            self._out_pos = 0
+        self._out_buf.extend(data)
+
+    def _pump(self, max_out: int) -> bool:
+        if self._eof:
+            return False
+
+        if self._in_member and self._decomp.unconsumed_tail:
+            out = self._decomp.decompress(self._decomp.unconsumed_tail, max_out)
+            if out:
+                self._append_out(out)
+            if self._decomp.eof:
+                if self._decomp.unused_data:
+                    self._pending_in = self._decomp.unused_data
+                self._in_member = False
+                self._members_done += 1
+            return True
+
+        raw = self._next_compressed_chunk()
+        if not raw:
+            if self._in_member:
+                tail = self._decomp.flush()
+                if tail:
+                    self._append_out(tail)
+                if not self._decomp.eof:
+                    raise EOFError(
+                        "Compressed file ended before the end-of-stream marker was reached"
+                    )
+                self._in_member = False
+                self._members_done += 1
+            elif self._members_done == 0:
+                raise EOFError("Compressed file ended before the end-of-stream marker was reached")
+            self._eof = True
+            return False
+
+        if not self._in_member:
+            if self._members_done > 0:
+                stripped = bytes(raw).lstrip(b"\x00")
+                if not stripped:
+                    return True
+                if len(stripped) == 1 and stripped == _GZIP_MAGIC[:1]:
+                    stripped += bytes(self._next_compressed_chunk())
+                if not stripped.startswith(_GZIP_MAGIC):
+                    raise gzip.BadGzipFile("Not a gzipped file")
+                raw = stripped
+                self._decomp = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            self._in_member = True
+
+        out = self._decomp.decompress(raw, max_out)
+        if out:
+            self._append_out(out)
+        if self._decomp.eof:
+            if self._decomp.unused_data:
+                self._pending_in = self._decomp.unused_data
+            self._in_member = False
+            self._members_done += 1
+        return True
+
+    def read(self, size: int | None = -1) -> bytes:
+        if size == 0:
+            return b""
+        if size is None or size < 0:
+            while self._pump(_GIANT_CHUNK_SIZE):
+                pass
+            out = bytes(self._out_buf[self._out_pos :])
+            self._out_buf.clear()
+            self._out_pos = 0
+            return out
+
+        step_max = max(size, _GIANT_CHUNK_SIZE)
+        while len(self._out_buf) - self._out_pos < size and self._pump(step_max):
+            pass
+        end = min(self._out_pos + size, len(self._out_buf))
+        out = bytes(self._out_buf[self._out_pos : end])
+        self._out_pos = end
+        if self._out_pos >= len(self._out_buf):
+            self._out_buf.clear()
+            self._out_pos = 0
+        elif self._out_pos >= _GIANT_CHUNK_SIZE:
+            del self._out_buf[: self._out_pos]
+            self._out_pos = 0
+        return out
+
+
+def _open_gzip_reader(archive: Path | bytes | bytearray | Any) -> _FastGzipStream:
+    return _FastGzipStream(archive)
 
 
 def _looks_like_tar_header(tar_header: bytes) -> bool:
@@ -177,8 +330,30 @@ def sniff_archive_type(path: Path | bytes | bytearray) -> ArchiveType:
 def _stream_attempts(client: HostClient) -> int:
     config = getattr(client, "_config", None)
     # Cap body-stream retries: each retry costs another >= 3 s arXiv request, and a pair
-    # that keeps breaking is recorded ``failed`` and retried on the next run instead.
+    # that keeps breaking is deferred / recorded ``failed`` instead of hammering arXiv.
     return min(config.max_retries + 1, _MAX_STREAM_ATTEMPTS) if config is not None else 1
+
+
+def _stream_retry_backoff_seconds(
+    limiter: Any,
+    retry_number: int,
+    *,
+    bytes_written: int = 0,
+) -> float:
+    """Return End-to-Start backoff (>= 3.0 s on arXiv, +3.0 s cushion after >= 4 MiB drop)."""
+    base_floor = float(getattr(limiter, "_base_floor", 0.0) or 0.0)
+    if base_floor <= 0.0:
+        return 0.0
+    min_interval = float(getattr(limiter, "_min_interval", base_floor) or base_floor)
+    floor = max(min_interval, 3.0)
+    bonus = _HEAVY_STREAM_BREAK_BONUS if bytes_written >= _HEAVY_STREAM_BREAK_BYTES else 0.0
+    return round(floor + 1.5 * max(retry_number - 1, 0) + bonus, 4)
+
+
+def resume_partial_path(tmp_dir: Path, arxiv_id: str, version: int) -> Path:
+    """Deterministic path in ``tmp_dir`` for stashing partial bytes across 429/deferral."""
+    safe_id = arxiv_id.replace("/", "_")
+    return Path(tmp_dir) / f".resume-{safe_id}-v{version}.part"
 
 
 def _retry_after_seconds(response) -> float | None:
@@ -209,18 +384,22 @@ def download_source(
     tmp_dir: Path,
     *,
     spool_max_bytes: int = 0,
+    keep_partial_on_retryable: bool = False,
 ) -> DownloadResult:
     """Stream one source response into memory (when ``<= spool_max_bytes``) or ``tmp_dir``.
 
     HostClient owns rate limiting and HTTP retries. Transient body read errors
     (e.g. ``ChunkedEncodingError``) retry within the same budget, sending
     ``Range: bytes={written}-`` to resume via HTTP 206 Partial Content when supported (T2).
+    When ``keep_partial_on_retryable`` is True, partial bytes are stashed to ``tmp_dir``
+    on HTTP 429 or exhausted stream drops so the next attempt resumes from ``written``.
     Aborts the stream early once ``%PDF`` or ``ZIP`` magic bytes are detected (O5/S2),
     draining tiny remainders (``<= 64 KiB``) so keep-alive TLS sockets stay warm.
     """
     path = f"/src/{arxiv_id}v{version}"
     last_exc: BaseException | None = None
     tmp_dir = Path(tmp_dir)
+    resume_path = resume_partial_path(tmp_dir, arxiv_id, version)
     mem_buf = bytearray()
     temp_path: Path | None = None
     disk_out: BinaryIO | None = None
@@ -233,26 +412,82 @@ def download_source(
     stalled_attempts = 0
     total_attempts = 0
 
-    def _cleanup_partial() -> None:
+    if keep_partial_on_retryable and resume_path.is_file():
+        try:
+            existing_size = resume_path.stat().st_size
+            if existing_size > 0:
+                with resume_path.open("rb") as f:
+                    header.extend(f.read(512))
+                first_chunk_checked = len(header) >= 4
+                written = existing_size
+                range_resumed = True
+                if spool_max_bytes > 0 and existing_size <= spool_max_bytes:
+                    mem_buf.extend(resume_path.read_bytes())
+                    resume_path.unlink(missing_ok=True)
+                else:
+                    temp_path = resume_path
+        except OSError:
+            resume_path.unlink(missing_ok=True)
+            header.clear()
+            first_chunk_checked = False
+            written = 0
+            range_resumed = False
+
+    def _cleanup_partial(*, remove_resume: bool = True) -> None:
         nonlocal disk_out, temp_path
         if disk_out is not None:
             disk_out.close()
             disk_out = None
         if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+            if remove_resume or temp_path != resume_path:
+                temp_path.unlink(missing_ok=True)
             temp_path = None
+        if remove_resume and keep_partial_on_retryable:
+            resume_path.unlink(missing_ok=True)
         mem_buf.clear()
+
+    def _stash_partial() -> bool:
+        nonlocal disk_out, temp_path
+        if not keep_partial_on_retryable or written <= 0:
+            return False
+        try:
+            if disk_out is not None:
+                disk_out.flush()
+                disk_out.close()
+                disk_out = None
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            if temp_path is not None:
+                if temp_path != resume_path:
+                    temp_path.replace(resume_path)
+                temp_path = None
+            elif mem_buf:
+                resume_path.write_bytes(mem_buf)
+                mem_buf.clear()
+            else:
+                return False
+            logger.info(
+                "stashed %d partial bytes for %sv%d to resume on next attempt",
+                written,
+                arxiv_id,
+                version,
+            )
+            return True
+        except OSError:
+            return False
 
     while stalled_attempts < max_attempts and total_attempts < max_total_attempts:
         total_attempts += 1
         written_before = written
         req_kwargs: dict[str, Any] = {"stream": True}
-        if total_attempts > 1 and written > 0:
+        if written > 0:
             req_kwargs["headers"] = {"Range": f"bytes={written}-"}
         try:
             response = client.get(path, **req_kwargs)
         except BaseException:
-            _cleanup_partial()
+            if _stash_partial():
+                _cleanup_partial(remove_resume=False)
+            else:
+                _cleanup_partial()
             raise
         try:
             status = response.status_code
@@ -260,7 +495,10 @@ def download_source(
                 _cleanup_partial()
                 return DownloadResult(path=None, http_status=status)
             if status in (403, 429):
-                _cleanup_partial()
+                if status == 429 and _stash_partial():
+                    _cleanup_partial(remove_resume=False)
+                else:
+                    _cleanup_partial()
                 retry_after = _retry_after_seconds(response) if status == 429 else None
                 return DownloadResult(path=None, http_status=status, retry_after=retry_after)
             if status == 416 and written > 0:
@@ -340,12 +578,16 @@ def download_source(
                                 disk_out.write(stub)
                                 disk_out.close()
                                 disk_out = None
+                                if keep_partial_on_retryable and temp_path != resume_path:
+                                    resume_path.unlink(missing_ok=True)
                                 return DownloadResult(
                                     path=temp_path,
                                     http_status=200,
                                     raw_archive_bytes=written,
                                     range_resumed=range_resumed,
                                 )
+                            if keep_partial_on_retryable:
+                                resume_path.unlink(missing_ok=True)
                             return DownloadResult(
                                 path=None,
                                 http_status=200,
@@ -372,12 +614,16 @@ def download_source(
             if disk_out is not None:
                 disk_out.close()
                 disk_out = None
+                if keep_partial_on_retryable and temp_path != resume_path:
+                    resume_path.unlink(missing_ok=True)
                 return DownloadResult(
                     path=temp_path,
                     http_status=200,
                     raw_archive_bytes=written,
                     range_resumed=range_resumed,
                 )
+            if keep_partial_on_retryable:
+                resume_path.unlink(missing_ok=True)
             return DownloadResult(
                 path=None,
                 http_status=200,
@@ -393,28 +639,40 @@ def download_source(
                 disk_out = None
             if hasattr(client, "note_stream_break"):
                 client.note_stream_break()
+            if hasattr(client, "recycle_session"):
+                client.recycle_session()
             progressed = written - written_before
             if progressed >= _MIN_PROGRESS_BYTES:
                 stalled_attempts = 0
             else:
                 stalled_attempts += 1
             if stalled_attempts >= max_attempts or total_attempts >= max_total_attempts:
-                _cleanup_partial()
+                if _stash_partial():
+                    _cleanup_partial(remove_resume=False)
+                else:
+                    _cleanup_partial()
                 raise
+            retry_delay = _stream_retry_backoff_seconds(
+                getattr(client, "limiter", None),
+                total_attempts,
+                bytes_written=written,
+            )
             logger.warning(
-                "stream %sv%d failed at %d bytes (+%d B, %s); retry %d (stalled %d/%d)",
+                "stream %sv%d failed at %d bytes (+%d B, %s); retry %d/%d in %.1fs (stalled %d/%d)",
                 arxiv_id,
                 version,
                 written,
                 progressed,
                 type(exc).__name__,
                 total_attempts,
+                max_total_attempts - 1,
+                retry_delay,
                 stalled_attempts,
                 max_attempts,
             )
             limiter = getattr(client, "limiter", None)
             if limiter is not None and hasattr(limiter, "schedule_retry_backoff"):
-                limiter.schedule_retry_backoff(1.5 * max(stalled_attempts, 1))
+                limiter.schedule_retry_backoff(retry_delay)
         except BaseException:
             _cleanup_partial()
             raise
@@ -423,7 +681,10 @@ def download_source(
                 disk_out.close()
                 disk_out = None
             response.close()
-    _cleanup_partial()
+    if _stash_partial():
+        _cleanup_partial(remove_resume=False)
+    else:
+        _cleanup_partial()
     assert last_exc is not None
     raise last_exc
 
@@ -578,8 +839,9 @@ def _write_tar_members_from_stream(
     seen_outputs: dict[str, tuple[int, Path]] = {}
     member_count = 0
     stage_root = staging.resolve()
+    created_dirs: set[Path] = {staging}
 
-    with tarfile.open(fileobj=gz_stream, mode="r|", bufsize=_CHUNK_SIZE) as archive:
+    with tarfile.open(fileobj=gz_stream, mode="r|", bufsize=_GIANT_CHUNK_SIZE) as archive:
         for member in archive:
             member_count += 1
             relative, relative_path = _safe_member_path(member.name)
@@ -609,13 +871,18 @@ def _write_tar_members_from_stream(
                 raise tarfile.ReadError(f"cannot read regular member {member.name!r}")
 
             target = staging / relative_path
+            parent = target.parent
             digest = hashlib.sha256()
             member_bytes = 0
             output = None
             try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if not target.resolve().is_relative_to(stage_root):
-                    raise _UnsafeArchiveError(f"member escapes staging directory: {member.name!r}")
+                if parent not in created_dirs:
+                    parent.mkdir(parents=True, exist_ok=True)
+                    if not parent.resolve().is_relative_to(stage_root):
+                        raise _UnsafeArchiveError(
+                            f"member escapes staging directory: {member.name!r}"
+                        )
+                    created_dirs.add(parent)
                 if prev_record is not None:
                     # Standard POSIX tar semantics (S3): later entry overwrites earlier one.
                     prev_record[1].unlink(missing_ok=True)
@@ -654,9 +921,9 @@ def _write_tar_members_from_stream(
     # Drain remaining tar zero-padding blocks on the same gzip stream so gzip
     # validates its 8-byte CRC/ISIZE trailer without a second pass (O4), while
     # still enforcing the uncompressed zip-bomb limit.
-    overhead_allowance = (member_count + 2) * 2048 + _CHUNK_SIZE
+    overhead_allowance = (member_count + 2) * 2048 + _GIANT_CHUNK_SIZE
     tail_bytes = 0
-    while chunk := gz_stream.read(_CHUNK_SIZE):
+    while chunk := gz_stream.read(_GIANT_CHUNK_SIZE):
         tail_bytes += len(chunk)
         if raw_bytes + tail_bytes > max_bytes + overhead_allowance:
             raise _UnsafeArchiveError(
@@ -817,7 +1084,7 @@ def download_and_extract_source(
             )
             raw_bytes = 0
             try:
-                with gzip.GzipFile(fileobj=stream, mode="rb") as gz_stream:
+                with _open_gzip_reader(stream) as gz_stream:
                     first_block = bytearray()
                     while len(first_block) < 512:
                         piece = gz_stream.read(512 - len(first_block))
@@ -893,16 +1160,20 @@ def download_and_extract_source(
                 staging = None
             if attempt >= _stream_attempts(client) - 1:
                 raise
+            if hasattr(client, "recycle_session"):
+                client.recycle_session()
+            limiter = getattr(client, "limiter", None)
+            retry_delay = _stream_retry_backoff_seconds(limiter, attempt + 1)
             logger.warning(
-                "in-flight stream %sv%d failed (%s); retry %d",
+                "in-flight stream %sv%d failed (%s); retry %d in %.1fs",
                 arxiv_id,
                 version,
                 type(exc).__name__,
                 attempt + 1,
+                retry_delay,
             )
-            limiter = getattr(client, "limiter", None)
             if limiter is not None and hasattr(limiter, "schedule_retry_backoff"):
-                limiter.schedule_retry_backoff(1.5 * (attempt + 1))
+                limiter.schedule_retry_backoff(retry_delay)
         finally:
             if staging is not None and staging.exists():
                 shutil.rmtree(staging)
