@@ -1193,3 +1193,199 @@ def test_validate_m2_does_not_import_export_m2() -> None:
     already_loaded = export_mod in sys.modules
     importlib.reload(validate_m2)
     assert export_mod not in sys.modules or already_loaded
+
+
+def test_literal_code_example_vs_unrestored_literal_sentinel(data_dir: Path) -> None:
+    elements = [
+        {
+            "elementid": "2408-11045#root1",
+            "arxivid": "2408.11045",
+            "kind": "document",
+            "content": "Version 1 root",
+        },
+        {
+            "elementid": "2408-11045#s1",
+            "arxivid": "2408.11045",
+            "kind": "sentence",
+            "content": "In LaTeX, authors write \\verb|\\bibitem{foo}| in literal code examples.",
+        },
+        {
+            "elementid": "2408-11045#s2",
+            "arxivid": "2408.11045",
+            "kind": "sentence",
+            "content": "Broken restoration left M2CLITERAL0TOKEN in the sentence.",
+        },
+    ]
+    hierarchy = [
+        {
+            "arxivid": "2408.11045",
+            "version": 1,
+            "elementid": "2408-11045#s1",
+            "parentid": "2408-11045#root1",
+        },
+        {
+            "arxivid": "2408.11045",
+            "version": 1,
+            "elementid": "2408-11045#s2",
+            "parentid": "2408-11045#root1",
+        },
+    ]
+    _write_shards(data_dir / "parsed", elements, hierarchy, [])
+    problems = validate(data_dir, check_corpus=False)
+    assert not any("leaked \\bibitem" in p for p in problems)
+    assert any("un-restored mask sentinel character in '2408-11045#s2'" in p for p in problems)
+
+
+def test_end_to_end_with_real_gathering_and_hierarchy(data_dir: Path) -> None:
+    from corpus import Corpus
+    from parsing.gathering import gather_compilation_unit
+    from parsing.hierarchy import build_raw_hierarchy
+    from parsing.models import ElementRow, HierarchyRow, RawNode
+    from parsing.pipeline import Stages, process_paper
+
+    _write_m1_paper(
+        data_dir,
+        "2408.11045",
+        {
+            1: (
+                "ok",
+                {
+                    "main.tex": (
+                        "\\documentclass{article}\n"
+                        "\\begin{document}\n"
+                        "\\section{Introduction}\n"
+                        "\\input{intro}\n"
+                        "\\section*{References}\n"
+                        "\\begin{thebibliography}{9}\n"
+                        "\\bibitem{k1} Ref 1.\n"
+                        "\\end{thebibliography}\n"
+                        "\\end{document}\n"
+                    ),
+                    "intro.tex": (
+                        "First shared sentence across versions. Second sentence in v1.\n"
+                        "\\begin{equation}a + b = c\\end{equation}\n"
+                    ),
+                },
+            ),
+            2: ("no_source", {}),
+            3: (
+                "ok",
+                {
+                    "main.tex": (
+                        "\\documentclass{article}\n"
+                        "\\begin{document}\n"
+                        "\\section{Introduction}\n"
+                        "First shared sentence across versions. Updated sentence in v3.\n"
+                        "\\begin{equation}a + b = c\\end{equation}\n"
+                        "\\end{document}\n"
+                    ),
+                },
+            ),
+        },
+    )
+
+    class _SimpleHooks:
+        def extract_and_expand_macros(self, preamble: str, body: str) -> str:
+            return body
+
+        def clean_latex_content(self, text: str, is_figure: bool = False) -> str:
+            return text.strip()
+
+        def normalize_math(self, text: str) -> str:
+            return text.strip()
+
+        def split_sentences(self, paragraph_text: str) -> list[str]:
+            return [s.strip() for s in paragraph_text.split(". ") if s.strip()]
+
+    def _dedup_elements(
+        arxiv_id: str,
+        version_trees: dict[int, list[RawNode]],
+        cite_alias: dict[tuple[int, str], str],
+    ) -> tuple[list[ElementRow], list[HierarchyRow]]:
+        dirname = id_to_dirname(arxiv_id)
+        elements_out: list[ElementRow] = []
+        hierarchy_out: list[HierarchyRow] = []
+        pool: dict[tuple[str, str], str] = {}
+        counter = 0
+
+        for ver, nodes in sorted(version_trees.items()):
+            local_to_global: dict[int, str] = {}
+            for node in nodes:
+                if node.kind == "document":
+                    gid = f"{dirname}#root{ver}"
+                    elements_out.append(
+                        ElementRow(
+                            elementid=gid,
+                            arxivid=arxiv_id,
+                            kind="document",
+                            content=node.content,
+                        )
+                    )
+                else:
+                    key = (node.kind, node.content)
+                    gid = pool.get(key)
+                    if gid is None:
+                        counter += 1
+                        gid = f"{dirname}#e{counter}"
+                        pool[key] = gid
+                        elements_out.append(
+                            ElementRow(
+                                elementid=gid,
+                                arxivid=arxiv_id,
+                                kind=node.kind,
+                                content=node.content,
+                            )
+                        )
+                local_to_global[node.node_id] = gid
+
+            for node in nodes:
+                if node.parent_node_id is not None:
+                    hierarchy_out.append(
+                        HierarchyRow(
+                            arxivid=arxiv_id,
+                            version=ver,
+                            elementid=local_to_global[node.node_id],
+                            parentid=local_to_global[node.parent_node_id],
+                        )
+                    )
+        return elements_out, hierarchy_out
+
+    corpus = Corpus(data_dir)
+    stages = Stages(
+        gather=gather_compilation_unit,
+        build_hierarchy=build_raw_hierarchy,
+        parse_bib_file=lambda _text, _ver: [],
+        parse_bibitems=lambda _blocks, _ver: [],
+        deduplicate_references=lambda _entries: ([], {}),
+        dedup_elements=_dedup_elements,
+        hooks=_SimpleHooks(),
+    )
+    res = process_paper(corpus, "2408.11045", stages)
+    assert res.stats.error is None
+    assert res.stats.n_versions == 3
+    assert res.stats.n_versions_with_tex == 2
+    assert res.stats.n_versions_empty == 1
+
+    _write_shards(
+        data_dir / "parsed",
+        [
+            {
+                "elementid": e.elementid,
+                "arxivid": e.arxivid,
+                "kind": e.kind,
+                "content": e.content,
+            }
+            for e in res.elements
+        ],
+        [
+            {
+                "arxivid": h.arxivid,
+                "version": h.version,
+                "elementid": h.elementid,
+                "parentid": h.parentid,
+            }
+            for h in res.hierarchy
+        ],
+        [],
+    )
+    assert validate(data_dir) == []

@@ -65,6 +65,12 @@ _CITE_CMD_RE = re.compile(
 )
 _ROOT_DISC_RE = re.compile(r"^root([1-9][0-9]*)$")
 _PRIVATE_SENTINELS = ("\ue000", "\ue001")
+_LITERAL_SENTINEL_RE = re.compile(r"M2CLITERALX*\d+TOKEN")
+_LITERAL_SPAN_RE = re.compile(
+    r"\\begin\s*\{\s*(?:verbatim|lstlisting)\*?\s*\}.*?\\end\s*\{\s*(?:verbatim|lstlisting)\*?\s*\}"
+    r"|\\verb\*?([^A-Za-z0-9\s]).*?\1",
+    re.DOTALL,
+)
 
 
 @dataclass
@@ -388,16 +394,23 @@ def _validate_paper(
                     f"{arxiv_id}: leaked References/Bibliography heading in elements "
                     f"('{eid}': {content!r})"
                 )
-            if _BIBITEM_RE.search(content) or _THEBIB_RE.search(content):
+            non_literal = (
+                _LITERAL_SPAN_RE.sub(" ", content)
+                if ("\\verb" in content or "verbatim" in content or "lstlisting" in content)
+                else content
+            )
+            if _BIBITEM_RE.search(non_literal) or _THEBIB_RE.search(non_literal):
                 problems.append(
                     f"{arxiv_id}: leaked \\bibitem / thebibliography in element '{eid}'"
                 )
 
-            if any(ch in content for ch in _PRIVATE_SENTINELS):
+            if any(ch in content for ch in _PRIVATE_SENTINELS) or _LITERAL_SENTINEL_RE.search(
+                content
+            ):
                 problems.append(f"{arxiv_id}: un-restored mask sentinel character in '{eid}'")
 
             # Invariant 7: \cite{...} consistency
-            for cite_match in _CITE_CMD_RE.finditer(content):
+            for cite_match in _CITE_CMD_RE.finditer(non_literal):
                 raw_keys = [k.strip() for k in cite_match.group(1).split(",") if k.strip()]
                 seen_in_cmd: set[str] = set()
                 for k in raw_keys:
@@ -518,11 +531,14 @@ def _check_version_coverage(
         tex_vers: set[int] = set()
         for vm in vlist:
             if vm.status is Status.OK:
-                try:
-                    tfiles = corpus.tex_files(aid, vm.version)
-                except ValueError:
-                    tfiles = {}
-                if any(k.lower().endswith(".tex") and raw.strip() for k, raw in tfiles.items()):
+                if vm.files:
+                    has_tex = any(fe.path.lower().endswith(".tex") for fe in vm.files)
+                else:
+                    v_tex_dir = papers_dir / _safe_dirname(aid) / f"v{vm.version}" / "tex"
+                    has_tex = v_tex_dir.is_dir() and any(
+                        p.is_file() and p.suffix.lower() == ".tex" for p in v_tex_dir.rglob("*")
+                    )
+                if has_tex:
                     tex_vers.add(vm.version)
         ok_tex_versions[aid] = tex_vers
 
@@ -645,15 +661,14 @@ def _check_version_coverage(
                     f"(e.g. {sample})"
                 )
 
-        for aid, expected_tex_vers in sorted(ok_tex_versions.items()):
-            summ = summaries.get(aid)
-            actual_roots = summ.root_versions if summ is not None else frozenset()
-            missing_vers = sorted(expected_tex_vers - actual_roots)
-            if missing_vers:
-                problems.append(
-                    f"{aid}: OK TeX version(s) v{missing_vers} missing parsed document root "
-                    "in elements"
-                )
+    for aid, expected_tex_vers in sorted(ok_tex_versions.items()):
+        summ = summaries.get(aid)
+        actual_roots = summ.root_versions if summ is not None else frozenset()
+        missing_vers = sorted(expected_tex_vers - actual_roots)
+        if missing_vers:
+            problems.append(
+                f"{aid}: OK TeX version(s) v{missing_vers} missing parsed document root in elements"
+            )
 
     summary_json = stats_dir / "m2_summary.json"
     if summary_json.is_file():
