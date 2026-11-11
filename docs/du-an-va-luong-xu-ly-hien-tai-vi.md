@@ -36,6 +36,14 @@ Hệ thống quản lý 2 kết nối độc lập với 2 dịch vụ bên ngo�
 - **Tách luồng linh hoạt (`--skip-s2`):** Hỗ trợ cờ `--skip-s2` để bỏ qua hoàn toàn truy vấn S2 trong luồng cào chính, ưu tiên tối đa thông lượng tải arXiv và để dành việc bù trích dẫn sau qua chế độ `--s2-only`.
 - **Bảo mật khóa API:** Tự động đính kèm `x-api-key` (từ biến `S2_API_KEY`); toàn bộ nhật ký ghi log đều được lọc qua `SecretRedactingFilter` để che giấu khóa API.
 
+### 2.3. Khám phá Offline Kaggle Snapshot & Quy trình Hai giai đoạn (v3.13)
+Khai thác triệt để định hướng đề bài (*"OAI-PMH và Kaggle chỉ là hộp công cụ"*), tối ưu hóa cào trên 1 máy hoàn toàn miễn phí:
+- **Phát hiện tỷ lệ phiên bản (Version Partitioning):** Khảo sát thực tế 25.000 ID cho thấy $\approx 74\%$ số bài chỉ tồn tại DUY NHẤT 1 phiên bản ($v1$). Chỉ $\approx 26\%$ là bài đa phiên bản ($v2..vN$).
+- **Khám phá siêu dữ liệu offline (Kaggle Snapshot):** Hỗ trợ cờ `--snapshot` (`src/crawler/snapshot.py`) quét tệp `arxiv-metadata-oai-snapshot.json` (tải miễn phí từ Kaggle) để trích xuất toàn bộ metadata và phiên bản trong <60s, ghi sẵn `paper.json` giúp loại bỏ 100% các cuộc gọi Atom API qua mạng, tránh hoàn toàn nguy cơ bị 429 API hoặc thiếu ngày version trung gian.
+- **Quy trình 2 giai đoạn (Two-Stage Decoupled Protocol):**
+  - **Giai đoạn 1 (Thu hoạch nguồn):** Chạy `--skip-s2` tập trung 100% băng thông tải và giải nén source arXiv trực tiếp từ `export.arxiv.org` (Paced Streaming 4.5 MiB/s + Range Resume HTTP 206) mà không bị S2 làm nghẽn socket.
+  - **Giai đoạn 2 (Làm giàu trích dẫn):** Chạy `--s2-only --enable-bib-fallback` làm giàu độc lập siêu dữ liệu trích dẫn theo lô 25 bài, tự bisection khi 413 và tự bóc `.bib/.bbl` khi 404.
+
 ---
 
 ## 3. Kiến trúc Đa luồng (5 nhóm luồng)

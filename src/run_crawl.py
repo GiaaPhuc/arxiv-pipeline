@@ -22,6 +22,7 @@ from pathlib import Path
 
 from crawler import ids, metrics, pipeline
 from crawler.config import Config
+from crawler.snapshot import filter_kaggle_snapshot, save_partition_summary
 
 logger = logging.getLogger("run_crawl")
 
@@ -84,6 +85,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--enable-oai-dates",
         action="store_true",
         help="use OAI-PMH arXivRaw fallback for missing intermediate version dates",
+    )
+    p.add_argument(
+        "--snapshot",
+        type=Path,
+        default=None,
+        help="path to Kaggle arxiv-metadata-oai-snapshot.json to pre-filter metadata offline",
     )
     return p.parse_args(argv)
 
@@ -158,6 +165,24 @@ def main(argv: list[str] | None = None) -> int:
     _setup_logging(config.data_dir, config.s2_api_key)
     if not config.s2_api_key:
         logger.warning("S2_API_KEY not set: Semantic Scholar will rate-limit heavily")
+
+    # Phase A: Offline metadata pre-filtering via Kaggle snapshot (if provided)
+    if args.snapshot:
+        logger.info("Pre-filtering Kaggle metadata snapshot: %s", args.snapshot)
+        try:
+            _, single_v1, multi_v = filter_kaggle_snapshot(
+                args.snapshot, all_ids, data_dir=config.data_dir, write_paper_json=True
+            )
+            save_partition_summary(config.data_dir / "logs", single_v1, multi_v)
+            logger.info(
+                "Offline metadata filtered: %d single-v1 papers, %d multi-version papers",
+                len(single_v1),
+                len(multi_v),
+            )
+        except Exception as exc:
+            logger.error("Failed to load Kaggle snapshot: %s", exc)
+            return 2
+
     try:
         summary = pipeline.run(all_ids, config)
     except pipeline.StopCrawl as exc:
