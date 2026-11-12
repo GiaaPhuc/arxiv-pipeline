@@ -127,7 +127,17 @@ ABBR_RE = re.compile(
     + r")",
     re.I,
 )
-INITIALS = re.compile(r"\b(?:[A-Z]\.\s*){1,4}(?=[A-Z][a-z]+\b)")
+SENTENCE_STARTERS = (
+    r"(?!(?:"
+    r"The|This|That|These|Those|"
+    r"We|They|He|She|It|You|Our|Their|His|Her|"
+    r"Then|Here|There|In|On|At|For|To|From|With|By|"
+    r"However|Therefore|Moreover|Furthermore|Thus|Hence|Meanwhile|Nevertheless|"
+    r"Finally|First|Second|Third|Lastly|Since|Because|Although|While|As|"
+    r"Both|Each|Every|All|Some|Any|Many|Several|One|Two|Three"
+    r")\b)"
+)
+INITIALS = re.compile(r"\b(?:[A-Z]\.\s*){1,4}" + SENTENCE_STARTERS + r"(?=[A-Z][a-z]+\b)")
 BOUNDARY_RE = re.compile(r"[.!?]+(?:[\"'”’\)\]]+)?(?=\s+|$)")
 RESTORE_RE = re.compile(r"\ufff0(\d+)\ufff1")
 PLACEHOLDER = "\ufff0{}\ufff1"

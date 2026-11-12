@@ -60,6 +60,9 @@ PRESENTATION_COMMANDS = frozenset(
         "Large",
         "LARGE",
         "huge",
+        "Huge",
+        "HUGE",
+        "normalsize",
     }
 )
 TEXT_FORMATTING = frozenset(
@@ -213,7 +216,15 @@ def extract_and_expand_macros(preamble: str, body: str) -> str:
                 "ref",
                 "label",
             }:
-                pos = _ws(current, end)
+                pos = end + (end < len(current) and current[end] == "*")
+                for _ in range(2):
+                    pos = _ws(current, pos)
+                    opt = _group(current, pos, "[", "]")
+                    if opt:
+                        pos = opt[1]
+                    else:
+                        break
+                pos = _ws(current, pos)
                 grp = _group(current, pos)
                 if grp:
                     out.append(current[i : grp[1]])

@@ -46,6 +46,7 @@ def test_macros(preamble, body, expected):
         (" A   B\tC ", "A B C"),
         (r"\textsf{hello} and \texttt{world}", "hello and world"),
         (r"\LargeWord x", r"\LargeWord x"),
+        (r"\Huge Big \normalsize and \HUGE giant", "Big and giant"),
     ],
 )
 def test_clean(source, expected):
@@ -65,7 +66,7 @@ def test_clean(source, expected):
         (r"\begin{gather}a\\b\end{gather}", r"\begin{equation}a\\b\end{equation}"),
         (r"\begin{displaymath}x\end{displaymath}", r"\begin{equation}x\end{equation}"),
         (
-            r"\begin{equation*}x\label{eq:a}\notag\end{equation*}",
+            r"\begin{equation*}x\label {eq:a}\notag\end{equation*}",
             r"\begin{equation}x\end{equation}",
         ),
         (r"\begin{multline}x\nonumber\end{multline}", r"\begin{equation}x\end{equation}"),
@@ -73,6 +74,10 @@ def test_clean(source, expected):
         (r"Price \$50 and $x$", r"Price \$50 and $x$"),
         (r"\verb|$x$| then $y$", r"\verb|$x$| then $y$"),
         (r"\url{http://x.org/$a$} and \(z\)", r"\url{http://x.org/$a$} and $z$"),
+        (
+            r"\href{http://x.org/$a$}{anchor} and \(z\)",
+            r"\href{http://x.org/$a$}{anchor} and $z$",
+        ),
         (r"\begin{verbatim}$x$\end{verbatim}", r"\begin{verbatim}$x$\end{verbatim}"),
         (r"\( a+\frac{b}{c} \)", "$a+\\frac{b}{c}$"),
     ],
@@ -95,9 +100,15 @@ def test_clean_idempotent():
 
 def test_preserve_macro_names_inside_cite_url_and_verbatim():
     preamble = r"\newcommand{\R}{\mathbb{R}}"
-    body = r"\cite{\R} \url{http://example.com/\R} \verb|\R| outside \R"
+    body = (
+        r"\cite{\R} \cite[see][p. 2]{\R} \citep*{\R} "
+        r"\url{http://example.com/\R} \verb|\R| outside \R"
+    )
     actual = extract_and_expand_macros(preamble, body)
-    assert actual == (r"\cite{\R} \url{http://example.com/\R} \verb|\R| outside \mathbb{R}")
+    assert actual == (
+        r"\cite{\R} \cite[see][p. 2]{\R} \citep*{\R} "
+        r"\url{http://example.com/\R} \verb|\R| outside \mathbb{R}"
+    )
 
 
 def test_preserve_macro_names_inside_verbatim_environment():

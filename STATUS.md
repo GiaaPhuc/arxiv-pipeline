@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **CN 08/11/2026 18:17 (Asia/Saigon)** — nhánh `m2/c-gathering-hierarchy` đã nhận main `ea13d45` (M1 v3.9); **359 passed (24,94 s)**, gồm **98 test C**, Ruff đạt. C đã commit `935b3dc`, thử độc lập **10 bài / 26 phiên bản thật**; M2-C còn 🟡: chờ B/D thật và đường `.bbl`. Người dùng tự tạo PR trên trình duyệt sau khi push.
+> Cập nhật lần cuối: **T5 12/11/2026 22:00 (Asia/Saigon)** — nhánh `milestone2-B` (PR #28 của Sơn) đã hoàn thiện và sửa toàn bộ edge cases (`INITIALS` loại trừ sentence starters, `extract_and_expand_macros` bảo vệ macro bên trong `\cite` có opt-args/cờ sao, thêm `\href` vào `PROTECT`, cỡ chữ `cleaner.py`); **467 passed (30,72 s)** (gồm 84 test B M2), `ruff check` và `ruff format` đạt 100%.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -13,9 +13,14 @@
 
 ### Đề và phạm vi
 
-- Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. Hiện đang hoàn thiện dữ liệu **Milestone 1** (thu thập 25k ID) và khởi động **Milestone 2** (Phase 0 đã xong: Leader A đã khóa hợp đồng `src/parsing/models.py` và khung `pipeline.py` / `run_parse.py` / `colab_parse.ipynb`; B–E bắt đầu code song song 06–12/11). Milestone 3 (đối sánh BibTeX với bảng `references`, MRR@5, poster A2 dọc, dataset Hugging Face) chưa bắt đầu.
+- Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. Hiện đang hoàn thiện dữ liệu **Milestone 1** (thu thập 25k ID) và hoàn thiện các trụ cột **Milestone 2** (Phase 0 đã xong; B và C đã hoàn thiện module cốt lõi; D và E đang phối hợp ghép nối). Milestone 3 chưa bắt đầu.
 - Nộp Milestone 1 qua Moodle: link repo mã công khai + link Jupyter Book (repo sách riêng, GitHub Pages). **Không nộp dữ liệu** ở mốc này. Viết bằng tiếng Việt. Không nộp trễ.
 - Khi nộp, repo mã chỉ được chứa mã (`.py` / `.ipynb`), `requirements.txt` và `README.md`. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md`, `plans/`, `project requirements/` đang ở trong repo để làm việc — xử lý lúc đóng băng (R6, T5.3 trong Phase 2).
+
+### Phần B M2 — hoàn thành và kiểm thử 12/11 (PR #28)
+
+- `cleaner.py` mở rộng macro an toàn (`\newcommand`, `\def`, 0–3 tham số, tối đa 5 vòng lặp, bảo vệ lệnh cấu trúc và cite/url) và dọn lệnh trình bày; `math_normalizer.py` state-machine chuyển toán nội dòng về `$...$` và toán khối về `\begin{equation}`, bảo vệ `\$` và URL; `sentence_splitter.py` Protect–Mask–Guard–Split–Restore tách câu lá chính xác, bảo vệ toán, trích dẫn, URL, số thập phân và danh mục từ viết tắt, loại trừ sentence starters tránh nuốt câu sau ký tự in hoa đơn lẻ.
+- **84 passed** tests B offline (không mạng, không dữ liệu); toàn bộ test suite **467 passed** (30,72 s); `ruff check` & `ruff format` sạch 100%. Tốc độ chuẩn hóa toán đạt ~19 MB/s, macro ~8.3 MB/s.
 
 ### Milestone 1 — đề vs hiện trạng
 
@@ -56,6 +61,7 @@
 
 | Ngày | Quyết định |
 | --- | --- |
+| 12/11 | **M2-B / Tinh chỉnh Parser & Splitter:** Thêm danh mục `SENTENCE_STARTERS` vào `INITIALS` tránh dính câu sau chữ hoa đơn lẻ (`Appendix A. The...`), bảo vệ macro trong `\cite` có opt-args/`*`, thêm `\href` vào `PROTECT` và bổ sung `Huge`/`HUGE`/`normalsize` vào `PRESENTATION_COMMANDS`. Toàn bộ 84 test B và 467 test dự án đều pass xanh |
 | 08/11 | **M2-C / chọn root:** chỉ cộng điểm include khi đích tĩnh tìm được từ thư mục root ứng viên trong mapping nguồn; giữ trọng số khác, API/schema và fallback. Tránh file mẫu có nhiều include thiếu thắng root thật (`2408.11049` v4/v5). Lượt thử C với hook truyền nguyên văn không thay tích hợp B/D thật |
 | 17/10 | Nguồn dữ liệu: arXiv API (`id_list`) + `/src/{id}vN` trên `export.arxiv.org` + S2 Graph API. Pipeline resumable bằng SQLite manifest; hai worker theo host (≥ 3 s arXiv, ≥ 1 s S2); chỉ giữ `.tex`/`.bib`, giữ cấu trúc thư mục; lưu JSON thô trước |
 | 17/10 | Dải ID = 4 trường `start_month,start_id,end_month,end_id`, tính cả hai đầu. ID không tồn tại ghi `not_found`, tách khỏi `failed` |

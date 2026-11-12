@@ -43,6 +43,18 @@ from parsing.sentence_splitter import split_sentences
             r"\href{https://a.b/a.1}{the source}. Next.",
             [r"\href{https://a.b/a.1}{the source}.", "Next."],
         ),
+        (
+            "See Appendix A. We explain details.",
+            ["See Appendix A.", "We explain details."],
+        ),
+        (
+            "Refer to Case B. This is important.",
+            ["Refer to Case B.", "This is important."],
+        ),
+        (
+            "In Part I. The authors state findings.",
+            ["In Part I.", "The authors state findings."],
+        ),
     ],
 )
 def test_split(source, expected):

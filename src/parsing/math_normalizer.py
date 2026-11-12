@@ -27,8 +27,8 @@ DISPLAY = frozenset(
 VERBATIM = frozenset({"verbatim", "verbatim*", "lstlisting", "minted"})
 BEGIN = re.compile(r"\\begin\{([a-zA-Z*]+)\}")
 VERB = re.compile(r"\\verb\*?")
-PROTECT = re.compile(r"\\(?:url|path|nolinkurl|texttt)\s*\{")
-LABEL = re.compile(r"\\(?:nonumber|notag)\b|\\label\{[^{}]*\}")
+PROTECT = re.compile(r"\\(?:url|path|nolinkurl|texttt|href)\s*\{")
+LABEL = re.compile(r"\\(?:nonumber|notag)\b|\\label\s*\{[^{}]*\}")
 NEXT_MARKER = re.compile(r"\\|\$")
 
 
