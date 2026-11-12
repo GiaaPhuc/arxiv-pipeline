@@ -66,6 +66,9 @@ class Config:
     arxiv_thermal_threshold: float = 3.0  # v3.3: thermal score threshold for proactive cooldown
     extract_workers: int = 2  # v3.4: parallel extract-worker threads for heavy archives
     extract_max_queue_bytes: int = 192 * 1024 * 1024  # v3.4: byte budget for extract_queue RAM
+    max_stream_mbps: float = (
+        4.5  # v3.14: sustained stream cap in MiB/s (default 4.5, configurable to 12.0-18.0)
+    )
 
     @property
     def user_agent(self) -> str:
@@ -256,6 +259,18 @@ class Config:
             except ValueError:
                 pass
 
+        max_stream_mbps_raw = (
+            os.environ.get("CRAWLER_MAX_STREAM_MBPS")
+            or local_vars.get("CRAWLER_MAX_STREAM_MBPS")
+            or ""
+        )
+        max_stream_mbps = 4.5
+        if max_stream_mbps_raw:
+            try:
+                max_stream_mbps = max(float(max_stream_mbps_raw), 0.1)
+            except ValueError:
+                pass
+
         values = {
             "data_dir": Path(data_dir_raw),
             "contact": os.environ.get("CRAWLER_CONTACT") or local_vars.get("CRAWLER_CONTACT") or "",
@@ -277,6 +292,7 @@ class Config:
             "enable_oai_dates": enable_oai_dates,
             "extract_workers": extract_workers,
             "extract_max_queue_bytes": extract_max_queue_bytes,
+            "max_stream_mbps": max_stream_mbps,
         }
         values.update(overrides)
         return cls(**values)

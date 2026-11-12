@@ -107,8 +107,34 @@ _STREAM_BREAK_BREATHER_SECONDS = 12.0  # v3.9.4: 12s End-to-Start rest after Fas
 _STREAM_FAILURES_FOR_COOLDOWN = 2  # v3.9.4: 2 consecutive stream cuts -> cooldown before 429
 _BANDWIDTH_WINDOW_MAX_BYTES = 50 * 1024 * 1024  # v3.10: 12s recharge every 50 MiB wire bytes
 _BANDWIDTH_WINDOW_BREATHER_SECONDS = 12.0
+_REFILL_SAFE_BPS = 4.0 * 1024 * 1024  # v3.14: Fastly token-bucket refill rate (~4.0 MiB/s)
+_GIANT_RECYCLE_BYTES = 30 * 1024 * 1024  # v3.14: 30 MiB giant package triggers TCP session recycle
 _FINAL_STATUS_NAMES = frozenset(s.value for s in Status if s.is_final)
 _GIANT_DIAGNOSTIC_BYTES = 50 * 1024 * 1024  # U5: log packages >= 50 MiB to diagnostics.jsonl
+
+
+def _compute_proportional_breather(
+    base_interval: float,
+    wire_bytes: int,
+    range_resumed: bool,
+    download_seconds: float,
+) -> float:
+    """Compute proportional post-download breather for Fastly token-bucket recovery (v3.14).
+
+    - Light packages (< 2 MiB): standard base_interval (>= 3.05s).
+    - Heavy packages (>= 2 MiB): scales with wire_bytes / _REFILL_SAFE_BPS (up to 12.0s max),
+      ensuring sustainable average bandwidth <= 4.0 MiB/s across requests.
+    """
+    if (
+        not range_resumed
+        and wire_bytes < _HEAVY_TRANSFER_BREATHER_BYTES
+        and download_seconds < _SLOW_TRANSFER_BREATHER_SECONDS
+    ):
+        return 0.0
+    proportional_refill = wire_bytes / _REFILL_SAFE_BPS
+    return round(
+        max(base_interval, min(proportional_refill, _BANDWIDTH_WINDOW_BREATHER_SECONDS)), 4
+    )
 
 
 class StopCrawl(Exception):
@@ -406,6 +432,12 @@ def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResu
             )
             wire_bytes = 65536 if is_early_stub else download.raw_archive_bytes
             run.window_heavy_bytes += max(wire_bytes, 0)
+            breather = _compute_proportional_breather(
+                run.arxiv.limiter._min_interval,
+                wire_bytes,
+                download.range_resumed,
+                download.download_seconds,
+            )
             if (
                 run.config.arxiv_min_interval >= 3.0
                 and getattr(run.arxiv, "last_header_elapsed", 0.0) >= 3.5
@@ -418,13 +450,13 @@ def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResu
                     version,
                 )
                 run.arxiv.recycle_session()
-                run.arxiv.limiter.schedule_retry_backoff(run.arxiv.limiter._min_interval)
-            elif (
-                download.range_resumed
-                or download.raw_archive_bytes >= _HEAVY_TRANSFER_BREATHER_BYTES
-                or download.download_seconds >= _SLOW_TRANSFER_BREATHER_SECONDS
-            ):
-                run.arxiv.limiter.schedule_retry_backoff(run.arxiv.limiter._min_interval)
+                run.arxiv.limiter.schedule_retry_backoff(
+                    max(run.arxiv.limiter._min_interval, breather)
+                )
+            elif breather > 0.0:
+                if wire_bytes >= _GIANT_RECYCLE_BYTES:
+                    run.arxiv.recycle_session()
+                run.arxiv.limiter.schedule_retry_backoff(breather)
             if (
                 run.config.arxiv_min_interval >= 3.0
                 and run.window_heavy_bytes >= _BANDWIDTH_WINDOW_MAX_BYTES

@@ -45,7 +45,25 @@ _PACED_STREAM_START_BYTES = (
 )  # v3.9.7: unthrottled first 512 KiB; pace >= 512 KiB at 4.5 MiB/s (v3.10)
 
 
-def _resolve_max_stream_bps() -> int:
+def _resolve_max_stream_bps(client: Any = None) -> int:
+    if client is not None:
+        cfg = getattr(client, "_config", None)
+        if cfg is not None:
+            mbps = getattr(cfg, "max_stream_mbps", None)
+            if mbps is not None:
+                try:
+                    val = float(mbps)
+                    if val > 0:
+                        return int(val * 1024 * 1024)
+                except ValueError:
+                    pass
+        if hasattr(client, "max_stream_bps") and client.max_stream_bps:
+            try:
+                val = float(client.max_stream_bps)
+                if val > 0:
+                    return int(val)
+            except ValueError:
+                pass
     env_val = os.environ.get("CRAWLER_MAX_STREAM_MBPS", "").strip()
     if env_val:
         try:
@@ -54,7 +72,7 @@ def _resolve_max_stream_bps() -> int:
                 return int(parsed * 1024 * 1024)
         except ValueError:
             pass
-    return int(4.5 * 1024 * 1024)  # v3.10 Clean Lean Turbo: 4.5 MiB/s sustained stream cap
+    return int(4.5 * 1024 * 1024)  # v3.10 Clean Lean Turbo: 4.5 MiB/s sustained stream cap default
 
 
 _MAX_SUSTAINED_STREAM_BPS = _resolve_max_stream_bps()
@@ -588,6 +606,7 @@ def download_source(
             clock_fn = getattr(limiter_obj, "_clock", time.monotonic)
             sleep_fn = getattr(limiter_obj, "_sleep", time.sleep)
             attempt_bytes = 0
+            active_stream_bps = _resolve_max_stream_bps(client)
             t_pace_start: float | None = None
             paced_sleep_total = 0.0
 
@@ -662,7 +681,7 @@ def download_source(
                         t_pace_start = clock_fn()
                     else:
                         paced_bytes = attempt_bytes - _PACED_STREAM_START_BYTES
-                        target_dt = paced_bytes / _MAX_SUSTAINED_STREAM_BPS
+                        target_dt = paced_bytes / active_stream_bps
                         actual_dt = max(0.0, clock_fn() - t_pace_start)
                         if target_dt > actual_dt:
                             step_sleep = min(target_dt - actual_dt, 0.20)

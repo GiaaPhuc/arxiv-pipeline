@@ -92,6 +92,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="path to Kaggle arxiv-metadata-oai-snapshot.json to pre-filter metadata offline",
     )
+    p.add_argument(
+        "--max-stream-mbps",
+        type=float,
+        default=None,
+        help="max sustained streaming download speed in MiB/s (default 4.5, recommended 12.0-18.0)",
+    )
     return p.parse_args(argv)
 
 
@@ -138,6 +144,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["s2_batch_size"] = args.s2_batch_size
     if args.enable_oai_dates:
         overrides["enable_oai_dates"] = True
+    if args.max_stream_mbps is not None:
+        overrides["max_stream_mbps"] = args.max_stream_mbps
     config = Config.from_env(**overrides)
     try:
         all_ids = list(_expand(args.ranges, args.limit))
@@ -152,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
             f"contact set: {bool(config.contact)}; S2 key set: {bool(config.s2_api_key)}; "
             f"backup: every {config.backup_every_ids} ids -> {config.backup_dir or '-'}; "
             f"bib fallback: {config.enable_bib_fallback}; S2 batch size: {config.s2_batch_size}; "
-            f"OAI dates: {config.enable_oai_dates}"
+            f"OAI dates: {config.enable_oai_dates}; max stream mbps: {config.max_stream_mbps}"
         )
         return 0
     if not config.contact:
