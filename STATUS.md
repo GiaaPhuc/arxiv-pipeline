@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T7 24/10/2026, 21:35 (Asia/Saigon)**
+> Cập nhật lần cuối: **12/11/2026, 22:25 (Asia/Saigon)**
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -13,7 +13,7 @@
 
 ### Đề và phạm vi
 
-- Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. Hiện **chỉ làm Milestone 1** (thu thập). Milestone 2 (parse LaTeX thành cây, chuẩn hóa, `\bibitem` → BibTeX, bỏ trùng) và Milestone 3 (đối sánh BibTeX với bảng `references`, MRR@5, poster A2 dọc, dataset Hugging Face) **chưa bắt đầu** — không triển khai.
+- Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. M1 là nền thu thập hiện có. Theo yêu cầu mới ngày 12/11, đã triển khai độc lập phần D của M2 (trích xuất BibTeX, dedup và exporter); pipeline M2 và M3 chưa triển khai trong checkout này.
 - Nộp Milestone 1 qua Moodle: link repo mã công khai + link Jupyter Book (repo sách riêng, GitHub Pages). **Không nộp dữ liệu** ở mốc này. Viết bằng tiếng Việt. Không nộp trễ.
 - Khi nộp, repo mã chỉ được chứa mã (`.py` / `.ipynb`), `requirements.txt` và `README.md`. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md`, `plans/`, `project requirements/` đang ở trong repo để làm việc — xử lý lúc đóng băng (R6, T5.3 trong Phase 2).
 
@@ -31,7 +31,15 @@
 | Mã nguồn | Sạch, chạy được, có chú thích; trích dẫn nếu dùng tài liệu ngoài | 🟡 T1.1/T1.2/T1.5 đã có; T2.2 hoàn tất trên nhánh C. Suite hiện tại: 129 passed, 2 skipped (pipeline stub); ruff check/format đạt. Chưa tích hợp pipeline/crawl thật. Quy ước làm việc: `CONTRIBUTING.md` |
 | Chấm (5 mục) | Báo cáo, mã, khám phá và tải đủ phiên bản, dữ liệu thu được, hiệu năng so với nhóm khác | ⬜ Chưa có số liệu |
 
-### Việc đang làm (21/10)
+### Việc đang làm (cập nhật 12/11)
+
+- **M2 — D/Thụ:** thêm `src/parsing/{models,bib_extractor,dedup,export_m2}.py` và ba file test. 35 test M2 tổng hợp đạt; toàn suite **164 passed, 2 skipped** (pipeline M1); Ruff check/format sạch. Không gọi mạng hoặc chạy corpus thật.
+- `parsing/models.py` là hợp đồng M2 **đề xuất**, chờ A đối chiếu khi tích hợp; `deduplicate_references` nhận thêm `arxiv_id`. Không sửa model M1 hoặc module của B/C/E.
+- Exporter ghi lô cuối và ba bảng đúng schema, CSV/JSON độ bao phủ phiên bản, trước/sau dedup và độ phủ trường BibTeX. Đã có bản thảo bàn giao sách tại `docs/m2/02_standardization_dedup.md`; chưa ghép/build repo sách.
+- Còn lại: thống nhất hợp đồng với A/E, nối gathering/cleaning/hierarchy, pilot nguồn thật, validator, số đo thời gian/RAM. Nếu pooling tạo chu trình thì báo lỗi; cần thống nhất cách biểu diễn với A/C/E.
+- Git sau kiểm tra: các file M2/docs mới chưa commit; `STATUS.md` được cập nhật cùng thay đổi. Không tạo PR hoặc đẩy remote.
+
+### Lịch sử công việc M1 (21–24/10)
 
 - **Notebook T2.5 (24/10):** đã có bảng theo bài/phiên bản trong `src/corpus_stats.ipynb`. Tách cell thiết lập đường dẫn khỏi import để sửa E402; chuyển tạo/hiển thị DataFrame ra ngoài vòng lặp. Chạy tuần tự các cell trong namespace mới từ `src/` đạt: 1 bài, 1 phiên bản, 2 tham khảo, 1 có arXiv ID. Chưa có bảng tổng hợp, biểu đồ và số đo hiệu năng. Toàn suite: 129 passed, 2 skipped; ruff check/format đạt.
 - **Test export T3.2 (24/10):** fixture trong thư mục tạm, chặn mạng; kiểm tra schema/giá trị Parquet, lọc và chống trùng tham khảo, bảng rỗng, bản không TeX, ID cũ, giữ nguyên nguồn và lỗi dữ liệu. Đã thêm `pyarrow` cho CI. File hiện tại dùng đúng `schema=REFERENCES_SCHEMA`, 14/14 test export đạt.
@@ -125,6 +133,15 @@ B và C test bằng HTTP giả, không đợi `http.py`. B làm `s2` sau `discov
 | T3.3 | Pilot 30–50 ID trên Colab (đợi pipeline resume) | A + cả nhóm | trưa 25/10 | ⬜ |
 | T3.4 | Review chéo, lint sạch | Cả nhóm | trưa 25/10 | ⬜ |
 
+### M2 — phần D độc lập (12/11)
+
+| Mã | Việc | Owner | TT |
+| --- | --- | --- | --- |
+| M2-D1 | `.bib` và `bibitem` | D — Thụ | 🟡 Có parser và test tổng hợp; heuristic cần pilot nguồn thật |
+| M2-D2 | Union-Find, đổi cite, gộp elements | D — Thụ | 🟡 Test ba phiên bản đạt; chưa ghép cây của C/B |
+| M2-D3 | Sharded Parquet và thống kê | D — Thụ | 🟡 Round-trip/schema đạt; chưa benchmark hoặc chạy full corpus |
+| M2-D4 | Test và phần báo cáo | D — Thụ | 🟡 35 test đạt; bản thảo trong docs, chưa ghép sách |
+
 ### Phase 2 — giao sau go/no-go trưa 25/10, đóng băng sáng 4/11
 
 | Mã | Việc | Mốc | TT |
@@ -144,6 +161,7 @@ B và C test bằng HTTP giả, không đợi `http.py`. B làm `s2` sau `discov
 
 | # | Mô tả | Mức | Hành động | Owner |
 | --- | --- | --- | --- | --- |
+| R8 | M2: hợp đồng đề xuất, chưa pilot nguồn thật; BibTeX dùng cú pháp ngoặc nhọn, dedup so sánh O(R²), pooling có thể tạo chu trình | TB | A/C/E chốt hợp đồng và đồ thị; chạy pilot, đo hiệu năng trước full corpus | A + D + E |
 | R1 | 25.000 ID trên **một máy** (D8). Chưa biết V̄. Nếu V̄ ≈ 2, chờ arXiv cỡ **42 giờ** + tải/trích. Colab free có thể ngắt — cân nhắc máy local/VM; manifest resume + sao lưu Drive | TB | Pilot sáng 25/10 ước lượng giờ/đĩa; chọn máy chính trước tối 25/10; bật crawl một luồng `--ranges src/id_ranges.csv` | A |
 | R2 | A là leader (19/10). Chưa gán tên B–E và chưa gán 5 dải. Đường găng code đi qua A và qua B (`discovery` rồi `s2`) | TB | Gán B–E và dải ở họp 21/10. Người dự phòng Moodle ưu tiên E. `s2` trễ sáng 24/10 thì A pair với B trong ngày | Leader |
 | R3 | Chưa có API key S2 | TB | **Một key trên máy crawl chính** (thường của B). Mỗi người vẫn có thể xin key cho pilot Colab cá nhân. D chỉ gửi trang đăng ký, không gửi giá trị key | B, D |
