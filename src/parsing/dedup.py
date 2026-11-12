@@ -1,7 +1,6 @@
-"""Owner D; M2-D2. Reference union, citation rewriting, then exact content pooling.
+"""Reference union, citation rewriting, then exact content pooling.
 
-Done when versioned reference and hierarchy fixtures pass. Does not mutate inputs.
-"""
+Input objects are not mutated."""
 
 from __future__ import annotations
 

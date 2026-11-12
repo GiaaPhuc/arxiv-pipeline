@@ -1,8 +1,6 @@
-"""Owner D; M2-D1. Parse BibTeX and best-effort bibitems without network access.
+"""Parse BibTeX and best-effort bibitems without network access.
 
-Done when synthetic format/anchor tests pass; free-form bibliography parsing is
-heuristic and must still be evaluated on the real corpus.
-"""
+Free-form bibliography parsing uses heuristics."""
 
 from __future__ import annotations
 

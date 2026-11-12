@@ -1,4 +1,4 @@
-"""Exercise real C/B/D stages, CLI exporter wiring, and E validator together."""
+"""Exercise parsing stages, CLI export, and validation together."""
 
 import json
 

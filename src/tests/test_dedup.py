@@ -1,4 +1,4 @@
-"""D2 cross-version regressions and invalid graph rejection."""
+"""Cross-version regressions and invalid graph rejection."""
 
 from copy import deepcopy
 

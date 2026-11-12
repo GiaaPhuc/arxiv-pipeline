@@ -1,4 +1,4 @@
-"""T3.2: check exported Parquet tables against synthetic local corpora."""
+"""Check exported Parquet tables against synthetic local corpora."""
 
 from __future__ import annotations
 

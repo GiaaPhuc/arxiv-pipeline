@@ -1,4 +1,4 @@
-"""T4.4: statistics for the report, computed from a synthetic local corpus (no network)."""
+"""Report statistics computed from a synthetic local corpus without network access."""
 
 from __future__ import annotations
 

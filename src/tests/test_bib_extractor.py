@@ -1,4 +1,4 @@
-"""D1 format and anchor regressions; all inputs are synthetic."""
+"""Format and anchor regressions using synthetic bibliography entries."""
 
 import pytest
 

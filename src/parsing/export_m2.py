@@ -1,8 +1,6 @@
-"""Owner D; M2-D3. Bounded paper batches and explicit Arrow schemas.
+"""Export bounded paper batches with explicit Arrow schemas.
 
-Done when shard round-trip and empty/final-batch tests pass. Use a fresh output
-folder; restart/resume and corpus orchestration belong to the integration layer.
-"""
+Requires a fresh output folder; appending and resume are not supported."""
 
 from __future__ import annotations
 

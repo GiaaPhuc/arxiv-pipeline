@@ -1,5 +1,3 @@
-"""D3 real Parquet round trips in temporary directories."""
-
 import csv
 import json
 

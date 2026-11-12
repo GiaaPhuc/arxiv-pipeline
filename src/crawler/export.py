@@ -1,7 +1,5 @@
 """Tables and statistics built from the LOCAL corpus (no network).
 
-Owner: D | Reviewer: E | Tasks: T3.2 (``export_tables``), T4.4 (``export_stats``)
-
 * ``export_tables``: ``papers.parquet`` / ``references.parquet`` in the assignment schema.
 * ``export_stats``: small CSV/JSON files for the report (copied to the book's ``stats/``).
 """
