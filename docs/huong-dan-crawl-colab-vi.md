@@ -1,4 +1,4 @@
-# Hướng dẫn crawl arXiv trên Google Colab
+# Hướng dẫn crawl arXiv trên Google Colab (v3.12.0)
 
 Tài liệu này dành cho người mới: chạy crawler Milestone 1 trên **Colab chỉ CPU**, không cần cài Python trên máy cá nhân.
 
@@ -30,9 +30,9 @@ Crawler **được thiết kế cho kiểu này**: bạn không cần một sess
 | Thư mục `data/` | Chứa bài đã crawl trên đĩa local (`/content/data`) + `manifest.sqlite` (ai xong, ai `failed`, ai còn `pending`) |
 | Gói sao lưu Drive | Một file nén duy nhất `MyDrive/arxiv-data.tar.gz` (hoặc `arxiv-data.tar`), giải nén/tải lên trong vài chục giây thay vì copy hàng chục nghìn file nhỏ |
 | Cùng một lệnh mỗi lần | `python run_crawl.py --ranges id_ranges.csv` (cùng `--data-dir` / `CRAWLER_DATA_DIR`) |
-| Sao lưu tự động | Pipeline tự động nén `data/` lên Drive mỗi **300 ID mới** (~35 phút) và tự sao lưu lần cuối khi crawler thoát |
+| Sao lưu tự động | Pipeline tự động nén `data/` lên Drive mỗi **1.000 ID mới** (hoặc tùy biến 300–1.000) và tự sao lưu lần cuối khi crawler thoát |
 
-Lần chạy sau: manifest **bỏ qua** cặp (bài, phiên bản) đã ở trạng thái cuối; **`failed`** và việc **S2 chưa xong** được **xếp lại hàng đợi**. Dừng bằng **Interrupt** / Ctrl+C vẫn an toàn — dữ liệu đã ghi vẫn giữ, chạy lại lệnh để tiếp.
+Lần chạy sau: manifest **bỏ qua** cặp (bài, phiên bản) đã ở trạng thái cuối; **`failed`** và việc **S2 chưa xong** được **xếp lại hàng đợi**. Dừng bằng **Interrupt** / Ctrl+C vẫn an toàn — dữ liệu đã ghi vẫn giữ, chạy lại lệnh để tiếp. Phiên bản **v3.12.0** tích hợp sẵn cơ chế **Dual-Engine Reference Fallback** (`.bib/.bbl`), **OAI-PMH date recovery** và **Batch Bisection 25 bài** giúp dữ liệu thu được đạt độ toàn vẹn cao nhất.
 
 ### Hai kịch bản dừng / chạy tiếp (Colab)
 
@@ -45,7 +45,7 @@ Lần chạy sau: manifest **bỏ qua** cặp (bài, phiên bản) đã ở tr�
 #### Kịch bản B: Bị disconnect / mất runtime (máy ảo bị recycle)
 *Dữ liệu local `/content/data` đã mất.*
 1. Chạy lại từ đầu: **Setup** (mount Drive, cấu hình) → **Restore** (`restore_now()`) → **Crawl**.
-2. Dữ liệu sẽ được khôi phục từ bản `arxiv-data.tar.gz` gần nhất trên Google Drive. Bạn chỉ mất tối đa phần crawl sau lần auto-backup gần nhất (~35 phút).
+2. Dữ liệu sẽ được khôi phục từ bản `arxiv-data.tar.gz` gần nhất trên Google Drive. Bạn chỉ mất tối đa phần crawl sau lần auto-backup gần nhất.
 
 ---
 
@@ -109,8 +109,15 @@ else:
      os.environ["CRAWLER_CONTACT"] = "email-cua-ban@example.com"
      os.environ["CRAWLER_DATA_DIR"] = "/content/data"
      os.environ["CRAWLER_BACKUP_DIR"] = "/content/drive/MyDrive/arxiv-data.tar.gz"
-     os.environ["CRAWLER_BACKUP_EVERY_IDS"] = "300"  # tự nén backup mỗi 300 ID mới (~35 phút)
-     os.environ["CRAWLER_ARXIV_MIN_INTERVAL"] = "3.5"
+     os.environ["CRAWLER_BACKUP_EVERY_IDS"] = "1000"  # tự nén backup mỗi 1000 ID mới + khi thoát
+     os.environ["CRAWLER_ARXIV_MIN_INTERVAL"] = "3.35"  # 3.35s Start-to-Start (an toàn giờ cao điểm)
+     os.environ["CRAWLER_ARXIV_MIN_IDLE_GAP"] = "3.25"  # 3.25s End-to-Start gap
+     os.environ["CRAWLER_AUTO_RESUME_RATE_LIMIT"] = "1"  # tự defer & cooldown khi dính 429
+     os.environ["CRAWLER_ENABLE_BIB_FALLBACK"] = (
+         "1"  # v3.12: Dual-engine trích xuất .bib/.bbl cục bộ khi S2 404
+     )
+     os.environ["CRAWLER_ENABLE_OAI_DATES"] = "1"  # v3.12: OAI-PMH arXivRaw khôi phục ngày trung gian
+     os.environ["CRAWLER_S2_BATCH_SIZE"] = "25"  # v3.12: mẻ 25 chống lỗi 413/504
      ```
    - Định nghĩa các hàm `backup_now()` và `restore_now()`.
 
@@ -145,18 +152,32 @@ Hàm này tự động xử lý thông minh:
 
 ### Bước 5 — Chạy crawl
 
-**Chạy thử (pilot 30 ID đầu tiên):**
+**1. Chạy thử nghiệm Pilot (30 ID đầu tiên):**
 ```bash
-!python run_crawl.py --ranges id_ranges.csv --limit 30
+!python run_crawl.py --ranges id_ranges.csv --limit 30 \
+    --auto-resume-rate-limit --enable-bib-fallback --enable-oai-dates
 ```
 
-**Crawl chính thức toàn bộ dải:**
-Bỏ tham số `--limit` để crawler chạy hết danh sách:
+**2. Crawl chính thức toàn bộ dải:**
+Bỏ tham số `--limit` để crawler chạy toàn bộ:
 ```bash
-!python run_crawl.py --ranges id_ranges.csv
+!python run_crawl.py --ranges id_ranges.csv \
+    --auto-resume-rate-limit --enable-bib-fallback --enable-oai-dates
 ```
 
-- **Khi đang crawl:** Cứ mỗi **300 ID mới**, crawler tự động snapshot SQLite WAL và đóng gói đè an toàn vào `arxiv-data.tar.gz` trên Drive.
+**3. Tùy chọn cào tách biệt trong giờ cao điểm (bỏ qua S2 để cào gói arXiv trước):**
+Nếu mạng chậm hoặc S2 chập chờn, bạn có thể thêm cờ `--skip-s2` để tập trung cào toàn bộ gói arXiv siêu tốc:
+```bash
+!python run_crawl.py --ranges id_ranges.csv \
+    --auto-resume-rate-limit --enable-oai-dates --skip-s2
+```
+
+**4. Cào bù trích dẫn Semantic Scholar (S2) sau khi đã cào xong arXiv:**
+```bash
+!python run_crawl.py --ranges id_ranges.csv --s2-only --enable-bib-fallback
+```
+
+- **Khi đang crawl:** Cứ mỗi **1.000 ID mới** (hoặc cấu hình tùy ý), crawler tự động snapshot SQLite WAL và đóng gói đè an toàn vào `arxiv-data.tar.gz` trên Drive.
 - **Dừng tay an toàn:** Bấm nút **Runtime → Interrupt execution** (tương đương Ctrl+C). Crawler sẽ hoàn tất bài hiện tại, ghi log và tự động chạy backup lần cuối trước khi thoát.
 
 ---
@@ -173,9 +194,23 @@ Khi bạn muốn tắt máy hoặc đóng tab Colab:
 
 ---
 
-### Bước 7 — Sau khi crawl xong (hoặc kiểm tra pilot)
+### Bước 7 — Sau khi crawl xong (Kiểm toán & Xuất dữ liệu)
 
 Khi toàn bộ 25.000 ID (hoặc đợt pilot) đã chạy xong không còn lỗi:
+
+**1. Kiểm toán tính toàn vẹn kho dữ liệu (`audit_corpus.py` — v3.12):**
+Đối chiếu tệp thực tế trên đĩa với `manifest.sqlite`, kiểm tra checksum SHA-256 các file `.tex`/`.bib` và xuất báo cáo:
+```bash
+!python audit_corpus.py --data-dir /content/data --output audit_report.json
+```
+
+**2. Làm giàu trích dẫn offline từ file `.bib/.bbl` (`enrich_references.py` — v3.12):**
+Nếu còn bài chưa có trích dẫn do S2 chưa lập chỉ mục (404), công cụ này sẽ tự động đọc các file `.bib/.bbl` có sẵn để bổ sung vào `references.json` 100% offline không cần mạng:
+```bash
+!python enrich_references.py --data-dir /content/data
+```
+
+**3. Kiểm tra tính toàn vẹn và xuất bảng dữ liệu nộp bài:**
 ```bash
 !python validate_corpus.py --data-dir /content/data
 !python export_data.py --data-dir /content/data
@@ -209,10 +244,13 @@ Trên Google Drive cá nhân (`MyDrive/`):
 | Triệu chứng | Việc nên làm |
 | --- | --- |
 | Thoát mã **2** | Thiếu `CRAWLER_CONTACT` hoặc lỗi đọc `id_ranges.csv` — sửa lại Bước 2 / 3 |
-| Thoát mã **3** | arXiv **403**, hoặc **429** trên API discovery hoặc `/src/` sau khi đã chờ `Retry-After` tối đa 4 lần — **dừng lại**, chờ **30–60 phút**, rồi chạy lại lệnh crawl (resume). **Không** cố spam hay giảm delay |
+| Thoát mã **3** | arXiv **403**, hoặc **429** trên API discovery hoặc `/src/` sau khi đã chờ `Retry-After` tối đa 4 lần — **dừng lại**, chờ **30–60 phút**, rồi chạy lại lệnh crawl (resume). Nếu bật `--auto-resume-rate-limit`, crawler sẽ tự defer bài và tự ngủ cooldown rồi chạy tiếp |
 | `Mountpoint must not already contain files` | Lỗi do Drive mount bị treo từ phiên trước. Bấm **Runtime → Restart session**, rồi chạy lại từ ô Setup |
-| `validate_corpus` / `export_data` lỗi | Do corpus **chưa crawl xong** (dừng giữa chừng, thiếu S2). Chỉ validate khi đã crawl hoàn tất |
-| S2 chậm / 429 | Cần kiểm tra lại `S2_API_KEY` trong Colab Secrets. Pipeline có cơ chế adaptive backoff tự động |
+| `validate_corpus` / `export_data` lỗi | Do corpus **chưa crawl xong** (dừng giữa chừng, thiếu S2 hoặc thiếu ngày trung gian). Kiểm tra qua `audit_corpus.py` trước khi xuất |
+| S2 404 (bài mới chưa index) | Kích hoạt `--enable-bib-fallback` để bóc tách `.bib/.bbl` cục bộ, hoặc chạy offline: `python enrich_references.py --data-dir /content/data` |
+| S2 lỗi 413 hoặc 504 | v3.12 đã mặc định lô 25 bài và tự chia đôi lô (**Batch Bisection**) đệ quy để cô lập bài lỗi, không làm gián đoạn cả lô |
+| Thiếu ngày phiên bản trung gian | Kích hoạt cờ `--enable-oai-dates` để crawler tự động truy vấn OAI-PMH `arXivRaw` bù đắp ngày chính xác cho các bản $v_2 \dots v_N$ |
+| S2 chậm / nghẽn mạng giờ cao điểm | Thêm cờ `--skip-s2` để ưu tiên cào gói arXiv siêu tốc, sau đó chạy bù trích dẫn bằng `--s2-only` |
 | Session Colab bị chết giữa chừng | Mở lại Colab, chạy Setup → `restore_now()` → chạy lại lệnh crawl ở Bước 5 |
 
 ---
@@ -232,7 +270,7 @@ Trên Google Drive cá nhân (`MyDrive/`):
 - **Khi muốn crawl tiếp (phiên làm việc sau):** Mở lại notebook Colab → chạy lần lượt: **Setup** → **Restore** (`restore_now()`) → **Crawl** (cùng đúng một lệnh crawl, manifest sẽ tự động bỏ qua toàn bộ bài đã xong).
 
 ### 2. Bị disconnect bất ngờ giữa chừng (mất runtime / Colab tự tắt)
-- Dữ liệu đã được pipeline tự động nén lưu định kỳ mỗi 300 ID mới (~35 phút) vào `arxiv-data.tar.gz` trên Drive, bạn chỉ mất tối đa bài của đợt crawl dở dang gần nhất.
+- Dữ liệu đã được pipeline tự động nén lưu định kỳ mỗi 1.000 ID mới (hoặc cấu hình tùy ý) vào `arxiv-data.tar.gz` trên Drive, bạn chỉ mất tối đa bài của đợt crawl dở dang gần nhất.
 - **Cách xử lý:** Mở lại Colab, chạy lại từ đầu: **Setup** → **Restore** (`restore_now()`) → **Crawl**. Dữ liệu sẽ được giải nén nguyên vẹn về local và tiếp tục crawl các ID còn lại.
 
 ### 3. Dừng tạm nhưng runtime vẫn còn sống (chưa tắt tab, chưa disconnect)

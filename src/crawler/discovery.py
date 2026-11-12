@@ -23,9 +23,13 @@ Network/HTTP errors are never turned into "missing": they propagate to the calle
 
 from __future__ import annotations
 
+import email.utils
 import logging
+import re
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
+
+import requests
 
 from .config import Config
 from .http import HostClient
@@ -156,6 +160,61 @@ def discover(
     return [found[x] for x in desired if x in found], [x for x in desired if x not in found]
 
 
+def fetch_oai_revision_dates(
+    arxiv_id: str,
+    *,
+    timeout: float = 30.0,
+    session: requests.Session | None = None,
+) -> dict[int, str]:
+    """Query OAI-PMH (arXivRaw) for chronological version dates of an arXiv paper.
+
+    Returns a dict mapping version number (e.g. 1, 2, 3) to ISO date (YYYY-MM-DD).
+    """
+    sess = session or requests.Session()
+    url = "https://oaipmh.arxiv.org/oai"
+    params = {
+        "verb": "GetRecord",
+        "identifier": f"oai:arXiv.org:{arxiv_id}",
+        "metadataPrefix": "arXivRaw",
+    }
+    try:
+        resp = sess.get(url, params=params, timeout=timeout)
+        if resp.status_code != 200:
+            return {}
+        root = ET.fromstring(resp.content)
+    except Exception as exc:
+        logger.debug("OAI-PMH fetch failed for %s: %r", arxiv_id, exc)
+        return {}
+
+    def local_tag(node: ET.Element) -> str:
+        return node.tag.rsplit("}", 1)[-1]
+
+    raw_node = next((node for node in root.iter() if local_tag(node) == "arXivRaw"), None)
+    if raw_node is None:
+        return {}
+
+    dates: dict[int, str] = {}
+    for node in raw_node:
+        if local_tag(node) != "version":
+            continue
+        v_attr = node.get("version", "")
+        m = re.match(r"^v([1-9]\d*)$", v_attr)
+        if not m:
+            continue
+        v_num = int(m.group(1))
+        date_node = next((child for child in node if local_tag(child) == "date"), None)
+        if date_node is not None and date_node.text:
+            raw_val = date_node.text.strip()
+            try:
+                dt = email.utils.parsedate_to_datetime(raw_val)
+                dates[v_num] = dt.strftime("%Y-%m-%d")
+            except Exception:
+                ym = re.search(r"(\d{4}-\d{2}-\d{2})", raw_val)
+                if ym:
+                    dates[v_num] = ym.group(1)
+    return dates
+
+
 def fetch_revised_dates(
     papers: Iterable[PaperMeta],
     client: HostClient,
@@ -210,6 +269,13 @@ def fetch_revised_dates(
         if all((paper.arxiv_id, k) in dates for k in versions):
             paper.revised_dates = [dates[(paper.arxiv_id, k)] for k in versions]
         else:
+            if getattr(config, "enable_oai_dates", False):
+                oai_dates = fetch_oai_revision_dates(paper.arxiv_id)
+                if all(k in oai_dates for k in versions):
+                    paper.revised_dates = [oai_dates[k] for k in versions]
+                    for k in versions:
+                        dates[(paper.arxiv_id, k)] = oai_dates[k]
+                    continue
             paper.revised_dates = []
             logger.warning("revised dates incomplete for %s", paper.arxiv_id)
             incomplete.append(paper.arxiv_id)

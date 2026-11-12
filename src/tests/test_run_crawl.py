@@ -118,3 +118,25 @@ def test_cli_forwards_s2_only_and_auto_resume_rate_limit_flags(monkeypatch, tmp_
     assert run_crawl.main(args) == 0
     assert seen["s2_only"] is True
     assert seen["auto_resume"] is True
+
+
+def test_cli_forwards_skip_s2_flag(monkeypatch, tmp_path):
+    monkeypatch.setenv("CRAWLER_CONTACT", "me@example.com")
+    seen = {}
+
+    def fake_run(all_ids, config):
+        seen["skip_s2"] = config.skip_s2
+        return {"ok": 1}
+
+    monkeypatch.setattr(pipeline, "run", fake_run)
+    args = [
+        "--ranges",
+        str(RANGES),
+        "--limit",
+        "1",
+        "--data-dir",
+        str(tmp_path / "d"),
+        "--skip-s2",
+    ]
+    assert run_crawl.main(args) == 0
+    assert seen["skip_s2"] is True

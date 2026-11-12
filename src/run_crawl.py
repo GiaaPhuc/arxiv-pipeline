@@ -22,6 +22,7 @@ from pathlib import Path
 
 from crawler import ids, metrics, pipeline
 from crawler.config import Config
+from crawler.snapshot import filter_kaggle_snapshot, save_partition_summary
 
 logger = logging.getLogger("run_crawl")
 
@@ -63,6 +64,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="skip arXiv calls and only fetch missing Semantic Scholar references (U2)",
     )
+    p.add_argument(
+        "--skip-s2",
+        action="store_true",
+        help="skip Semantic Scholar queries during crawl (backfill later with --s2-only)",
+    )
+    p.add_argument(
+        "--enable-bib-fallback",
+        action="store_true",
+        help="fallback to local .bib/.bbl references when S2 paper is not indexed (404)",
+    )
+    p.add_argument(
+        "--s2-batch-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help="batch size for S2 POST /graph/v1/paper/batch (default 25)",
+    )
+    p.add_argument(
+        "--enable-oai-dates",
+        action="store_true",
+        help="use OAI-PMH arXivRaw fallback for missing intermediate version dates",
+    )
+    p.add_argument(
+        "--snapshot",
+        type=Path,
+        default=None,
+        help="path to Kaggle arxiv-metadata-oai-snapshot.json to pre-filter metadata offline",
+    )
     return p.parse_args(argv)
 
 
@@ -101,6 +130,14 @@ def main(argv: list[str] | None = None) -> int:
         overrides["auto_resume_rate_limit"] = True
     if args.s2_only:
         overrides["s2_only"] = True
+    if args.skip_s2:
+        overrides["skip_s2"] = True
+    if args.enable_bib_fallback:
+        overrides["enable_bib_fallback"] = True
+    if args.s2_batch_size is not None:
+        overrides["s2_batch_size"] = args.s2_batch_size
+    if args.enable_oai_dates:
+        overrides["enable_oai_dates"] = True
     config = Config.from_env(**overrides)
     try:
         all_ids = list(_expand(args.ranges, args.limit))
@@ -113,7 +150,9 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(all_ids)} ids, first {all_ids[0] if all_ids else '-'}, "
             f"last {all_ids[-1] if all_ids else '-'}; data dir {config.data_dir}; "
             f"contact set: {bool(config.contact)}; S2 key set: {bool(config.s2_api_key)}; "
-            f"backup: every {config.backup_every_ids} ids -> {config.backup_dir or '-'}"
+            f"backup: every {config.backup_every_ids} ids -> {config.backup_dir or '-'}; "
+            f"bib fallback: {config.enable_bib_fallback}; S2 batch size: {config.s2_batch_size}; "
+            f"OAI dates: {config.enable_oai_dates}"
         )
         return 0
     if not config.contact:
@@ -126,6 +165,24 @@ def main(argv: list[str] | None = None) -> int:
     _setup_logging(config.data_dir, config.s2_api_key)
     if not config.s2_api_key:
         logger.warning("S2_API_KEY not set: Semantic Scholar will rate-limit heavily")
+
+    # Phase A: Offline metadata pre-filtering via Kaggle snapshot (if provided)
+    if args.snapshot:
+        logger.info("Pre-filtering Kaggle metadata snapshot: %s", args.snapshot)
+        try:
+            _, single_v1, multi_v = filter_kaggle_snapshot(
+                args.snapshot, all_ids, data_dir=config.data_dir, write_paper_json=True
+            )
+            save_partition_summary(config.data_dir / "logs", single_v1, multi_v)
+            logger.info(
+                "Offline metadata filtered: %d single-v1 papers, %d multi-version papers",
+                len(single_v1),
+                len(multi_v),
+            )
+        except Exception as exc:
+            logger.error("Failed to load Kaggle snapshot: %s", exc)
+            return 2
+
     try:
         summary = pipeline.run(all_ids, config)
     except pipeline.StopCrawl as exc:

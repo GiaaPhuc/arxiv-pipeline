@@ -153,14 +153,16 @@ def _mock_src(*, failing: tuple[str, ...] = ()) -> None:
                 responses.add(responses.GET, url, body=archive, status=200)
 
 
-def _config(tmp_path: Path) -> Config:
-    return Config(
-        data_dir=tmp_path / "data",
-        contact="test@example.com",
-        arxiv_min_interval=0.0,
-        s2_min_interval=0.0,
-        max_retries=0,
-    )
+def _config(tmp_path: Path, **overrides) -> Config:
+    values = {
+        "data_dir": tmp_path / "data",
+        "contact": "test@example.com",
+        "arxiv_min_interval": 0.0,
+        "s2_min_interval": 0.0,
+        "max_retries": 0,
+    }
+    values.update(overrides)
+    return Config(**values)
 
 
 def _calls(prefix: str) -> list[str]:
@@ -859,6 +861,26 @@ def test_s2_only_mode_backfills_missing_s2_without_calling_arxiv(tmp_path):
     assert validate_corpus.validate(config.data_dir) == []
 
 
+@responses.activate
+def test_skip_s2_mode_crawls_arxiv_without_calling_s2(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    # Note: No S2 mock registered — any call to S2 would fail
+    config = _config(tmp_path, skip_s2=True)
+    ids = ["2408.00001"]
+    summary = pipeline.run(ids, config)
+    assert summary["ok"] == 1
+
+    root = config.data_dir / "papers" / "2408-00001"
+    assert not (root / pipeline.S2_RAW_NAME).exists()
+    assert _calls(f"{S2}/") == []
+
+    # Verify both flags together raise ValueError
+    invalid_cfg = Config(data_dir=tmp_path, contact="me@example.com", skip_s2=True, s2_only=True)
+    with pytest.raises(ValueError, match="Cannot specify both"):
+        pipeline.run(ids, invalid_cfg)
+
+
 def test_workspace_mutex_blocks_concurrent_process_lock_and_stepped_429_backoff(tmp_path):
     from crawler.source import DownloadResult
 
@@ -1071,8 +1093,8 @@ def test_escalating_429_cooldown_and_no_false_cooldown_on_slow_ok_downloads(tmp_
         s2_min_interval=0.0,
         max_retries=0,
         auto_resume_rate_limit=True,
-        rate_limit_cooldown_seconds=180.0,
-        arxiv_thermal_cooldown_seconds=60.0,
+        rate_limit_cooldown_seconds=360.0,
+        arxiv_thermal_cooldown_seconds=120.0,
     )
     limiter = RateLimiter(3.0, clock=clock, sleep=fake_limiter_sleep, min_idle_gap=0.50)
     arxiv_client = HostClient(ARXIV, limiter, config)
@@ -1090,21 +1112,20 @@ def test_escalating_429_cooldown_and_no_false_cooldown_on_slow_ok_downloads(tmp_
     )
     assert summary["ok"] == 5
     assert summary["no_source"] == 1
-    # Cooldowns escalated linearly 60s -> 120s -> 180s; no extra thermal sleeps after 200 OKs!
-    assert cooldown_sleeps == [60.0, 120.0, 180.0]
+    # Cooldowns escalated linearly 120s -> 180s -> 240s (max cap 240s; never sleep 360-600s!):
+    assert cooldown_sleeps == [120.0, 180.0, 240.0]
 
-    # Unit check on streak scaling helper (default config: 30s -> 60s -> 90s -> 120s cap):
+    # Unit check on streak scaling helper (default config: 120s -> 180s -> 240s cap):
     from unittest.mock import MagicMock
 
     default_cfg = Config(contact="test@example.com")
     dummy_run = MagicMock()
     dummy_run.config = default_cfg
     dummy_run.arxiv_429_streak = 0
-    assert pipeline._compute_arxiv_cooldown(dummy_run) == 30.0
-    assert pipeline._compute_arxiv_cooldown(dummy_run) == 60.0
-    assert pipeline._compute_arxiv_cooldown(dummy_run) == 90.0
     assert pipeline._compute_arxiv_cooldown(dummy_run) == 120.0
-    assert pipeline._compute_arxiv_cooldown(dummy_run) == 120.0
+    assert pipeline._compute_arxiv_cooldown(dummy_run) == 180.0
+    assert pipeline._compute_arxiv_cooldown(dummy_run) == 240.0
+    assert pipeline._compute_arxiv_cooldown(dummy_run) == 240.0
     dummy_run.arxiv_429_streak = 0
     assert pipeline._compute_arxiv_cooldown(dummy_run, retry_after=300.0) == 300.0
     dummy_run.arxiv_429_streak = 0
@@ -1156,7 +1177,7 @@ def test_429_cooldown_skips_unchanged_backup_and_runs_changed_backup_in_parallel
     )
     summary = pipeline.run(["2408.00004", "2408.00002"], config)
     assert summary["ok"] == 4
-    assert cooldown_calls == [60.0, 120.0]
+    assert cooldown_calls == [60.0, 90.0]
     # 1st 429 ran backup asynchronously on checkpoint-worker; 2nd 429 skipped backup completely;
     # finally: ran 1 final synchronous backup on MainThread -> total 2 backups, NOT 3!
     assert len(backup_threads) == 2
@@ -1167,25 +1188,31 @@ def test_429_cooldown_skips_unchanged_backup_and_runs_changed_backup_in_parallel
 def test_exhausted_stream_drop_defers_paper_in_main_pass_and_recovers(tmp_path, monkeypatch):
     import requests as req_mod
 
+    from crawler.source import resume_partial_path
+
     responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
     archive = _tar_gz()
     monkeypatch.setattr(pipeline, "_sleep_interruptible", lambda _stop, _s: None)
 
     calls_00002 = 0
-    # Force download_source to raise ChunkedEncodingError on pass 1 for 2408.00002,
-    # then succeed cleanly in deferred pass 2:
+    # Force download_source to raise ChunkedEncodingError on pass 1 and deferred pass 1
+    # (stashing >= 512 KiB of progress so deferred pass 2 is allowed), then succeed cleanly:
     real_dl = pipeline.download_source
 
-    def fail_pass1_00002(client, arxiv_id, version, tmp_dir, **kwargs):
+    def fail_twice_with_progress(client, arxiv_id, version, tmp_dir, **kwargs):
         nonlocal calls_00002
-        if arxiv_id == "2408.00002" and calls_00002 == 0:
+        if arxiv_id == "2408.00002" and calls_00002 < 2:
             calls_00002 += 1
-            raise req_mod.exceptions.ChunkedEncodingError("exhausted 2 stream attempts")
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            part = resume_partial_path(tmp_dir, arxiv_id, version)
+            part.write_bytes(b"x" * (calls_00002 * 600 * 1024))
+            raise req_mod.exceptions.ChunkedEncodingError(f"stream break {calls_00002}")
+        resume_partial_path(tmp_dir, arxiv_id, version).unlink(missing_ok=True)
         return real_dl(client, arxiv_id, version, tmp_dir, **kwargs)
 
     responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", body=archive)
     _mock_s2()
-    monkeypatch.setattr(pipeline, "download_source", fail_pass1_00002)
+    monkeypatch.setattr(pipeline, "download_source", fail_twice_with_progress)
 
     config = Config(
         data_dir=tmp_path / "data",
@@ -1198,7 +1225,7 @@ def test_exhausted_stream_drop_defers_paper_in_main_pass_and_recovers(tmp_path, 
     )
     summary = pipeline.run(["2408.00002"], config)
     assert summary["ok"] == 1
-    assert calls_00002 == 1
+    assert calls_00002 == 2
 
 
 @responses.activate
@@ -1318,8 +1345,8 @@ def test_v37_backup_throttle_s2_no_infinite_requeue_and_heavy_breather(tmp_path,
     # S2 gave up after 4 attempts per batch instead of looping forever in run.s2_queue:
     assert 4 <= s2_post_calls <= 12
 
-    # Also verify heavy download (>= 4 MiB) schedules a full End-to-Start breather on limiter:
-    limiter = RateLimiter(3.15, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=1.50)
+    # Also verify heavy download (>= 2 MiB) schedules a full End-to-Start breather on limiter:
+    limiter = RateLimiter(3.15, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=2.20)
     heavy_client = HostClient(ARXIV, limiter, config)
     dummy_run = pipeline._Run(
         config=config,
@@ -1338,7 +1365,7 @@ def test_v37_backup_throttle_s2_no_infinite_requeue_and_heavy_breather(tmp_path,
                 path=None,
                 http_status=200,
                 data=bytearray(b"x"),
-                raw_archive_bytes=5 * 1024 * 1024,
+                raw_archive_bytes=2 * 1024 * 1024,
             ),
         )
         paper_meta = pipeline.PaperMeta(
@@ -1350,6 +1377,48 @@ def test_v37_backup_throttle_s2_no_infinite_requeue_and_heavy_breather(tmp_path,
         )
         pipeline._download_version(dummy_run, paper_meta, 1)
         assert limiter._retry_backoff == 3.15  # noqa: SLF001
+
+        # v3.10: giant archive (>= 10 MiB) schedules min_interval breather (no 6.0s penalty)
+        monkeypatch.setattr(
+            pipeline,
+            "download_source",
+            lambda *_a, **_kw: pipeline.DownloadResult(
+                path=None,
+                http_status=200,
+                data=bytearray(b"x"),
+                raw_archive_bytes=10 * 1024 * 1024,
+            ),
+        )
+        pipeline._download_version(dummy_run, paper_meta, 1)
+        assert limiter._retry_backoff == 3.15  # noqa: SLF001
+
+        # v3.9.4: 45 MiB cumulative wire bytes in live mode (arxiv_min_interval >= 3.0)
+        # triggers a 12.0s bandwidth-bucket recharge and resets window_heavy_bytes:
+        live_cfg = Config(
+            data_dir=tmp_path / "data",
+            contact="test@example.com",
+            arxiv_min_interval=3.15,
+        )
+        assert live_cfg.arxiv_min_idle_gap == 3.05
+        assert live_cfg.arxiv_jitter_max == 0.20
+        dummy_run.config = live_cfg
+        dummy_run.window_heavy_bytes = 40 * 1024 * 1024
+        pipeline._download_version(dummy_run, paper_meta, 1)
+        assert dummy_run.window_heavy_bytes == 0
+        assert limiter._retry_backoff == 12.0  # noqa: SLF001
+
+        # v3.9.4: post-429 caution holds elevated limiter._min_interval across 6 clean 2xxs:
+        dummy_run.arxiv_429_streak = 1
+        dummy_run.arxiv_ok_since_429 = 0
+        limiter._min_interval = 4.25  # noqa: SLF001
+        limiter._adaptive_streak = 1  # noqa: SLF001
+        for i in range(5):
+            pipeline._download_version(dummy_run, paper_meta, 1)
+            assert dummy_run.arxiv_429_streak == 1, f"decayed too early at ok #{i + 1}"
+            assert limiter._min_interval == 4.25  # noqa: SLF001
+        pipeline._download_version(dummy_run, paper_meta, 1)
+        assert dummy_run.arxiv_429_streak == 0
+        assert limiter._min_interval == 3.50  # noqa: SLF001
     finally:
         monkeypatch.setattr(pipeline, "download_source", real_download_source)
         dummy_run.manifest.close()
@@ -1376,3 +1445,202 @@ def test_v37_backup_throttle_s2_no_infinite_requeue_and_heavy_breather(tmp_path,
     proactive_summary = pipeline.run(["2408.00001", "2408.00002", "2408.00004"], proactive_cfg)
     assert proactive_summary["ok"] == 5
     assert proactive_sleeps == [60.0]
+
+
+def test_v395_no_latch_feedback_loop_on_fast_200_ok(tmp_path, monkeypatch):
+    """v3.9.5: fast 200 OK downloads never call note_429() or latch into perpetual 12s stalls."""
+    from crawler.http import HostClient, RateLimiter
+
+    limiter = RateLimiter(3.15, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=3.05)
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=3.15,
+    )
+    client = HostClient(ARXIV, limiter, cfg)
+    dummy_run = pipeline._Run(
+        config=cfg,
+        manifest=pipeline.Manifest(tmp_path / "data" / "manifest.sqlite"),
+        arxiv=client,
+        s2=pipeline.make_s2_client(cfg),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    paper_meta = pipeline.PaperMeta(
+        arxiv_id="2408.07161",
+        title="t",
+        authors=[],
+        submission_date="2024-08-01",
+        num_versions=1,
+    )
+
+    # 1. Fast normal 200 OK (150 KB, 0.22s wire time):
+    monkeypatch.setattr(
+        pipeline,
+        "download_source",
+        lambda *_a, **_kw: pipeline.DownloadResult(
+            path=None,
+            http_status=200,
+            data=bytearray(b"x" * 150_000),
+            raw_archive_bytes=150_000,
+            download_seconds=0.22,
+        ),
+    )
+    pipeline._download_version(dummy_run, paper_meta, 1)
+    # Must NOT schedule retry backoff or widen min_interval:
+    assert limiter._retry_backoff == 0.0  # noqa: SLF001
+    assert limiter._min_interval == 3.15  # noqa: SLF001
+
+    # 2. Simulate a previous 12.0s breather consumed by limiter:
+    limiter.schedule_retry_backoff(12.0)
+    limiter.wait()  # consumes the 12s backoff, _retry_backoff resets to 0.0
+    assert limiter._retry_backoff == 0.0  # noqa: SLF001
+
+    # Next normal download runs:
+    pipeline._download_version(dummy_run, paper_meta, 1)
+    # Must stay 0.0! No latch loop!
+    assert limiter._retry_backoff == 0.0  # noqa: SLF001
+    assert limiter._min_interval == 3.15  # noqa: SLF001
+
+    dummy_run.manifest.close()
+
+
+def test_v398_ttfb_tarpit_triggers_preemptive_cushion(tmp_path, monkeypatch):
+    """v3.9.8: response header TTFB >= 3.5s triggers pre-emptive session recycle and cushion."""
+    from crawler.http import HostClient, RateLimiter
+
+    limiter = RateLimiter(3.15, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=3.05)
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=3.15,
+    )
+    client = HostClient(ARXIV, limiter, cfg)
+    dummy_run = pipeline._Run(
+        config=cfg,
+        manifest=pipeline.Manifest(tmp_path / "data" / "manifest.sqlite"),
+        arxiv=client,
+        s2=pipeline.make_s2_client(cfg),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    paper_meta = pipeline.PaperMeta(
+        arxiv_id="2408.07239",
+        title="t",
+        authors=[],
+        submission_date="2024-08-01",
+        num_versions=1,
+    )
+
+    client.last_header_elapsed = 4.3  # simulate Fastly holding headers for 4.3s (tarpit)
+    recycles_before = client.session_recycles
+    monkeypatch.setattr(
+        pipeline,
+        "download_source",
+        lambda *_a, **_kw: pipeline.DownloadResult(
+            path=None,
+            http_status=200,
+            data=bytearray(b"%PDF" + b"x" * 500),
+            raw_archive_bytes=800_000,
+            download_seconds=0.01,
+        ),
+    )
+    pipeline._download_version(dummy_run, paper_meta, 1)
+
+    assert client.session_recycles == recycles_before + 1
+    assert limiter._retry_backoff == limiter._min_interval  # noqa: SLF001
+    # v3.10: 200 OK does NOT call note_429() or widen min_interval:
+    assert limiter._min_interval == 3.15  # noqa: SLF001
+
+    dummy_run.manifest.close()
+
+
+def test_v397_stream_break_never_escalates_429_streak_or_triggers_false_cooldown(
+    tmp_path, monkeypatch
+):
+    """v3.9.7: isolated stream drop never triggers cooldown even with 429 streak > 0;
+
+    consecutive stream drops sleep a gentle 60s breather without inflating arxiv_429_streak.
+    """
+    import requests as req_mod
+
+    from crawler.http import HostClient, RateLimiter
+    from crawler.source import resume_partial_path
+
+    limiter = RateLimiter(3.15, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=3.05)
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=3.15,
+        auto_resume_rate_limit=True,
+    )
+    client = HostClient(ARXIV, limiter, cfg)
+    dummy_run = pipeline._Run(
+        config=cfg,
+        manifest=pipeline.Manifest(tmp_path / "data" / "manifest.sqlite"),
+        arxiv=client,
+        s2=pipeline.make_s2_client(cfg),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    paper_meta = pipeline.PaperMeta(
+        arxiv_id="2408.06550",
+        title="t",
+        authors=[],
+        submission_date="2024-08-01",
+        num_versions=1,
+    )
+
+    # Pre-condition: Crawler experienced an earlier arXiv HTTP 429:
+    dummy_run.arxiv_429_streak = 2
+    dummy_run.arxiv_ok_since_429 = 4
+
+    # 1. Single stream drop with partial bytes stashed (1 MiB):
+    part = resume_partial_path(dummy_run.tmp_dir, paper_meta.arxiv_id, 1)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_bytes(b"x" * (1024 * 1024))
+
+    monkeypatch.setattr(
+        pipeline,
+        "download_source",
+        lambda *_a, **_kw: (_ for _ in ()).throw(
+            req_mod.exceptions.ChunkedEncodingError("Fastly severed connection")
+        ),
+    )
+
+    # Must raise _DeferRateLimit with need_cooldown=False and is_stream_failure=True:
+    with pytest.raises(pipeline._DeferRateLimit) as exc_info:  # noqa: SLF001
+        pipeline._process_paper(dummy_run, paper_meta)
+
+    assert exc_info.value.need_cooldown is False
+    assert exc_info.value.is_stream_failure is True
+    # 429 streak and recovery counter must NOT be destroyed!
+    assert dummy_run.arxiv_429_streak == 2
+    assert dummy_run.arxiv_ok_since_429 == 4
+    assert dummy_run.consecutive_stream_failures == 1
+
+    # 2. Simulate second consecutive stream drop (e.g. next paper also drops):
+    part.write_bytes(b"x" * (1024 * 1024 + 600 * 1024))
+    with pytest.raises(pipeline._DeferRateLimit) as exc_info2:  # noqa: SLF001
+        pipeline._process_paper(dummy_run, paper_meta)
+
+    assert exc_info2.value.need_cooldown is True
+    assert exc_info2.value.is_stream_failure is True
+    assert dummy_run.consecutive_stream_failures == 2
+
+    # Now verify _handle_auto_resume_cooldown with stream_cooldown_seconds=60.0
+    # leaves arxiv_429_streak completely untouched:
+    cooldown_slept: list[float] = []
+    monkeypatch.setattr(pipeline, "_sleep_interruptible", lambda _stop, s: cooldown_slept.append(s))
+    pipeline._handle_auto_resume_cooldown(
+        dummy_run,
+        "stream test",
+        1,
+        stream_cooldown_seconds=60.0,
+    )
+    assert cooldown_slept == [60.0]
+    # Streak must remain 2! Never escalated to 3 or latched to 4!
+    assert dummy_run.arxiv_429_streak == 2
+    assert dummy_run.consecutive_stream_failures == 0
+
+    dummy_run.manifest.close()

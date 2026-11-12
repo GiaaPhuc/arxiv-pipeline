@@ -74,6 +74,8 @@ from .manifest import Manifest, atomic_write
 from .models import FileEntry, PaperMeta, Status, VersionMeta
 from .s2 import S2_BATCH_SIZE, S2Result, fetch_references_batch
 from .source import (
+    _EARLY_ABORT_MAGICS,
+    _MIN_PROGRESS_BYTES,
     _STREAM_RETRY_ERRORS,
     DownloadResult,
     download_source,
@@ -90,12 +92,21 @@ _S2_BATCH_FLUSH_SECONDS = 0.35  # wait briefly in fast tests so nearby papers sh
 _S2_LIVE_BATCH_FLUSH_SECONDS = 45.0  # v3.7: coalesce 10-14 live papers into one S2 batch POST
 _ARXIV_MAX_429_ATTEMPTS = 4  # wait Retry-After between attempts; then StopCrawl
 _STEPPED_429_BACKOFF = (15.0, 30.0, 60.0)  # T1: stepped backoff when Retry-After header is absent
-_ARXIV_COOLDOWN_MULTIPLIERS = (1.0, 2.0, 3.0, 4.0)  # escalating 30->60->90->120s (base=30s)
-_ARXIV_OK_STREAK_TO_DECAY = 2  # 2 clean 2xx downloads step down 429 escalation by 1
-_DEFER_DRAIN_AFTER_OK_PAPERS = 25  # v3.7: retry deferred papers mid-chunk after 25 clean papers
+_ARXIV_COOLDOWN_MULTIPLIERS = (
+    1.0,
+    1.5,
+    2.0,
+)  # escalating 120->180->240s max cap (base=120s; never sleep 360-600s)
+_ARXIV_OK_STREAK_TO_DECAY = 6  # v3.9.4: 6 clean 2xx downloads step down 429 escalation by 1
+_MAX_DEFERRED_PASSES = 5  # v3.9.9: up to 5 passes for multi-slice heavy archives
 _PRE_COOLDOWN_MIN_NEW_PAIRS = 100  # v3.7: min new final pairs before another pre-cooldown backup
 _PRE_COOLDOWN_MIN_INTERVAL_SECONDS = 900.0  # v3.7: min 15 min between pre-cooldown backups
-_HEAVY_TRANSFER_BREATHER_BYTES = 4 * 1024 * 1024  # v3.7: full End-to-Start breather after >= 4 MiB
+_HEAVY_TRANSFER_BREATHER_BYTES = 2 * 1024 * 1024  # v3.9.3: End-to-Start breather after >= 2 MiB
+_SLOW_TRANSFER_BREATHER_SECONDS = 2.5  # v3.9.3: End-to-Start breather after >= 2.5s wire transfer
+_STREAM_BREAK_BREATHER_SECONDS = 12.0  # v3.9.4: 12s End-to-Start rest after Fastly 1 MiB stream cut
+_STREAM_FAILURES_FOR_COOLDOWN = 2  # v3.9.4: 2 consecutive stream cuts -> cooldown before 429
+_BANDWIDTH_WINDOW_MAX_BYTES = 50 * 1024 * 1024  # v3.10: 12s recharge every 50 MiB wire bytes
+_BANDWIDTH_WINDOW_BREATHER_SECONDS = 12.0
 _FINAL_STATUS_NAMES = frozenset(s.value for s in Status if s.is_final)
 _GIANT_DIAGNOSTIC_BYTES = 50 * 1024 * 1024  # U5: log packages >= 50 MiB to diagnostics.jsonl
 
@@ -117,10 +128,12 @@ class _DeferRateLimit(Exception):
         *,
         need_cooldown: bool = True,
         retry_after: float | None = None,
+        is_stream_failure: bool = False,
     ) -> None:
         super().__init__(message)
         self.need_cooldown = need_cooldown
         self.retry_after = retry_after
+        self.is_stream_failure = is_stream_failure
 
 
 @contextlib.contextmanager
@@ -220,11 +233,13 @@ class _Run:
     metrics_flush_lock: threading.Lock = field(default_factory=threading.Lock)
     counters_lock: threading.Lock = field(default_factory=threading.Lock)
     in_deferred_pass: bool = False
+    deferred_pass: int = 0
     consecutive_arxiv_429: int = 0
     arxiv_429_streak: int = 0
     arxiv_ok_since_429: int = 0
     consecutive_stream_failures: int = 0
     proactive_cooldown_papers: int = 0
+    window_heavy_bytes: int = 0
     last_backup_signature: tuple[int, int] = (-1, -1)
     last_backup_at: float = 0.0
     counters: dict[str, int | float | str] = field(
@@ -360,12 +375,15 @@ def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResu
             if download.path is not None:
                 download.path.unlink(missing_ok=True)
             download.data = None
+            stashed_file = resume_partial_path(run.tmp_dir, arxiv_id, version)
+            is_stream_break = stashed_file.is_file() and stashed_file.stat().st_size > 0
             _wait_arxiv_429(
                 run,
                 context=f"for {arxiv_id}v{version}",
                 rate_attempt=rate_attempt,
                 download=download,
                 fast_defer=True,
+                is_stream_failure=is_stream_break,
             )
             continue
         if 200 <= download.http_status < 300:
@@ -373,15 +391,47 @@ def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResu
             run.consecutive_stream_failures = 0
             run.arxiv.thermal_score = 0.0
             run.arxiv_ok_since_429 += 1
-            if run.arxiv_429_streak > 0 and run.arxiv_ok_since_429 >= _ARXIV_OK_STREAK_TO_DECAY:
-                run.arxiv_429_streak -= 1
-                run.arxiv_ok_since_429 = 0
-            run.arxiv.limiter.note_success()
+            if run.arxiv_429_streak > 0:
+                if run.arxiv_ok_since_429 >= _ARXIV_OK_STREAK_TO_DECAY:
+                    run.arxiv_429_streak -= 1
+                    run.arxiv_ok_since_429 = 0
+                    run.arxiv.limiter.note_success()
+            else:
+                run.arxiv.limiter.note_success()
+            is_early_stub = (
+                download.data is not None
+                and len(download.data) <= 512
+                and download.raw_archive_bytes > 512
+                and bytes(download.data[:8]).startswith(_EARLY_ABORT_MAGICS)
+            )
+            wire_bytes = 65536 if is_early_stub else download.raw_archive_bytes
+            run.window_heavy_bytes += max(wire_bytes, 0)
             if (
+                run.config.arxiv_min_interval >= 3.0
+                and getattr(run.arxiv, "last_header_elapsed", 0.0) >= 3.5
+            ):
+                logger.info(
+                    "arXiv edge queue delay (TTFB %.2fs >= 3.5s) for %sv%d; "
+                    "scheduling session recycle to clear tarpit",
+                    run.arxiv.last_header_elapsed,
+                    arxiv_id,
+                    version,
+                )
+                run.arxiv.recycle_session()
+                run.arxiv.limiter.schedule_retry_backoff(run.arxiv.limiter._min_interval)
+            elif (
                 download.range_resumed
                 or download.raw_archive_bytes >= _HEAVY_TRANSFER_BREATHER_BYTES
+                or download.download_seconds >= _SLOW_TRANSFER_BREATHER_SECONDS
             ):
                 run.arxiv.limiter.schedule_retry_backoff(run.arxiv.limiter._min_interval)
+            if (
+                run.config.arxiv_min_interval >= 3.0
+                and run.window_heavy_bytes >= _BANDWIDTH_WINDOW_MAX_BYTES
+            ):
+                run.window_heavy_bytes = 0
+                run.arxiv.recycle_session()
+                run.arxiv.limiter.schedule_retry_backoff(_BANDWIDTH_WINDOW_BREATHER_SECONDS)
             if download.range_resumed:
                 _inc(run, "range_resumes")
                 _diag(
@@ -559,7 +609,7 @@ def _consume_extract_job(run: _Run, job: _ExtractJob) -> Status:
 
     if paper_completed:
         _inc(run, "papers_done")
-        if not (paper_dir / S2_RAW_NAME).is_file():
+        if not run.config.skip_s2 and not (paper_dir / S2_RAW_NAME).is_file():
             run.s2_queue.put(_S2Job(paper, paper_dir))
     return meta.status
 
@@ -602,7 +652,7 @@ def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) 
 
     if not pending_versions:
         _inc(run, "papers_done")
-        if not (paper_dir / S2_RAW_NAME).is_file():
+        if not run.config.skip_s2 and not (paper_dir / S2_RAW_NAME).is_file():
             run.s2_queue.put(_S2Job(paper, paper_dir))
         return False
 
@@ -613,6 +663,8 @@ def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) 
         if run.stop.is_set():
             return False
         is_last = idx == len(pending_versions) - 1
+        stashed_file = resume_partial_path(run.tmp_dir, paper.arxiv_id, version)
+        stashed_before = stashed_file.stat().st_size if stashed_file.is_file() else 0
         try:
             download = _download_version(run, paper, version)
             _enqueue_extract_job(
@@ -630,12 +682,34 @@ def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) 
                     run.paper_pending_versions.pop(paper.arxiv_id, None)
             raise
         except _STREAM_RETRY_ERRORS as exc:
-            if run.config.auto_resume_rate_limit and not run.in_deferred_pass:
+            stashed_now = stashed_file.stat().st_size if stashed_file.is_file() else 0
+            can_defer_stream = run.config.auto_resume_rate_limit and (
+                not run.in_deferred_pass
+                or (
+                    run.deferred_pass < _MAX_DEFERRED_PASSES
+                    and (
+                        stashed_now >= stashed_before + _MIN_PROGRESS_BYTES
+                        or (stashed_file.is_file() and stashed_now >= _MIN_PROGRESS_BYTES)
+                    )
+                )
+            )
+            if can_defer_stream:
                 run.consecutive_stream_failures += 1
+                run.window_heavy_bytes += max(stashed_now - stashed_before, 0)
+                if (
+                    run.config.arxiv_min_interval >= 3.0
+                    and run.window_heavy_bytes >= _BANDWIDTH_WINDOW_MAX_BYTES
+                ):
+                    run.window_heavy_bytes = 0
+                    run.arxiv.recycle_session()
+                    run.arxiv.limiter.schedule_retry_backoff(_BANDWIDTH_WINDOW_BREATHER_SECONDS)
                 if idx == 0:
                     with run.counters_lock:
                         run.paper_pending_versions.pop(paper.arxiv_id, None)
-                need_cd = run.consecutive_stream_failures >= 3
+                run.arxiv.limiter.note_429()
+                run.arxiv.recycle_session()
+                run.arxiv.limiter.schedule_retry_backoff(_STREAM_BREAK_BREATHER_SECONDS)
+                need_cd = run.consecutive_stream_failures >= _STREAM_FAILURES_FOR_COOLDOWN
                 _diag(
                     run,
                     "arxiv_stream_defer",
@@ -649,13 +723,15 @@ def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) 
                     paper.arxiv_id,
                     version,
                     type(exc).__name__,
-                    "escalating cooldown" if need_cd else "continuing next id",
+                    "stream cooldown" if need_cd else "continuing next id",
                 )
                 raise _DeferRateLimit(
                     f"stream repeatedly broken for {paper.arxiv_id}v{version}",
                     need_cooldown=need_cd,
+                    is_stream_failure=True,
                 ) from exc
-            resume_partial_path(run.tmp_dir, paper.arxiv_id, version).unlink(missing_ok=True)
+            if not run.config.auto_resume_rate_limit:
+                stashed_file.unlink(missing_ok=True)
             logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
             _enqueue_extract_job(
                 run,
@@ -912,10 +988,12 @@ def _wait_arxiv_429(
     response: requests.Response | None = None,
     download: DownloadResult | None = None,
     fast_defer: bool = False,
+    is_stream_failure: bool = False,
 ) -> None:
     """Sleep after arXiv 429; defer + escalating cooldown (U1) or raise ``StopCrawl``."""
     _inc(run, "arxiv_429")
     run.arxiv.limiter.note_429()
+    run.arxiv.recycle_session()
     run.arxiv.limiter.schedule_retry_backoff(run.arxiv.limiter._min_interval)
     run.consecutive_arxiv_429 += 1
     explicit_ra = _explicit_retry_after(response=response, download=download)
@@ -925,17 +1003,20 @@ def _wait_arxiv_429(
             "arxiv_429_fast_defer",
             context=context,
             consecutive_429=run.consecutive_arxiv_429,
-            streak=run.arxiv_429_streak + 1,
+            streak=run.arxiv_429_streak + (0 if is_stream_failure else 1),
             need_cooldown=True,
+            is_stream_failure=is_stream_failure,
         )
         logger.warning(
-            "arXiv 429 %s; deferring to queue and entering escalating cooldown",
+            "arXiv 429 %s; deferring to queue and entering %s cooldown",
             context,
+            "fixed stream breather (60s)" if is_stream_failure else "escalating cooldown",
         )
         raise _DeferRateLimit(
             f"arXiv answered HTTP 429 {context}",
             need_cooldown=True,
             retry_after=explicit_ra,
+            is_stream_failure=is_stream_failure,
         )
     if rate_attempt >= _ARXIV_MAX_429_ATTEMPTS - 1:
         _diag(
@@ -992,7 +1073,7 @@ def _workspace_progress_signature(run: _Run) -> tuple[int, int]:
 
 
 def _compute_arxiv_cooldown(run: _Run, *, retry_after: float | None = None) -> float:
-    """Escalating 429 cooldown (default 30 -> 60 -> 90 -> 120 s; honors Retry-After up to 600 s)."""
+    """Escalating 429 cooldown (120 -> 180 -> 240 s max cap; Retry-After <= 600 s)."""
     run.arxiv_429_streak += 1
     run.arxiv_ok_since_429 = 0
     base = max(
@@ -1003,7 +1084,10 @@ def _compute_arxiv_cooldown(run: _Run, *, retry_after: float | None = None) -> f
         ),
     )
     mult_idx = min(max(run.arxiv_429_streak - 1, 0), len(_ARXIV_COOLDOWN_MULTIPLIERS) - 1)
-    max_implicit = max(float(run.config.rate_limit_cooldown_seconds), base * 4.0)
+    max_implicit = max(
+        float(run.config.rate_limit_cooldown_seconds),
+        base * _ARXIV_COOLDOWN_MULTIPLIERS[-1],
+    )
     cooldown = min(base * _ARXIV_COOLDOWN_MULTIPLIERS[mult_idx], min(max_implicit, 600.0))
     if retry_after is not None and retry_after > 0 and base >= 1.0:
         cooldown = min(max(cooldown, float(retry_after)), 600.0)
@@ -1032,6 +1116,7 @@ def _handle_auto_resume_cooldown(
     *,
     retry_after: float | None = None,
     proactive_seconds: float | None = None,
+    stream_cooldown_seconds: float | None = None,
 ) -> None:
     """Drain extract queue, start background backup if changed, and sleep cooldown."""
     run.proactive_cooldown_papers = 0
@@ -1099,6 +1184,26 @@ def _handle_auto_resume_cooldown(
             context,
             cooldown,
         )
+    elif stream_cooldown_seconds is not None:
+        cooldown = max(float(stream_cooldown_seconds), 0.0)
+        run.arxiv.limiter.reset_interval()
+        _inc(run, "arxiv_stream_cooldowns")
+        _inc(run, "arxiv_cooldown_seconds", cooldown)
+        _diag(
+            run,
+            "stream_cooldown",
+            context=context,
+            cooldown_seconds=cooldown,
+            deferred_ids=deferred_count,
+        )
+        logger.warning(
+            "auto-resume stream-break (v3.9.7) %s: deferred %d id(s); "
+            "sleeping fixed breather %.0fs (429 streak unchanged: %d)",
+            context,
+            deferred_count,
+            cooldown,
+            run.arxiv_429_streak,
+        )
     else:
         cooldown = _compute_arxiv_cooldown(run, retry_after=retry_after)
         _inc(run, "arxiv_auto_resumes")
@@ -1130,6 +1235,7 @@ def _handle_auto_resume_cooldown(
             save_rate_state(run.rate_state_path, arxiv_cooldown_until=0.0)
     run.consecutive_arxiv_429 = 0
     run.consecutive_stream_failures = 0
+    run.window_heavy_bytes = 0
     run.arxiv.limiter._retry_backoff = 0.0
 
 
@@ -1184,6 +1290,7 @@ def _collect_s2_batch(
     q: queue.Queue[_S2Job | None],
     *,
     flush_seconds: float = _S2_BATCH_FLUSH_SECONDS,
+    max_batch_size: int = S2_BATCH_SIZE,
 ) -> list[_S2Job] | None:
     """Block for the first job; return None when the sentinel is received."""
     first = q.get()
@@ -1191,7 +1298,7 @@ def _collect_s2_batch(
         return None
     jobs = [first]
     flush_until = time.monotonic() + flush_seconds
-    while len(jobs) < S2_BATCH_SIZE:
+    while len(jobs) < max_batch_size:
         remaining = flush_until - time.monotonic()
         if remaining <= 0:
             break
@@ -1207,12 +1314,18 @@ def _collect_s2_batch(
 
 
 def _handle_s2_batch(run: _Run, jobs: list[_S2Job]) -> None:
-    """Fetch and store up to ``S2_BATCH_SIZE`` papers; leave failed batches for next run."""
+    """Fetch and store up to ``s2_batch_size`` papers; leave failed batches for next run."""
     ids = [job.paper.arxiv_id for job in jobs]
+    paper_dirs = {job.paper.arxiv_id: job.paper_dir for job in jobs}
     for _attempt in range(_S2_MAX_BATCH_ATTEMPTS):
         try:
             with metrics.stage_timer("s2"):
-                results = fetch_references_batch(run.s2, ids)
+                results = fetch_references_batch(
+                    run.s2,
+                    ids,
+                    paper_dirs=paper_dirs,
+                    enable_bib_fallback=run.config.enable_bib_fallback,
+                )
             _note_s2_success(run)
             run.s2_rate_limit_wait = 0.0
             _inc(run, "s2_batches")
@@ -1257,10 +1370,14 @@ def _s2_worker(run: _Run) -> None:
         else _S2_BATCH_FLUSH_SECONDS
     )
     while True:
-        jobs = _collect_s2_batch(run.s2_queue, flush_seconds=flush_sec)
+        jobs = _collect_s2_batch(
+            run.s2_queue,
+            flush_seconds=flush_sec,
+            max_batch_size=run.config.s2_batch_size,
+        )
         if jobs is None:
             return
-        if run.stop.is_set() or run.s2_disabled:
+        if run.stop.is_set() or run.s2_disabled or run.config.skip_s2:
             continue  # drain; papers without raw.gz are queued again on the next run
         try:
             _handle_s2_batch(run, jobs)
@@ -1398,50 +1515,14 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
         chunk_size = min(chunk_size, max(run.config.backup_every_ids, 1))
     deferred_ids: list[str] = []
 
-    def _drain_chunk_deferred(chunk_deferred: list[PaperMeta]) -> None:
-        if not chunk_deferred or run.stop.is_set():
-            return
-        run.extract_queue.join()
-        retry_papers = list({p.arxiv_id: p for p in chunk_deferred}.values())
-        chunk_deferred.clear()
-        logger.info("running mid-chunk auto-resume pass for %d id(s)", len(retry_papers))
-        for idx_retry, d_paper in enumerate(retry_papers):
-            if run.stop.is_set():
-                return
-            try:
-                _process_paper(run, d_paper, ids_seen=seen)
-            except StopCrawl as exc:
-                if "403" in str(exc):
-                    raise
-                logger.warning(
-                    "%s still rate-limited in mid-chunk retry; deferring to end of run",
-                    d_paper.arxiv_id,
-                )
-                deferred_ids.append(d_paper.arxiv_id)
-            except _DeferRateLimit as exc:
-                logger.warning(
-                    "%s rate-limited/broken in mid-chunk retry; deferring to end of run",
-                    d_paper.arxiv_id,
-                )
-                deferred_ids.extend(p.arxiv_id for p in retry_papers[idx_retry:])
-                if exc.need_cooldown:
-                    _handle_auto_resume_cooldown(
-                        run,
-                        str(exc),
-                        len(retry_papers) - idx_retry,
-                        retry_after=exc.retry_after,
-                    )
-                else:
-                    _inc(run, "arxiv_auto_resumes")
-                break
-
     def _run_chunks(target_ids: list[str], *, is_deferred: bool = False) -> None:
         nonlocal seen
         run.in_deferred_pass = is_deferred
-        multi_chunk = not is_deferred and len(target_ids) > chunk_size
         for chunk in _chunks(target_ids, chunk_size):
             if run.stop.is_set():
                 return
+            if seen > 0:
+                run.arxiv.recycle_session()
             try:
                 planned = _plan_chunk(run, chunk)
             except _DeferRateLimit as exc:
@@ -1453,18 +1534,11 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
                     retry_after=exc.retry_after,
                 )
                 continue
-            chunk_deferred: list[PaperMeta] = []
-            papers_ok_since_defer = 0
             for idx_paper, paper in enumerate(planned):
                 if run.stop.is_set():
                     return
                 try:
                     did_download = _process_paper(run, paper, ids_seen=seen)
-                    if chunk_deferred:
-                        papers_ok_since_defer += 1
-                        if papers_ok_since_defer >= _DEFER_DRAIN_AFTER_OK_PAPERS:
-                            _drain_chunk_deferred(chunk_deferred)
-                            papers_ok_since_defer = 0
                     if did_download:
                         run.proactive_cooldown_papers += 1
                         every_ids = run.config.arxiv_proactive_cooldown_every_ids
@@ -1484,27 +1558,25 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
                                 proactive_seconds=run.config.arxiv_proactive_cooldown_seconds,
                             )
                 except _DeferRateLimit as exc:
-                    if is_deferred:
-                        deferred_ids.append(paper.arxiv_id)
-                    else:
-                        chunk_deferred.append(paper)
-                        papers_ok_since_defer = 0
+                    deferred_ids.append(paper.arxiv_id)
                     if exc.need_cooldown:
-                        _handle_auto_resume_cooldown(
-                            run,
-                            str(exc),
-                            1,
-                            retry_after=exc.retry_after,
-                        )
+                        if exc.is_stream_failure:
+                            _handle_auto_resume_cooldown(
+                                run,
+                                str(exc),
+                                1,
+                                stream_cooldown_seconds=60.0,
+                            )
+                        else:
+                            _handle_auto_resume_cooldown(
+                                run,
+                                str(exc),
+                                1,
+                                retry_after=exc.retry_after,
+                            )
                     else:
                         _inc(run, "arxiv_auto_resumes")
                     continue
-            if chunk_deferred:
-                if multi_chunk:
-                    _drain_chunk_deferred(chunk_deferred)
-                else:
-                    deferred_ids.extend(p.arxiv_id for p in chunk_deferred)
-                    chunk_deferred.clear()
             if not is_deferred:
                 seen += len(chunk)
             ckpt_due = _checkpoint_due(run, seen)
@@ -1522,11 +1594,19 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
             _maybe_checkpoint(run, seen)
 
     _run_chunks(ids, is_deferred=False)
-    if deferred_ids and not run.stop.is_set():
+    deferred_pass = 0
+    while deferred_ids and not run.stop.is_set() and deferred_pass < _MAX_DEFERRED_PASSES:
+        deferred_pass += 1
+        run.deferred_pass = deferred_pass
         run.extract_queue.join()
         retry_list = list(dict.fromkeys(deferred_ids))
         deferred_ids.clear()
-        logger.info("running deferred auto-resume pass for %d id(s)", len(retry_list))
+        logger.info(
+            "running deferred auto-resume pass %d/%d for %d id(s)",
+            deferred_pass,
+            _MAX_DEFERRED_PASSES,
+            len(retry_list),
+        )
         _run_chunks(retry_list, is_deferred=True)
 
 
@@ -1543,6 +1623,8 @@ def run(
     thread, the S2 thread, the sampler and the metrics file have been finalised. Everything
     already written stays valid; run the same command again to resume.
     """
+    if config.skip_s2 and config.s2_only:
+        raise ValueError("Cannot specify both skip_s2 and s2_only")
     ids = list(dict.fromkeys(split_version(normalize_id(x))[0] for x in arxiv_ids))
     data_dir = Path(config.data_dir)
     (data_dir / "papers").mkdir(parents=True, exist_ok=True)

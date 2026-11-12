@@ -112,6 +112,7 @@ class RateLimiter:
     ) -> None:
         self._base_floor = min_interval
         self._min_interval = min_interval
+        self._base_idle_gap = max(float(min_idle_gap), 0.0)
         self._min_idle_gap = max(float(min_idle_gap), 0.0)
         self._jitter_max = max(float(jitter_max), 0.0)
         # v3.8: widen +0.50 s on 429 up to 5.0 s cap; step down -0.75 s every 2 GET 200s.
@@ -213,21 +214,42 @@ class RateLimiter:
             self._min_interval = round(
                 min(self._min_interval + self._adaptive_step, self._max_adaptive_interval), 4
             )
+            if self._base_idle_gap > 0.0:
+                self._min_idle_gap = round(max(self._base_idle_gap, self._min_interval - 0.20), 4)
+
+    def enter_ramp_up(
+        self,
+        start_interval: float = 5.0,
+        start_idle_gap: float | None = None,
+    ) -> None:
+        """Post-cooldown soft-start: ramp up gently from 5.0s to avoid draining recovered quota."""
+        if self._base_floor <= 0.0:
+            return
+        target_interval = max(self._base_floor, float(start_interval))
+        self._min_interval = round(target_interval, 4)
+        if start_idle_gap is not None:
+            self._min_idle_gap = round(max(self._base_idle_gap, float(start_idle_gap)), 4)
+        elif self._base_idle_gap > 0.0:
+            self._min_idle_gap = round(max(self._base_idle_gap, self._min_interval - 0.20), 4)
+        self._adaptive_streak = 0
 
     def note_success(self) -> None:
         """Fast step-down (-0.75 s every 2 GET 200s) back to ``_base_floor`` (v3.8)."""
-        if self._min_interval <= self._base_floor:
+        if self._min_interval <= self._base_floor and self._min_idle_gap <= self._base_idle_gap:
             return
         self._adaptive_streak += 1
         if self._adaptive_streak >= self._recover_streak:
             self._min_interval = round(
                 max(self._base_floor, self._min_interval - self._recover_step), 4
             )
+            if self._min_idle_gap > self._base_idle_gap:
+                self._min_idle_gap = round(max(self._base_idle_gap, self._min_interval - 0.20), 4)
             self._adaptive_streak = 0
 
     def reset_interval(self) -> None:
         """Reset adaptive interval back to ``_base_floor`` after a full cooldown (U1)."""
         self._min_interval = self._base_floor
+        self._min_idle_gap = self._base_idle_gap
         self._adaptive_streak = 0
         self._retry_backoff = 0.0
 
@@ -300,6 +322,7 @@ class HostClient:
         self._requests_since_recycle = 0
         self.session_recycles = 0
         self.thermal_score: float = 0.0
+        self.last_header_elapsed: float = 0.0
         self._session = self._build_session()
 
     def _build_session(self) -> requests.Session:
@@ -398,6 +421,7 @@ class HostClient:
                     self._sleep_for_retry(attempt)
                     continue
                 header_elapsed = max(0.0, clock() - t0)
+                self.last_header_elapsed = header_elapsed
                 self._requests_since_recycle += 1
                 self._update_thermal_on_response(response.status_code, header_elapsed)
                 self._log_request("GET", url, response.status_code)
@@ -544,5 +568,6 @@ def make_arxiv_client(config: Config) -> HostClient:
 
 
 def make_s2_client(config: Config) -> HostClient:
-    limiter = AdaptiveRateLimiter(config.s2_min_interval)
+    max_interval = 5.0 if config.s2_api_key else 10.0
+    limiter = AdaptiveRateLimiter(config.s2_min_interval, max_interval=max_interval)
     return HostClient(f"https://{S2_API_HOST}", limiter, config)
