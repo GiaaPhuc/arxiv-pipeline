@@ -1,13 +1,1646 @@
-"""T3.1 (owner A, reviewer C). Replace the skips with real tests."""
+"""T3.1 (owner A, reviewer C): pipeline tests on a fake arXiv/S2 (``responses``, no network)."""
+
+from __future__ import annotations
+
+import gzip
+import io
+import json
+import tarfile
+import threading
+from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
+import responses
 
-pytestmark = pytest.mark.skip(reason="T3.1 not implemented yet")
+import validate_corpus
+from crawler import pipeline
+from crawler.config import Config
+from crawler.export import export_tables
+from crawler.models import Status
+
+ARXIV = "https://export.arxiv.org"
+S2 = "https://api.semanticscholar.org"
+
+TEX = b"\\documentclass{article}\r\n\\includegraphics{fig.png}\r\n"
+BIB = b"@article{x, title={T}}\n"
+PNG = b"\x89PNG-binary"
+
+# base id -> dates of v1..vN (the number of dates is the number of versions)
+PAPERS = {
+    "2408.00001": ["2024-08-01", "2024-08-10"],  # v1 tar.gz, v2 PDF
+    "2408.00002": ["2024-08-02"],  # single version; S2 does not know it
+    "2408.00004": ["2024-08-04", "2024-08-05", "2024-08-06"],  # three versions
+}
+JOURNAL = {"2408.00004": "Nature"}
 
 
-def test_one_failing_pair_does_not_stop_the_batch():
-    """..."""
+def _tar_gz() -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name, blob in (("main.tex", TEX), ("refs.bib", BIB), ("fig.png", PNG)):
+            member = tarfile.TarInfo(name)
+            member.size = len(blob)
+            archive.addfile(member, io.BytesIO(blob))
+    return buffer.getvalue()
 
 
-def test_rerun_after_interrupt_gives_same_result_idempotent():
-    """..."""
+def _entry(base: str, version: int, total: int) -> str:
+    dates = PAPERS[base]
+    journal = f"<arxiv:journal_ref>{JOURNAL[base]}</arxiv:journal_ref>" if base in JOURNAL else ""
+    return (
+        f"<entry><id>http://arxiv.org/abs/{base}v{version}</id>"
+        f"<published>{dates[0]}T10:00:00Z</published>"
+        f"<updated>{dates[version - 1]}T10:00:00Z</updated>"
+        f"<title>Paper {base}</title><author><name>Ann</name></author>{journal}</entry>"
+    )
+
+
+def _atom(request) -> tuple[int, dict, str]:
+    ids = parse_qs(urlsplit(request.url).query)["id_list"][0].split(",")
+    entries = []
+    for raw in ids:
+        base, _, version = raw.partition("v")
+        if base not in PAPERS:
+            continue  # unknown ids are simply absent from the feed
+        total = len(PAPERS[base])
+        entries.append(_entry(base, int(version) if version else total, total))
+    body = (
+        '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">'
+        + "".join(entries)
+        + "</feed>"
+    )
+    return 200, {"Content-Type": "application/atom+xml"}, body
+
+
+def _s2_refs(arxiv_id: str) -> dict:
+    return {
+        "data": [
+            {
+                "citedPaper": {
+                    "paperId": f"s2-{arxiv_id}-a",
+                    "title": "Cited with arXiv",
+                    "authors": [{"name": "Zed"}],
+                    "year": 2020,
+                    "publicationDate": "2020-05-06",
+                    "externalIds": {"ArXiv": "2005.00001"},
+                }
+            },
+            {"citedPaper": {"paperId": f"s2-{arxiv_id}-b", "title": "No arXiv", "authors": []}},
+        ],
+        "next": None,
+    }
+
+
+def _s2_batch_refs(base: str) -> list[dict]:
+    return [
+        {
+            "paperId": f"s2-{base}-a",
+            "title": "Cited with arXiv",
+            "authors": [{"name": "Zed"}],
+            "year": 2020,
+            "publicationDate": "2020-05-06",
+            "externalIds": {"ArXiv": "2005.00001"},
+        },
+        {"paperId": f"s2-{base}-b", "title": "No arXiv", "authors": []},
+    ]
+
+
+def _mock_s2(*, unknown: tuple[str, ...] = ("2408.00002",)) -> None:
+    def batch_callback(request):
+        body = json.loads(request.body)
+        payload = []
+        for paper_id in body["ids"]:
+            base = paper_id.removeprefix("ARXIV:")
+            if base in unknown:
+                payload.append(None)
+            else:
+                refs = _s2_batch_refs(base)
+                payload.append(
+                    {
+                        "paperId": f"paper-{base}",
+                        "venue": "ICML" if base == "2408.00001" else "arXiv.org",
+                        "referenceCount": len(refs),
+                        "references": refs,
+                    }
+                )
+        return 200, {}, json.dumps(payload)
+
+    responses.add_callback(
+        responses.POST,
+        f"{S2}/graph/v1/paper/batch",
+        callback=batch_callback,
+        content_type="application/json",
+    )
+    for base in PAPERS:
+        if base in unknown:
+            continue
+        refs_url = f"{S2}/graph/v1/paper/ARXIV:{base}/references"
+        responses.add(responses.GET, refs_url, json=_s2_refs(base))
+
+
+def _mock_src(*, failing: tuple[str, ...] = ()) -> None:
+    archive = _tar_gz()
+    for base, dates in PAPERS.items():
+        for version in range(1, len(dates) + 1):
+            url = f"{ARXIV}/src/{base}v{version}"
+            if f"{base}v{version}" in failing:
+                responses.add(responses.GET, url, status=500)
+            elif base == "2408.00001" and version == 2:
+                responses.add(responses.GET, url, body=b"%PDF-1.4 fake", status=200)
+            else:
+                responses.add(responses.GET, url, body=archive, status=200)
+
+
+def _config(tmp_path: Path, **overrides) -> Config:
+    values = {
+        "data_dir": tmp_path / "data",
+        "contact": "test@example.com",
+        "arxiv_min_interval": 0.0,
+        "s2_min_interval": 0.0,
+        "max_retries": 0,
+    }
+    values.update(overrides)
+    return Config(**values)
+
+
+def _calls(prefix: str) -> list[str]:
+    return [c.request.url for c in responses.calls if c.request.url.startswith(prefix)]
+
+
+@pytest.fixture(autouse=True)
+def _fast_s2_backoff(monkeypatch):
+    monkeypatch.setattr(pipeline, "_retry_after", lambda *_a, **_k: 0.0)
+
+
+def _read(path: Path) -> object:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@responses.activate
+def test_one_failing_pair_does_not_stop_the_batch(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src(failing=("2408.00001v1",))
+    _mock_s2()
+    config = _config(tmp_path)
+
+    summary = pipeline.run(["2408.00001", "2408.00002", "2408.00003", "2408.00004"], config)
+
+    # 2408.00003 does not exist; its first version is the only failing pair.
+    assert summary["failed"] == 1
+    assert summary["not_found"] == 1
+    assert summary["ok"] == 4  # 00002 v1 + 00004 v1..v3
+    assert summary["no_source"] == 1  # 00001 v2 is a PDF
+    assert summary["pending"] == 0
+    data = config.data_dir / "papers"
+    assert (data / "2408-00004" / "v3" / "tex" / "main.tex").read_bytes() == TEX
+    failed_meta = _read(data / "2408-00001" / "v1" / "meta.json")
+    assert failed_meta["status"] == "failed" and "500" in failed_meta["error"]
+    assert not (data / "2408-00003").exists()
+
+
+@responses.activate
+def test_outputs_follow_the_contract(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+
+    pipeline.run(["2408.00001", "2408.00002", "2408.00003", "2408.00004"], config)
+
+    root = config.data_dir / "papers" / "2408-00001"
+    paper = _read(root / "paper.json")
+    assert paper["num_versions"] == 2
+    assert paper["submission_date"] == "2024-08-01"
+    assert paper["revised_dates"] == ["2024-08-10"]  # exact date of v2, not invented
+    assert paper["venue"] == "ICML"  # S2 fallback, there is no journal_ref
+    assert _read(config.data_dir / "papers" / "2408-00004" / "paper.json")["venue"] == "Nature"
+    assert _read(config.data_dir / "papers" / "2408-00002" / "paper.json")["venue"] is None
+
+    v1 = _read(root / "v1" / "meta.json")
+    assert v1["status"] == "ok" and v1["version_date"] == "2024-08-01"
+    assert v1["kept_bytes"] == len(TEX) + len(BIB)
+    assert v1["raw_uncompressed_bytes"] == len(TEX) + len(BIB) + len(PNG)
+    assert sorted(f.name for f in (root / "v1" / "tex").iterdir()) == ["main.tex", "refs.bib"]
+    v2 = _read(root / "v2" / "meta.json")
+    assert v2["status"] == "no_source" and v2["version_date"] == "2024-08-10"
+    assert not (root / "v2" / "tex").exists()  # empty record, the paper is not dropped
+
+    # References are fetched once per paper and copied to every version, all kept.
+    assert len(_read(root / "v1" / "references.json")) == 2
+    assert _read(root / "v1" / "references.json") == _read(root / "v2" / "references.json")
+    raw = json.loads(gzip.decompress((root / pipeline.S2_RAW_NAME).read_bytes()))
+    assert raw["arxiv_id"] == "2408.00001"
+    assert len(_calls(f"{S2}/graph/v1/paper/batch")) <= 3  # batched, not one POST per paper
+
+    # A paper S2 does not know still gets (empty) references and a completion marker.
+    unknown = config.data_dir / "papers" / "2408-00002"
+    assert _read(unknown / "v1" / "references.json") == []
+    assert (unknown / pipeline.S2_RAW_NAME).is_file()
+
+    metrics_doc = _read(config.data_dir / "logs" / "metrics.json")
+    assert metrics_doc["stage_seconds"]["download"] > 0
+    assert metrics_doc["resources"]["disk_peak_bytes"] > 0
+
+
+@responses.activate
+def test_output_passes_validator_and_exports_tables(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+    pipeline.run(["2408.00001", "2408.00002", "2408.00003", "2408.00004"], config)
+
+    assert validate_corpus.validate(config.data_dir) == []
+
+    out = tmp_path / "out"
+    export_tables(config.data_dir, out)
+    import pyarrow.parquet as pq
+
+    refs = pq.read_table(out / "references.parquet").to_pylist()
+    assert {r["arxiv_id"] for r in refs} == {"2408.00001", "2408.00004"}
+    assert all(r["ref_arxiv_id"] == "2005.00001" for r in refs)
+    assert pq.read_table(out / "papers.parquet").num_rows == 3
+
+
+@responses.activate
+def test_rerun_after_interrupt_gives_same_result_idempotent(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+    ids = ["2408.00001", "2408.00002", "2408.00003", "2408.00004"]
+
+    first = pipeline.run(ids, config)
+    snapshot = {
+        p.relative_to(config.data_dir): p.read_bytes()
+        for p in (config.data_dir / "papers").rglob("*")
+        if p.is_file()
+    }
+    responses.calls.reset()
+
+    second = pipeline.run(ids, config)
+
+    assert second == first
+    assert len(responses.calls) == 0  # nothing re-downloaded, re-discovered or re-asked
+    assert snapshot == {
+        p.relative_to(config.data_dir): p.read_bytes()
+        for p in (config.data_dir / "papers").rglob("*")
+        if p.is_file()
+    }
+
+
+@responses.activate
+def test_failed_pair_is_retried_on_next_run_but_ok_pairs_are_not(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src(failing=("2408.00004v2",))
+    _mock_s2()
+    config = _config(tmp_path)
+
+    first = pipeline.run(["2408.00004"], config)
+    assert first["failed"] == 1 and first["ok"] == 2
+
+    responses.reset()
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()  # the server recovered
+    _mock_s2()
+    second = pipeline.run(["2408.00004"], config)
+
+    assert second["failed"] == 0 and second["ok"] == 3
+    assert _calls(f"{ARXIV}/src/") == [f"{ARXIV}/src/2408.00004v2"]
+    root = config.data_dir / "papers" / "2408-00004"
+    assert _read(root / "v2" / "meta.json")["status"] == "ok"
+    assert (root / "v2" / "references.json").is_file()  # references reach the rebuilt dir
+    assert validate_corpus.validate(config.data_dir) == []
+
+
+_orig_event_wait = threading.Event.wait
+
+
+def _mock_fast_429_wait():
+    def _wait_wrapper(self: threading.Event, timeout: float | None = None) -> bool:
+        if timeout is None:
+            return _orig_event_wait(self)
+        return self.is_set()
+
+    return patch.object(threading.Event, "wait", _wait_wrapper)
+
+
+@responses.activate
+def test_arxiv_429_stops_the_run_and_resume_continues(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v1", body=archive)
+    for _ in range(4):
+        responses.add(
+            responses.GET,
+            f"{ARXIV}/src/2408.00004v2",
+            status=429,
+            headers={"Retry-After": "1"},
+        )
+    _mock_s2()
+    config = _config(tmp_path)
+
+    with _mock_fast_429_wait():
+        with pytest.raises(pipeline.StopCrawl) as stopped:
+            pipeline.run(["2408.00004", "2408.00002"], config)
+
+    assert stopped.value.summary["ok"] == 1  # v1 was kept
+    assert len(_calls(f"{ARXIV}/src/")) == 5  # v1 + four 429 attempts on v2
+    assert not (config.data_dir / "papers" / "2408-00004" / ".v2.part").exists()
+    assert _calls(f"{S2}/") == []  # the paper was not finished, so S2 was not asked
+
+    responses.reset()
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    summary = pipeline.run(["2408.00004", "2408.00002"], config)
+    assert summary["ok"] == 4 and summary["failed"] == 0
+    assert f"{ARXIV}/src/2408.00004v1" not in _calls(f"{ARXIV}/src/")
+
+
+@responses.activate
+def test_arxiv_429_on_src_waits_and_retries_then_continues(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v3", body=archive)
+    responses.add(
+        responses.GET,
+        f"{ARXIV}/src/2408.00004v2",
+        status=429,
+        headers={"Retry-After": "1"},
+    )
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", body=archive)
+    _mock_s2()
+    config = _config(tmp_path)
+
+    with _mock_fast_429_wait():
+        summary = pipeline.run(["2408.00004"], config)
+
+    assert summary["ok"] == 3
+    assert len([u for u in _calls(f"{ARXIV}/src/") if u.endswith("2408.00004v2")]) == 2
+
+
+@responses.activate
+def test_arxiv_429_in_discovery_stops_after_retry_budget(tmp_path):
+    for _ in range(4):
+        responses.add(
+            responses.GET,
+            f"{ARXIV}/api/query",
+            status=429,
+            headers={"Retry-After": "1"},
+        )
+    with _mock_fast_429_wait():
+        with pytest.raises(pipeline.StopCrawl):
+            pipeline.run(["2408.00001"], _config(tmp_path))
+    assert len(_calls(f"{ARXIV}/api/query")) == 4
+
+
+@responses.activate
+def test_arxiv_429_in_discovery_waits_and_retries_then_continues(tmp_path):
+    attempts = {"n": 0}
+
+    def query_with_429(request):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return 429, {"Retry-After": "1"}, ""
+        return _atom(request)
+
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=query_with_429)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+
+    with _mock_fast_429_wait():
+        summary = pipeline.run(["2408.00002"], config)
+
+    assert summary["ok"] >= 1
+    assert attempts["n"] >= 2
+
+
+@responses.activate
+def test_discovery_server_error_is_not_reported_as_not_found(tmp_path):
+    responses.add(responses.GET, f"{ARXIV}/api/query", status=503)
+    config = _config(tmp_path)
+
+    summary = pipeline.run(["2408.00001"], config)
+
+    assert summary["not_found"] == 0  # unknown, to be retried by the next run
+    assert sum(summary.values()) == 0
+
+
+@responses.activate
+def test_s2_429_waits_and_retries_then_succeeds(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    batch_url = f"{S2}/graph/v1/paper/batch"
+    attempts = {"n": 0}
+
+    def batch_with_429(request):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return 429, {"Retry-After": "1"}, ""
+        body = json.loads(request.body)
+        payload = []
+        for paper_id in body["ids"]:
+            base = paper_id.removeprefix("ARXIV:")
+            refs = _s2_batch_refs(base)
+            payload.append(
+                {
+                    "paperId": f"paper-{base}",
+                    "venue": "",
+                    "referenceCount": len(refs),
+                    "references": refs,
+                }
+            )
+        return 200, {}, json.dumps(payload)
+
+    responses.add_callback(
+        responses.POST, batch_url, callback=batch_with_429, content_type="application/json"
+    )
+    config = _config(tmp_path)
+
+    pipeline.run(["2408.00002"], config)
+
+    root = config.data_dir / "papers" / "2408-00002"
+    assert len(_read(root / "v1" / "references.json")) == 2
+    assert (root / pipeline.S2_RAW_NAME).is_file()
+
+
+@responses.activate
+def test_s2_403_switches_off_s2_only_and_resume_finishes_it(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    responses.add(responses.POST, f"{S2}/graph/v1/paper/batch", status=403)
+    config = _config(tmp_path)
+    ids = ["2408.00001", "2408.00002"]
+
+    summary = pipeline.run(ids, config)
+
+    assert summary["ok"] == 2 and summary["no_source"] == 1  # arXiv side is complete
+    root = config.data_dir / "papers" / "2408-00001"
+    assert not (root / pipeline.S2_RAW_NAME).exists()
+    assert len(_calls(f"{S2}/")) == 1  # switched off after the first 403
+
+    responses.reset()
+    _mock_s2()
+    second = pipeline.run(ids, config)
+
+    assert second == summary
+    assert _calls(f"{ARXIV}/") == []  # S2-only resume never touches arXiv
+    assert (root / pipeline.S2_RAW_NAME).is_file()
+    assert validate_corpus.validate(config.data_dir) == []
+
+
+@responses.activate
+def test_leftovers_of_a_killed_run_are_cleaned(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+    pipeline.run(["2408.00002"], config)
+
+    root = config.data_dir / "papers" / "2408-00002"
+    (root / ".v1.part" / "tex").mkdir(parents=True)
+    (root / "paper.json.tmp").write_text("{", encoding="utf-8")
+    (root / "v1" / "references.json.tmp").write_text("[", encoding="utf-8")
+
+    pipeline.run(["2408.00002"], config)
+
+    assert sorted(p.name for p in root.iterdir()) == [
+        "paper.json",
+        pipeline.S2_RAW_NAME,
+        "v1",
+    ]
+    assert sorted(p.name for p in (root / "v1").iterdir()) == [
+        "meta.json",
+        "references.json",
+        "tex",
+    ]
+    assert validate_corpus.validate(config.data_dir) == []
+
+
+@responses.activate
+def test_not_found_version_and_html_error_page(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", status=404, body="<html>no</html>")
+    _mock_s2()
+    config = _config(tmp_path)
+
+    summary = pipeline.run(["2408.00002"], config)
+
+    assert summary["not_found"] == 1 and summary["ok"] == 0
+    meta = _read(config.data_dir / "papers" / "2408-00002" / "v1" / "meta.json")
+    assert meta["status"] == Status.NOT_FOUND.value
+    assert not (config.data_dir / ".tmp").exists()  # temp archives never left behind
+
+
+@responses.activate
+def test_unwritable_version_dir_is_recorded_as_failed_and_batch_continues(tmp_path, monkeypatch):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+    real_install = pipeline._install_version
+    calls = {"n": 0}
+
+    def flaky_install(final, part, old, meta):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PermissionError("locked by antivirus")
+        real_install(final, part, old, meta)
+
+    monkeypatch.setattr(pipeline, "_install_version", flaky_install)
+
+    summary = pipeline.run(["2408.00002", "2408.00004"], config)
+
+    assert summary["failed"] == 1 and summary["ok"] == 3  # the other paper is unaffected
+    assert not list((config.data_dir / "papers" / "2408-00002").glob(".v*"))
+
+
+@responses.activate
+def test_automatic_checkpoint_backup(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    mirror = tmp_path / "mirror"
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        backup_dir=mirror,
+        backup_every_ids=1,
+    )
+
+    pipeline.run(["2408.00001", "2408.00002", "2408.00003", "2408.00004"], config)
+
+    assert (mirror / "manifest.sqlite").is_file()
+    assert (mirror / "papers" / "2408-00004" / "v1" / "tex" / "main.tex").is_file()
+
+
+@responses.activate
+def test_checkpoint_resume_skips_leading_done_ids(tmp_path, monkeypatch):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+    pipeline.run(["2408.00001"], config)
+
+    backups: list[int] = []
+
+    def record_backup(source: Path, destination: Path) -> None:
+        backups.append(1)
+
+    monkeypatch.setattr(pipeline, "backup_data_dir", record_backup)
+    mirror = tmp_path / "mirror2"
+    config2 = Config(
+        data_dir=config.data_dir,
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        backup_dir=mirror,
+        backup_every_ids=1,
+    )
+    pipeline.run(["2408.00001", "2408.00002"], config2)
+
+    # One mid-run backup (only 2408.00002 is new) + one final backup in ``finally``.
+    assert len(backups) == 2
+
+
+@responses.activate
+def test_count_leading_done_ids_after_first_paper(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+    pipeline.run(["2408.00001"], config)
+    data_dir = config.data_dir
+    from crawler.manifest import Manifest
+
+    manifest = Manifest(data_dir / "manifest.sqlite")
+    run = pipeline._Run(
+        config=config,
+        manifest=manifest,
+        arxiv=pipeline.make_arxiv_client(config),
+        s2=pipeline.make_s2_client(config),
+        papers_dir=data_dir / "papers",
+        tmp_dir=data_dir / ".tmp",
+    )
+    ids = ["2408.00001", "2408.00002", "2408.00004"]
+    assert pipeline._count_leading_done_ids(run, ids) == 1
+    manifest.close()
+
+
+@responses.activate
+def test_non_blocking_checkpoint_skips_if_previous_still_running(tmp_path, monkeypatch):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+
+    gate = threading.Event()
+    calls: list[int] = []
+
+    def slow_backup(source: Path, destination: Path) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            gate.wait(timeout=0.5)
+
+    monkeypatch.setattr(pipeline, "backup_data_dir", slow_backup)
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        backup_dir=tmp_path / "mirror",
+        backup_every_ids=1,
+    )
+    summary = pipeline.run(["2408.00001", "2408.00002", "2408.00004"], config)
+    gate.set()
+
+    assert summary["ok"] == 5
+    assert summary["no_source"] == 1
+    # 1 background checkpoint (while 2nd/3rd IDs skipped) + 1 final checkpoint in finally
+    assert len(calls) == 2
+
+
+@responses.activate
+def test_resume_heals_incomplete_revised_dates_and_backfills_meta(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+    pipeline.run(["2408.00004"], config)
+
+    # Simulate an earlier run that wrote paper.json without revised_dates and null version_date:
+    paper_dir = config.data_dir / "papers" / "2408-00004"
+    pjson = json.loads((paper_dir / "paper.json").read_text(encoding="utf-8"))
+    pjson["revised_dates"] = []
+    (paper_dir / "paper.json").write_text(json.dumps(pjson), encoding="utf-8")
+    for v in (2, 3):
+        mpath = paper_dir / f"v{v}" / "meta.json"
+        mjson = json.loads(mpath.read_text(encoding="utf-8"))
+        mjson["version_date"] = None
+        mpath.write_text(json.dumps(mjson), encoding="utf-8")
+
+    assert validate_corpus.validate(config.data_dir) != []
+
+    responses.calls.reset()
+    pipeline.run(["2408.00004"], config)
+
+    assert _calls(f"{ARXIV}/src/") == []  # never re-downloads archives
+    assert _read(paper_dir / "paper.json")["revised_dates"] == ["2024-08-05", "2024-08-06"]
+    assert _read(paper_dir / "v2" / "meta.json")["version_date"] == "2024-08-05"
+    assert _read(paper_dir / "v3" / "meta.json")["version_date"] == "2024-08-06"
+    assert validate_corpus.validate(config.data_dir) == []
+
+
+@responses.activate
+def test_failed_background_checkpoint_retries_on_next_chunk(tmp_path, monkeypatch):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    attempts = {"n": 0}
+
+    def flaky_backup(source: Path, destination: Path) -> None:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise OSError("transient Drive FUSE glitch")
+
+    monkeypatch.setattr(pipeline, "backup_data_dir", flaky_backup)
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        backup_dir=tmp_path / "mirror",
+        backup_every_ids=1,
+    )
+    pipeline.run(["2408.00001", "2408.00002"], config)
+    # Chunk 1 failed -> Chunk 2 retried immediately + final backup in finally = 3 calls
+    assert attempts["n"] >= 3
+
+
+@responses.activate
+def test_mid_run_checkpoint_flushes_metrics_without_double_counting(tmp_path, monkeypatch):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    mid_snapshots: list[dict] = []
+    real_backup = pipeline.backup_data_dir
+
+    def capture_backup(source: Path, destination: Path) -> None:
+        real_backup(source, destination)
+        metrics_in_backup = destination / "logs" / "metrics.json"
+        if metrics_in_backup.is_file():
+            mid_snapshots.append(json.loads(metrics_in_backup.read_text(encoding="utf-8")))
+
+    monkeypatch.setattr(pipeline, "backup_data_dir", capture_backup)
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        backup_dir=tmp_path / "mirror",
+        backup_every_ids=1,
+    )
+    pipeline.run(["2408.00001", "2408.00002", "2408.00004"], config)
+
+    # Every mid-run checkpoint already contains non-zero metrics for this session,
+    # and repeated flushes keep runs == 1 (no double-counting).
+    assert len(mid_snapshots) >= 2
+    assert all(snap["runs"] == 1 for snap in mid_snapshots)
+    assert mid_snapshots[0]["active_seconds"] > 0
+    final_metrics = _read(config.data_dir / "logs" / "metrics.json")
+    assert final_metrics["runs"] == 1
+    assert final_metrics["active_seconds"] >= mid_snapshots[0]["active_seconds"]
+
+
+@responses.activate
+def test_inflight_pipeline_never_creates_tmp_dir_and_records_stage_metrics(tmp_path, monkeypatch):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    config = _config(tmp_path)
+    tmp_seen_during_install: list[bool] = []
+    extract_threads: list[str] = []
+    real_install = pipeline._install_version
+    real_extract = pipeline.extract_tex_bib
+
+    def check_no_tmp(final, part, old, meta):
+        tmp_seen_during_install.append((config.data_dir / ".tmp").exists())
+        real_install(final, part, old, meta)
+
+    def track_extract_thread(*args, **kwargs):
+        extract_threads.append(threading.current_thread().name)
+        return real_extract(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "_install_version", check_no_tmp)
+    monkeypatch.setattr(pipeline, "extract_tex_bib", track_extract_thread)
+    summary = pipeline.run(["2408.00001", "2408.00004"], config)
+
+    assert summary["ok"] == 4 and summary["no_source"] == 1
+    assert tmp_seen_during_install and not any(tmp_seen_during_install)
+    assert not (config.data_dir / ".tmp").exists()
+    # Extraction runs strictly off the main network thread on extract-worker.
+    assert extract_threads and all(name == "extract-worker" for name in extract_threads)
+    metrics_doc = _read(config.data_dir / "logs" / "metrics.json")
+    assert metrics_doc["stage_seconds"]["download"] > 0
+    assert metrics_doc["stage_seconds"]["extract"] > 0
+
+
+@responses.activate
+def test_auto_resume_rate_limit_defers_throttled_paper_and_completes_after_cooldown(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    # 2408.00004v1 succeeds; v2 hits four 429s on pass 1, then succeeds on deferred pass:
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v1", body=archive)
+    for _ in range(4):
+        responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", status=429)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v3", body=archive)
+    _mock_s2()
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        auto_resume_rate_limit=True,
+        rate_limit_cooldown_seconds=0.01,
+    )
+    with _mock_fast_429_wait():
+        summary = pipeline.run(["2408.00004", "2408.00002"], config)
+
+    assert summary["ok"] == 4
+    src_calls = _calls(f"{ARXIV}/src/")
+    # 2408.00002v1 is crawled right after cooldown, BEFORE the deferred retry of 2408.00004v2:
+    idx_00002 = src_calls.index(f"{ARXIV}/src/2408.00002v1")
+    idx_00004_v3 = src_calls.index(f"{ARXIV}/src/2408.00004v3")
+    assert idx_00002 < idx_00004_v3
+    metrics_doc = _read(config.data_dir / "logs" / "metrics.json")
+    assert metrics_doc["arxiv"]["auto_resumes"] == 1
+    assert (config.data_dir / "logs" / "diagnostics.jsonl").is_file()
+
+
+@responses.activate
+def test_s2_only_mode_backfills_missing_s2_without_calling_arxiv(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    responses.add(responses.POST, f"{S2}/graph/v1/paper/batch", status=403)
+    config = _config(tmp_path)
+    ids = ["2408.00001", "2408.00002"]
+    pipeline.run(ids, config)
+
+    root = config.data_dir / "papers" / "2408-00001"
+    assert not (root / pipeline.S2_RAW_NAME).exists()
+
+    responses.reset()
+    _mock_s2()
+    s2_only_cfg = Config(
+        data_dir=config.data_dir,
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        s2_only=True,
+    )
+    pipeline.run(ids, s2_only_cfg)
+
+    assert _calls(f"{ARXIV}/") == []
+    assert (root / pipeline.S2_RAW_NAME).is_file()
+    assert validate_corpus.validate(config.data_dir) == []
+
+
+@responses.activate
+def test_skip_s2_mode_crawls_arxiv_without_calling_s2(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    # Note: No S2 mock registered — any call to S2 would fail
+    config = _config(tmp_path, skip_s2=True)
+    ids = ["2408.00001"]
+    summary = pipeline.run(ids, config)
+    assert summary["ok"] == 1
+
+    root = config.data_dir / "papers" / "2408-00001"
+    assert not (root / pipeline.S2_RAW_NAME).exists()
+    assert _calls(f"{S2}/") == []
+
+    # Verify both flags together raise ValueError
+    invalid_cfg = Config(data_dir=tmp_path, contact="me@example.com", skip_s2=True, s2_only=True)
+    with pytest.raises(ValueError, match="Cannot specify both"):
+        pipeline.run(ids, invalid_cfg)
+
+
+def test_workspace_mutex_blocks_concurrent_process_lock_and_stepped_429_backoff(tmp_path):
+    from crawler.source import DownloadResult
+
+    # T1 stepped 429 backoff (15s -> 30s -> 60s when no Retry-After header is present):
+    dl = DownloadResult(path=None, http_status=429, retry_after=None)
+    assert pipeline._retry_after_download(dl, rate_attempt=0) == 15.0
+    assert pipeline._retry_after_download(dl, rate_attempt=1) == 30.0
+    assert pipeline._retry_after_download(dl, rate_attempt=2) == 60.0
+
+    # U3 local OS workspace mutex:
+    with pipeline._acquire_workspace_lock(tmp_path / "data"):
+        with pytest.raises(RuntimeError, match="already running"):
+            with pipeline._acquire_workspace_lock(tmp_path / "data"):
+                pass
+
+
+@responses.activate
+def test_fast_defer_skips_15s_wait_on_first_429_and_cools_down_before_next_id(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    # 2408.00004v1 succeeds; v2 hits a 429 on pass 1 -> deferred immediately (0s in-place retry
+    # wait) and sleeps cooldown BEFORE requesting 2408.00002v1 so the blocked IP is not hammered!
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", status=429)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v3", body=archive)
+    _mock_s2()
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        auto_resume_rate_limit=True,
+        rate_limit_cooldown_seconds=0.02,
+        arxiv_thermal_cooldown_seconds=0.02,
+    )
+    summary = pipeline.run(["2408.00004", "2408.00002"], config)
+
+    assert summary["ok"] == 4
+    src_calls = _calls(f"{ARXIV}/src/")
+    assert src_calls == [
+        f"{ARXIV}/src/2408.00004v1",
+        f"{ARXIV}/src/2408.00004v2",
+        f"{ARXIV}/src/2408.00002v1",
+        f"{ARXIV}/src/2408.00004v2",
+        f"{ARXIV}/src/2408.00004v3",
+    ]
+    metrics_doc = _read(config.data_dir / "logs" / "metrics.json")
+    assert metrics_doc["arxiv"]["retry_wait_seconds"] == 0.0
+    assert metrics_doc["arxiv"]["cooldown_seconds"] > 0.0
+    assert metrics_doc["arxiv"]["auto_resumes"] == 1
+
+
+@responses.activate
+def test_fast_defer_429_enforces_post_done_gap_and_proactive_thermal_cooldown(tmp_path):
+    from crawler.http import HostClient, RateLimiter
+
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    # 2408.00004v1 succeeds; v2 is held in CDN tarpit for 10.9s before returning 429:
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", status=429)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v3", body=archive)
+    _mock_s2()
+
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(round(seconds, 4))
+        now[0] += seconds
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=3.0,
+        arxiv_min_idle_gap=0.50,
+        s2_min_interval=0.0,
+        max_retries=0,
+        auto_resume_rate_limit=True,
+        rate_limit_cooldown_seconds=0.01,
+        arxiv_thermal_cooldown_seconds=0.01,
+    )
+    limiter = RateLimiter(3.0, clock=clock, sleep=fake_sleep, min_idle_gap=0.50)
+    arxiv_client = HostClient(ARXIV, limiter, config)
+    real_session_get = arxiv_client._session.get  # noqa: SLF001
+
+    def tarpit_on_v2(url: str, **kwargs):
+        if url.endswith("/src/2408.00004v2") and not sleeps[-1:]:
+            pass
+        resp = real_session_get(url, **kwargs)
+        if resp.status_code == 429:
+            now[0] += 10.9  # CDN held request for 10.9s before returning HTTP 429
+        return resp
+
+    arxiv_client._session.get = tarpit_on_v2  # type: ignore[method-assign]  # noqa: SLF001
+
+    summary = pipeline.run(["2408.00004", "2408.00002"], config, arxiv_client=arxiv_client)
+    assert summary["ok"] == 4
+    # After 429 was held 10.9s (> 3.5s Start-to-Start), next GET waits 3.5s from _last_done_at!
+    assert 3.5 in sleeps
+
+
+@responses.activate
+def test_parallel_extract_workers_complete_out_of_order_versions_before_queuing_s2(
+    tmp_path, monkeypatch
+):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        extract_workers=2,
+        extract_max_queue_bytes=1024,  # tiny budget to also exercise E4 byte backpressure
+    )
+    real_extract = pipeline.extract_tex_bib
+    v3_extracted = threading.Event()
+    worker_idents: set[int] = set()
+
+    def slow_v1_extract(archive, dest_dir, cfg, *, arxiv_id, version, raw_archive_bytes=None):
+        ident = threading.get_ident()
+        worker_idents.add(ident)
+        if arxiv_id == "2408.00004" and version == 1:
+            # Hold v1 on worker A until worker B finishes v2 and v3 out of order:
+            v3_extracted.wait(timeout=2.0)
+        res = real_extract(
+            archive,
+            dest_dir,
+            cfg,
+            arxiv_id=arxiv_id,
+            version=version,
+            raw_archive_bytes=raw_archive_bytes,
+        )
+        if arxiv_id == "2408.00004" and version == 3:
+            v3_extracted.set()
+        return res
+
+    monkeypatch.setattr(pipeline, "extract_tex_bib", slow_v1_extract)
+    summary = pipeline.run(["2408.00004"], config)
+
+    assert summary["ok"] == 3
+    assert len(worker_idents) == 2
+    paper_dir = config.data_dir / "papers" / "2408-00004"
+    # Even though v3 finished extracting before v1, S2 ran only AFTER v1 was installed,
+    # so all 3 version directories received references.json:
+    for v in (1, 2, 3):
+        assert (paper_dir / f"v{v}" / "meta.json").is_file()
+        assert (paper_dir / f"v{v}" / "references.json").is_file()
+    metrics_doc = _read(config.data_dir / "logs" / "metrics.json")
+    assert metrics_doc["sessions"][0]["papers_done"] == 1
+    assert metrics_doc["s2"]["papers_ok"] == 1
+
+
+@responses.activate
+def test_escalating_429_cooldown_and_no_false_cooldown_on_slow_ok_downloads(tmp_path, monkeypatch):
+    from crawler.http import HostClient, RateLimiter
+
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    # Pass 1:
+    # - 2408.00004v1 succeeds with slow 8s TTFB -> must NOT trigger any thermal cooldown!
+    # - 2408.00004v2 hits 429 #1 -> deferred, cooldown = 60s (1x)
+    # - 2408.00001v1 succeeds (1 ok < 10 decay threshold), v2 hits 429 #2 -> cooldown = 120s (2x)
+    # - 2408.00002v1 hits 429 #3 -> cooldown = 240s (4x)
+    # Pass 2: all remaining versions succeed cleanly.
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", status=429)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00001v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00001v2", status=429)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", status=429)
+    # Pass 2 recoveries:
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v3", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00001v2", body=b"%PDF-1.5\nonly-pdf")
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", body=archive)
+    _mock_s2()
+
+    now = [0.0]
+    cooldown_sleeps: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_limiter_sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    def fake_cooldown_sleep(_stop: threading.Event, seconds: float) -> None:
+        cooldown_sleeps.append(round(seconds, 1))
+        now[0] += seconds
+
+    monkeypatch.setattr(pipeline, "_sleep_interruptible", fake_cooldown_sleep)
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=3.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        auto_resume_rate_limit=True,
+        rate_limit_cooldown_seconds=360.0,
+        arxiv_thermal_cooldown_seconds=120.0,
+    )
+    limiter = RateLimiter(3.0, clock=clock, sleep=fake_limiter_sleep, min_idle_gap=0.50)
+    arxiv_client = HostClient(ARXIV, limiter, config)
+    real_get = arxiv_client._session.get  # noqa: SLF001
+
+    def slow_header_get(url: str, **kwargs):
+        resp = real_get(url, **kwargs)
+        now[0] += 8.0  # Simulate slow 8.0s header TTFB on every 200 OK & 429
+        return resp
+
+    arxiv_client._session.get = slow_header_get  # type: ignore[method-assign]  # noqa: SLF001
+
+    summary = pipeline.run(
+        ["2408.00004", "2408.00001", "2408.00002"], config, arxiv_client=arxiv_client
+    )
+    assert summary["ok"] == 5
+    assert summary["no_source"] == 1
+    # Cooldowns escalated linearly 120s -> 180s -> 240s (max cap 240s; never sleep 360-600s!):
+    assert cooldown_sleeps == [120.0, 180.0, 240.0]
+
+    # Unit check on streak scaling helper (default config: 120s -> 180s -> 240s cap):
+    from unittest.mock import MagicMock
+
+    default_cfg = Config(contact="test@example.com")
+    dummy_run = MagicMock()
+    dummy_run.config = default_cfg
+    dummy_run.arxiv_429_streak = 0
+    assert pipeline._compute_arxiv_cooldown(dummy_run) == 120.0
+    assert pipeline._compute_arxiv_cooldown(dummy_run) == 180.0
+    assert pipeline._compute_arxiv_cooldown(dummy_run) == 240.0
+    assert pipeline._compute_arxiv_cooldown(dummy_run) == 240.0
+    dummy_run.arxiv_429_streak = 0
+    assert pipeline._compute_arxiv_cooldown(dummy_run, retry_after=300.0) == 300.0
+    dummy_run.arxiv_429_streak = 0
+    assert pipeline._compute_arxiv_cooldown(dummy_run, retry_after=900.0) == 600.0
+
+
+@responses.activate
+def test_429_cooldown_skips_unchanged_backup_and_runs_changed_backup_in_parallel(
+    tmp_path, monkeypatch
+):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    # 2408.00004v1 succeeds (final_pairs becomes 1), then v2 hits 429 #1 -> backup #1 runs!
+    # Next, 2408.00002v1 immediately hits 429 #2 (final_pairs still 1, s2_done still 0)
+    # -> backup MUST BE SKIPPED!
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", status=429)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", status=429)
+    # Pass 2 finishes everything:
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v3", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", body=archive)
+    _mock_s2()
+
+    backup_threads: list[str] = []
+    cooldown_calls: list[float] = []
+
+    def spy_cooldown(_stop: threading.Event, seconds: float) -> None:
+        cooldown_calls.append(seconds)
+
+    def spy_backup(source: Path, destination: Path, *, skip_if_unchanged: bool = False) -> None:
+        _ = (source, destination, skip_if_unchanged)
+        backup_threads.append(threading.current_thread().name)
+
+    monkeypatch.setattr(pipeline, "_sleep_interruptible", spy_cooldown)
+    monkeypatch.setattr(pipeline, "backup_data_dir", spy_backup)
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        auto_resume_rate_limit=True,
+        rate_limit_cooldown_seconds=60.0,
+        arxiv_thermal_cooldown_seconds=60.0,
+        backup_dir=tmp_path / "drive" / "arxiv-data.tar.gz",
+        backup_every_ids=100,
+    )
+    summary = pipeline.run(["2408.00004", "2408.00002"], config)
+    assert summary["ok"] == 4
+    assert cooldown_calls == [60.0, 90.0]
+    # 1st 429 ran backup asynchronously on checkpoint-worker; 2nd 429 skipped backup completely;
+    # finally: ran 1 final synchronous backup on MainThread -> total 2 backups, NOT 3!
+    assert len(backup_threads) == 2
+    assert any("checkpoint-worker" in name for name in backup_threads)
+
+
+@responses.activate
+def test_exhausted_stream_drop_defers_paper_in_main_pass_and_recovers(tmp_path, monkeypatch):
+    import requests as req_mod
+
+    from crawler.source import resume_partial_path
+
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    monkeypatch.setattr(pipeline, "_sleep_interruptible", lambda _stop, _s: None)
+
+    calls_00002 = 0
+    # Force download_source to raise ChunkedEncodingError on pass 1 and deferred pass 1
+    # (stashing >= 512 KiB of progress so deferred pass 2 is allowed), then succeed cleanly:
+    real_dl = pipeline.download_source
+
+    def fail_twice_with_progress(client, arxiv_id, version, tmp_dir, **kwargs):
+        nonlocal calls_00002
+        if arxiv_id == "2408.00002" and calls_00002 < 2:
+            calls_00002 += 1
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            part = resume_partial_path(tmp_dir, arxiv_id, version)
+            part.write_bytes(b"x" * (calls_00002 * 600 * 1024))
+            raise req_mod.exceptions.ChunkedEncodingError(f"stream break {calls_00002}")
+        resume_partial_path(tmp_dir, arxiv_id, version).unlink(missing_ok=True)
+        return real_dl(client, arxiv_id, version, tmp_dir, **kwargs)
+
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", body=archive)
+    _mock_s2()
+    monkeypatch.setattr(pipeline, "download_source", fail_twice_with_progress)
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        auto_resume_rate_limit=True,
+        extract_workers=1,
+    )
+    summary = pipeline.run(["2408.00002"], config)
+    assert summary["ok"] == 1
+    assert calls_00002 == 2
+
+
+@responses.activate
+def test_partial_download_persists_across_429_cooldown_and_streak_decays_after_2_oks(
+    tmp_path, monkeypatch, caplog
+):
+    from crawler.source import resume_partial_path
+
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    half = len(archive) // 2
+    # Pre-seed a stashed partial download (simulating 50% downloaded before a 429 on retry)
+    # for 2408.00002v1, and verify the pipeline sends Range: bytes={half}- and completes via 206:
+    tmp_dir = tmp_path / "data" / ".tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    resume_partial_path(tmp_dir, "2408.00002", 1).write_bytes(archive[:half])
+
+    seen_range_headers: list[str | None] = []
+
+    def handle_00002_v1(request):
+        seen_range_headers.append(request.headers.get("Range"))
+        return 206, {}, archive[half:]
+
+    responses.add_callback(responses.GET, f"{ARXIV}/src/2408.00002v1", callback=handle_00002_v1)
+    _mock_s2()
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=1,
+        auto_resume_rate_limit=True,
+        extract_workers=1,
+    )
+    summary = pipeline.run(["2408.00002"], config)
+    assert summary["ok"] == 1
+    assert seen_range_headers == [f"bytes={half}-"]
+    metrics_doc = _read(config.data_dir / "logs" / "metrics.json")
+    assert metrics_doc["arxiv"]["range_resumes"] == 1
+
+    # Also verify _sleep_interruptible logs once per 60s (NOT every 15s):
+    caplog.clear()
+    stop_evt = threading.Event()
+    monkeypatch.setattr(stop_evt, "wait", lambda _s: False)
+    with caplog.at_level("INFO", logger="crawler.pipeline"):
+        pipeline._sleep_interruptible(stop_evt, 60.0)
+        assert [r.message for r in caplog.records if "remaining" in r.message] == []
+        pipeline._sleep_interruptible(stop_evt, 120.0)
+        assert [r.message for r in caplog.records if "remaining" in r.message] == [
+            "auto-resume cooldown: 60s remaining..."
+        ]
+
+
+@responses.activate
+def test_v37_backup_throttle_s2_no_infinite_requeue_and_heavy_breather(tmp_path, monkeypatch):
+    from crawler.http import HostClient, RateLimiter
+
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    archive = _tar_gz()
+    # 1) 2408.00004v1 succeeds (+1 final pair) -> v2 hits 429 #1 -> first pre-cooldown backup runs!
+    # 2) Pass 1 continues to 2408.00002v1 which succeeds (+1 new final pair since backup #1, < 100),
+    #    then 2408.00001v1 hits 429 #2 -> pre-cooldown backup MUST BE SKIPPED (< 100 new pairs)!
+    # 3) Deferred pass finishes 2408.00004v2, v3 and 2408.00001v1, v2.
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", status=429)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00001v1", status=429)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v2", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00004v3", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00001v1", body=archive)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00001v2", body="no source")
+
+    # S2 returns 429 on every attempt during run 1 -> must give up after 4 attempts per batch
+    # WITHOUT re-queuing into an infinite loop within the same run!
+    s2_post_calls = 0
+
+    def always_429_s2(_request):
+        nonlocal s2_post_calls
+        s2_post_calls += 1
+        return 429, {"Retry-After": "15"}, "{}"
+
+    responses.add_callback(
+        responses.POST,
+        f"{S2}/graph/v1/paper/batch",
+        callback=always_429_s2,
+        content_type="application/json",
+    )
+
+    pre_cooldown_backups = 0
+
+    def spy_backup(source: Path, destination: Path, *, skip_if_unchanged: bool = False) -> None:
+        nonlocal pre_cooldown_backups
+        _ = (source, destination, skip_if_unchanged)
+        if "checkpoint-worker" in threading.current_thread().name:
+            pre_cooldown_backups += 1
+
+    monkeypatch.setattr(pipeline, "_sleep_interruptible", lambda _stop, _s: None)
+    monkeypatch.setattr(pipeline, "_wait_s2_429", lambda *_a, **_kw: False)
+    monkeypatch.setattr(pipeline, "backup_data_dir", spy_backup)
+
+    config = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        auto_resume_rate_limit=True,
+        backup_dir=tmp_path / "drive" / "arxiv-data.tar.gz",
+        backup_every_ids=500,
+        extract_workers=1,
+    )
+    summary = pipeline.run(["2408.00004", "2408.00002", "2408.00001"], config)
+    assert summary["ok"] == 5
+    # Only the 1st 429 triggered a pre-cooldown backup; the 2nd 429 (+1 new pair < 100) skipped it!
+    assert pre_cooldown_backups == 1
+    # S2 gave up after 4 attempts per batch instead of looping forever in run.s2_queue:
+    assert 4 <= s2_post_calls <= 12
+
+    # Also verify heavy download (>= 2 MiB) schedules a full End-to-Start breather on limiter:
+    limiter = RateLimiter(3.15, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=2.20)
+    heavy_client = HostClient(ARXIV, limiter, config)
+    dummy_run = pipeline._Run(
+        config=config,
+        manifest=pipeline.Manifest(tmp_path / "data" / "manifest.sqlite"),
+        arxiv=heavy_client,
+        s2=pipeline.make_s2_client(config),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    real_download_source = pipeline.download_source
+    try:
+        monkeypatch.setattr(
+            pipeline,
+            "download_source",
+            lambda *_a, **_kw: pipeline.DownloadResult(
+                path=None,
+                http_status=200,
+                data=bytearray(b"x"),
+                raw_archive_bytes=2 * 1024 * 1024,
+            ),
+        )
+        paper_meta = pipeline.PaperMeta(
+            arxiv_id="2408.00002",
+            title="t",
+            authors=[],
+            submission_date="2024-08-01",
+            num_versions=1,
+        )
+        pipeline._download_version(dummy_run, paper_meta, 1)
+        assert limiter._retry_backoff == 3.15  # noqa: SLF001
+
+        # v3.10: giant archive (>= 10 MiB) schedules min_interval breather (no 6.0s penalty)
+        monkeypatch.setattr(
+            pipeline,
+            "download_source",
+            lambda *_a, **_kw: pipeline.DownloadResult(
+                path=None,
+                http_status=200,
+                data=bytearray(b"x"),
+                raw_archive_bytes=10 * 1024 * 1024,
+            ),
+        )
+        pipeline._download_version(dummy_run, paper_meta, 1)
+        assert limiter._retry_backoff == 3.15  # noqa: SLF001
+
+        # v3.9.4: 45 MiB cumulative wire bytes in live mode (arxiv_min_interval >= 3.0)
+        # triggers a 12.0s bandwidth-bucket recharge and resets window_heavy_bytes:
+        live_cfg = Config(
+            data_dir=tmp_path / "data",
+            contact="test@example.com",
+            arxiv_min_interval=3.15,
+        )
+        assert live_cfg.arxiv_min_idle_gap == 3.05
+        assert live_cfg.arxiv_jitter_max == 0.20
+        dummy_run.config = live_cfg
+        dummy_run.window_heavy_bytes = 40 * 1024 * 1024
+        pipeline._download_version(dummy_run, paper_meta, 1)
+        assert dummy_run.window_heavy_bytes == 0
+        assert limiter._retry_backoff == 12.0  # noqa: SLF001
+
+        # v3.9.4: post-429 caution holds elevated limiter._min_interval across 6 clean 2xxs:
+        dummy_run.arxiv_429_streak = 1
+        dummy_run.arxiv_ok_since_429 = 0
+        limiter._min_interval = 4.25  # noqa: SLF001
+        limiter._adaptive_streak = 1  # noqa: SLF001
+        for i in range(5):
+            pipeline._download_version(dummy_run, paper_meta, 1)
+            assert dummy_run.arxiv_429_streak == 1, f"decayed too early at ok #{i + 1}"
+            assert limiter._min_interval == 4.25  # noqa: SLF001
+        pipeline._download_version(dummy_run, paper_meta, 1)
+        assert dummy_run.arxiv_429_streak == 0
+        assert limiter._min_interval == 3.50  # noqa: SLF001
+    finally:
+        monkeypatch.setattr(pipeline, "download_source", real_download_source)
+        dummy_run.manifest.close()
+
+    # Also verify v3.8 proactive 60s cooldown every N active IDs (reusing cooldown mechanism):
+    proactive_sleeps: list[float] = []
+    monkeypatch.setattr(
+        pipeline, "_sleep_interruptible", lambda _stop, s: proactive_sleeps.append(s)
+    )
+    responses.reset()
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2()
+    proactive_cfg = Config(
+        data_dir=tmp_path / "data_proactive",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        arxiv_proactive_cooldown_every_ids=2,
+        arxiv_proactive_cooldown_seconds=60.0,
+        extract_workers=1,
+    )
+    proactive_summary = pipeline.run(["2408.00001", "2408.00002", "2408.00004"], proactive_cfg)
+    assert proactive_summary["ok"] == 5
+    assert proactive_sleeps == [60.0]
+
+
+def test_v395_no_latch_feedback_loop_on_fast_200_ok(tmp_path, monkeypatch):
+    """v3.9.5: fast 200 OK downloads never call note_429() or latch into perpetual 12s stalls."""
+    from crawler.http import HostClient, RateLimiter
+
+    limiter = RateLimiter(3.15, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=3.05)
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=3.15,
+    )
+    client = HostClient(ARXIV, limiter, cfg)
+    dummy_run = pipeline._Run(
+        config=cfg,
+        manifest=pipeline.Manifest(tmp_path / "data" / "manifest.sqlite"),
+        arxiv=client,
+        s2=pipeline.make_s2_client(cfg),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    paper_meta = pipeline.PaperMeta(
+        arxiv_id="2408.07161",
+        title="t",
+        authors=[],
+        submission_date="2024-08-01",
+        num_versions=1,
+    )
+
+    # 1. Fast normal 200 OK (150 KB, 0.22s wire time):
+    monkeypatch.setattr(
+        pipeline,
+        "download_source",
+        lambda *_a, **_kw: pipeline.DownloadResult(
+            path=None,
+            http_status=200,
+            data=bytearray(b"x" * 150_000),
+            raw_archive_bytes=150_000,
+            download_seconds=0.22,
+        ),
+    )
+    pipeline._download_version(dummy_run, paper_meta, 1)
+    # Must NOT schedule retry backoff or widen min_interval:
+    assert limiter._retry_backoff == 0.0  # noqa: SLF001
+    assert limiter._min_interval == 3.15  # noqa: SLF001
+
+    # 2. Simulate a previous 12.0s breather consumed by limiter:
+    limiter.schedule_retry_backoff(12.0)
+    limiter.wait()  # consumes the 12s backoff, _retry_backoff resets to 0.0
+    assert limiter._retry_backoff == 0.0  # noqa: SLF001
+
+    # Next normal download runs:
+    pipeline._download_version(dummy_run, paper_meta, 1)
+    # Must stay 0.0! No latch loop!
+    assert limiter._retry_backoff == 0.0  # noqa: SLF001
+    assert limiter._min_interval == 3.15  # noqa: SLF001
+
+    dummy_run.manifest.close()
+
+
+def test_v398_ttfb_tarpit_triggers_preemptive_cushion(tmp_path, monkeypatch):
+    """v3.9.8: response header TTFB >= 3.5s triggers pre-emptive session recycle and cushion."""
+    from crawler.http import HostClient, RateLimiter
+
+    limiter = RateLimiter(3.15, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=3.05)
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=3.15,
+    )
+    client = HostClient(ARXIV, limiter, cfg)
+    dummy_run = pipeline._Run(
+        config=cfg,
+        manifest=pipeline.Manifest(tmp_path / "data" / "manifest.sqlite"),
+        arxiv=client,
+        s2=pipeline.make_s2_client(cfg),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    paper_meta = pipeline.PaperMeta(
+        arxiv_id="2408.07239",
+        title="t",
+        authors=[],
+        submission_date="2024-08-01",
+        num_versions=1,
+    )
+
+    client.last_header_elapsed = 4.3  # simulate Fastly holding headers for 4.3s (tarpit)
+    recycles_before = client.session_recycles
+    monkeypatch.setattr(
+        pipeline,
+        "download_source",
+        lambda *_a, **_kw: pipeline.DownloadResult(
+            path=None,
+            http_status=200,
+            data=bytearray(b"%PDF" + b"x" * 500),
+            raw_archive_bytes=800_000,
+            download_seconds=0.01,
+        ),
+    )
+    pipeline._download_version(dummy_run, paper_meta, 1)
+
+    assert client.session_recycles == recycles_before + 1
+    assert limiter._retry_backoff == limiter._min_interval  # noqa: SLF001
+    # v3.10: 200 OK does NOT call note_429() or widen min_interval:
+    assert limiter._min_interval == 3.15  # noqa: SLF001
+
+    dummy_run.manifest.close()
+
+
+def test_v397_stream_break_never_escalates_429_streak_or_triggers_false_cooldown(
+    tmp_path, monkeypatch
+):
+    """v3.9.7: isolated stream drop never triggers cooldown even with 429 streak > 0;
+
+    consecutive stream drops sleep a gentle 60s breather without inflating arxiv_429_streak.
+    """
+    import requests as req_mod
+
+    from crawler.http import HostClient, RateLimiter
+    from crawler.source import resume_partial_path
+
+    limiter = RateLimiter(3.15, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=3.05)
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=3.15,
+        auto_resume_rate_limit=True,
+    )
+    client = HostClient(ARXIV, limiter, cfg)
+    dummy_run = pipeline._Run(
+        config=cfg,
+        manifest=pipeline.Manifest(tmp_path / "data" / "manifest.sqlite"),
+        arxiv=client,
+        s2=pipeline.make_s2_client(cfg),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    paper_meta = pipeline.PaperMeta(
+        arxiv_id="2408.06550",
+        title="t",
+        authors=[],
+        submission_date="2024-08-01",
+        num_versions=1,
+    )
+
+    # Pre-condition: Crawler experienced an earlier arXiv HTTP 429:
+    dummy_run.arxiv_429_streak = 2
+    dummy_run.arxiv_ok_since_429 = 4
+
+    # 1. Single stream drop with partial bytes stashed (1 MiB):
+    part = resume_partial_path(dummy_run.tmp_dir, paper_meta.arxiv_id, 1)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_bytes(b"x" * (1024 * 1024))
+
+    monkeypatch.setattr(
+        pipeline,
+        "download_source",
+        lambda *_a, **_kw: (_ for _ in ()).throw(
+            req_mod.exceptions.ChunkedEncodingError("Fastly severed connection")
+        ),
+    )
+
+    # Must raise _DeferRateLimit with need_cooldown=False and is_stream_failure=True:
+    with pytest.raises(pipeline._DeferRateLimit) as exc_info:  # noqa: SLF001
+        pipeline._process_paper(dummy_run, paper_meta)
+
+    assert exc_info.value.need_cooldown is False
+    assert exc_info.value.is_stream_failure is True
+    # 429 streak and recovery counter must NOT be destroyed!
+    assert dummy_run.arxiv_429_streak == 2
+    assert dummy_run.arxiv_ok_since_429 == 4
+    assert dummy_run.consecutive_stream_failures == 1
+
+    # 2. Simulate second consecutive stream drop (e.g. next paper also drops):
+    part.write_bytes(b"x" * (1024 * 1024 + 600 * 1024))
+    with pytest.raises(pipeline._DeferRateLimit) as exc_info2:  # noqa: SLF001
+        pipeline._process_paper(dummy_run, paper_meta)
+
+    assert exc_info2.value.need_cooldown is True
+    assert exc_info2.value.is_stream_failure is True
+    assert dummy_run.consecutive_stream_failures == 2
+
+    # Now verify _handle_auto_resume_cooldown with stream_cooldown_seconds=60.0
+    # leaves arxiv_429_streak completely untouched:
+    cooldown_slept: list[float] = []
+    monkeypatch.setattr(pipeline, "_sleep_interruptible", lambda _stop, s: cooldown_slept.append(s))
+    pipeline._handle_auto_resume_cooldown(
+        dummy_run,
+        "stream test",
+        1,
+        stream_cooldown_seconds=60.0,
+    )
+    assert cooldown_slept == [60.0]
+    # Streak must remain 2! Never escalated to 3 or latched to 4!
+    assert dummy_run.arxiv_429_streak == 2
+    assert dummy_run.consecutive_stream_failures == 0
+
+    dummy_run.manifest.close()

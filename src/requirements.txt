@@ -1,6 +1,7 @@
-# Runtime dependencies for Milestone 1 (crawler). Pin ranges; freeze exact versions
+﻿# Runtime dependencies for Milestone 1 (crawler). Pin ranges; freeze exact versions
 # in the README once the team has settled on a Colab-tested set.
-arxiv>=4.0,<5          # only Client().results(Search(...)); no download_* in 4.x
+# arXiv metadata is read from the Atom API over plain HTTP (requests) through one shared
+# rate limiter, so the `arxiv` package is not needed.
 requests>=2.32,<3
 urllib3>=2.2,<3
 pandas>=2.2

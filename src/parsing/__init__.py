@@ -1,1 +1,1 @@
-"""Milestone 2 parsing components, independent of crawler execution."""
+"""Milestone 2 LaTeX parsing modules. Integration models.py belongs to leader A."""

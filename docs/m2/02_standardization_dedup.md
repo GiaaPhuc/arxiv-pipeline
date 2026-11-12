@@ -2,16 +2,19 @@
 
 Bản thảo bàn giao cho nửa sau chương 2 của `arxiv-book`. Checkout hiện tại
 chưa chứa repo sách. Nội dung này mô tả triển khai độc lập và kiểm thử tổng hợp;
-chưa phải kết quả chạy corpus thật hoặc benchmark Colab.
+chưa phải kết quả chạy corpus thật hoặc benchmark Colab. Sau merge đã có test
+tích hợp dùng module C/B/D thực và validator E trên corpus tổng hợp.
 
 ## Hợp đồng và cách tích hợp
 
-`src/parsing/models.py` là **đề xuất hợp đồng M2**, cần A đối chiếu trước khi ghép
-các module. Không thay đổi hợp đồng `crawler/models.py` của M1.
+`src/parsing/models.py` dùng hợp đồng chung của A từ `origin/main`, gồm
+`CleanerHooks`, `PaperStats` và `PaperResult`. Không thay đổi hợp đồng `crawler/models.py` của M1.
 
 Mỗi lần gọi dedup chỉ xử lý một bài báo và toàn bộ phiên bản của bài đó.
 `deduplicate_references(arxiv_id, entries)` nhận thêm ID bài báo một cách tường
-minh vì `RawBibEntry` không chứa ID nhưng `BibtexRow` cần trường này.
+minh vì `RawBibEntry` không chứa ID nhưng `BibtexRow` cần trường này. Adapter
+trong `default_stages()` truyền ID rỗng; pipeline điền ID thật ngay sau dedup
+theo giao diện một tham số đã có của A.
 
 ```python
 from pathlib import Path
@@ -106,6 +109,12 @@ Ghi ba thư mục `elements/`, `hierarchy/`, `bibtex/`, mặc định 500 bài/s
 `close()` ghi lô cuối; context manager gọi tự động khi hoàn tất bình thường.
 Corpus rỗng vẫn tạo các bảng rỗng có schema. `kind`/`entrytype` dùng dictionary,
 `version`/`year` dùng int32, `authors` là list<string>. Root không sinh cạnh.
+
+Pipeline gọi `add_paper(PaperResult)`; exporter cũng giữ API các danh sách dòng
+cho test độc lập. CSV bổ sung các trường `PaperStats` (`n_versions`,
+`n_versions_empty`, `n_elements`, ...), thời gian từng bước và lỗi để validator E
+kiểm tra trực tiếp. `PaperResult` chưa mang bản ghi BibTeX thô nên độ phủ trường
+trước dedup để trống ở đường pipeline này.
 
 Đầu ra thống kê:
 

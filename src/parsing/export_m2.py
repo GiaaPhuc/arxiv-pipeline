@@ -15,7 +15,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .models import BibtexRow, ElementRow, HierarchyRow, RawBibEntry
+from .models import BibtexRow, ElementRow, HierarchyRow, PaperResult, PaperStats, RawBibEntry
 
 CATEGORY = pa.dictionary(pa.int32(), pa.string())
 SCHEMAS = {
@@ -62,6 +62,11 @@ STAT_COLUMNS = [
 BIB_FIELDS = ["title", "authors", "year", "doi", "journal", "url"]
 STAT_COLUMNS += [f"{field}_{stage}" for field in BIB_FIELDS for stage in ("before", "after")]
 
+STAT_COLUMNS += [
+    field for field in PaperStats.__dataclass_fields__ if field not in {"arxivid", "timings"}
+]
+STAT_COLUMNS += ["t_gather", "t_hierarchy", "t_bib", "t_dedup"]
+
 
 class ShardedParquetExporter:
     """add_paper accepts all versions of ONE paper, with optional pre-dedup counts.
@@ -70,7 +75,7 @@ class ShardedParquetExporter:
     Paper stats are streamed to CSV; only one batch is held in memory.
     """
 
-    def __init__(self, out_dir: Path, batch_size: int = 500, stats_dir: Path | None = None):
+    def __init__(self, out_dir: Path, stats_dir: Path | None = None, *, batch_size: int = 500):
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
         self.out_dir = Path(out_dir)
@@ -99,17 +104,36 @@ class ShardedParquetExporter:
 
     def add_paper(
         self,
-        arxiv_id: str,
-        elements: list[ElementRow],
-        hierarchy: list[HierarchyRow],
-        bibtex: list[BibtexRow],
+        arxiv_id: str | PaperResult,
+        elements: list[ElementRow] | None = None,
+        hierarchy: list[HierarchyRow] | None = None,
+        bibtex: list[BibtexRow] | None = None,
         *,
-        versions: list[int],
+        versions: list[int] | None = None,
         empty_versions: list[int] | None = None,
         elements_before: int | None = None,
         bibtex_before: int | None = None,
         raw_bib_entries: list[RawBibEntry] | None = None,
     ):
+        paper_stats = None
+        if isinstance(arxiv_id, PaperResult):
+            result = arxiv_id
+            paper_stats = result.stats
+            if paper_stats is None:
+                raise ValueError("PaperResult requires PaperStats")
+            arxiv_id = result.arxivid
+            elements, hierarchy, bibtex = result.elements, result.hierarchy, result.bibtex
+            versions = sorted(
+                {
+                    int(row.elementid.rsplit("#root", 1)[1])
+                    for row in elements
+                    if row.kind == "document"
+                }
+            )
+            elements_before = paper_stats.nodes_before_dedup
+            bibtex_before = paper_stats.n_bib_raw
+        if elements is None or hierarchy is None or bibtex is None or versions is None:
+            raise ValueError("Rows and version coverage are required")
         if self.closed:
             raise ValueError("Exporter is closed")
         if arxiv_id in self.seen:
@@ -148,7 +172,9 @@ class ShardedParquetExporter:
             self.buffers[name].extend(values)
             self.totals[name] += len(values)
         self.kinds.update(row.kind for row in elements)
-        self.totals.update(papers=1, versions=len(versions), empty_versions=len(empty_versions))
+        n_versions = paper_stats.n_versions if paper_stats else len(versions)
+        n_empty = paper_stats.n_versions_empty if paper_stats else len(empty_versions)
+        self.totals.update(papers=1, versions=n_versions, empty_versions=n_empty)
         stats = dict(
             zip(
                 STAT_COLUMNS[:7],
@@ -171,6 +197,21 @@ class ShardedParquetExporter:
                 else None
             )
             stats[f"{field}_after"] = sum(bool(getattr(e, field)) for e in bibtex)
+        if paper_stats is None:
+            paper_stats = PaperStats(
+                arxivid=arxiv_id,
+                n_versions=n_versions,
+                n_versions_empty=n_empty,
+                n_versions_with_tex=n_versions - n_empty,
+                nodes_before_dedup=elements_before or 0,
+                n_elements=len(elements),
+                n_hierarchy=len(hierarchy),
+                n_bib_raw=bibtex_before or 0,
+                n_bibtex=len(bibtex),
+            )
+        stats.update(asdict(paper_stats))
+        stats.update({f"t_{stage}": value for stage, value in stats.pop("timings").items()})
+        stats.update(versions=n_versions, empty_versions=n_empty)
         self.writer.writerow(stats)
         self.pending += 1
         if self.pending >= self.batch_size:

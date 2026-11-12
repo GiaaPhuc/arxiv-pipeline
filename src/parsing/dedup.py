@@ -95,7 +95,7 @@ def deduplicate_references(
             ):
                 parents[y] = x
                 members[x].extend(members.pop(y))
-    clusters = sorted(members.values(), key=lambda ids: ids[0])
+    clusters = sorted((sorted(ids) for ids in members.values()), key=lambda ids: ids[0])
     rows, rename, used = [], {}, set()
     reserved = {e.citation_key for e in entries}
     for ids in clusters:
