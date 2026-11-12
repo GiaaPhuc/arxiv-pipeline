@@ -877,14 +877,124 @@ def test_download_source_stashes_partial_bytes_across_429_and_resumes_with_206(
         ("/src/2408.15660v1", {"stream": True, "headers": {"Range": f"bytes={split_at}-"}})
     ]
 
-    # Heavy stream drop (>= 4 MiB written) adds +3.0s cushion to let CDN burst bucket refill:
+    # Heavy stream drop (>= 1 MiB) adds +9.0s cushion to let CDN refill (>= 12s backoff):
     class DummyLimiter:
         _base_floor = 3.0
         _min_interval = 3.0
 
     assert _stream_retry_backoff_seconds(DummyLimiter(), 1, bytes_written=1024) == 3.0
-    assert _stream_retry_backoff_seconds(DummyLimiter(), 1, bytes_written=5 * 1024 * 1024) == 6.0
-    assert _stream_retry_backoff_seconds(DummyLimiter(), 2, bytes_written=5 * 1024 * 1024) == 7.5
+    assert _stream_retry_backoff_seconds(DummyLimiter(), 1, bytes_written=1024 * 1024) == 12.0
+    assert _stream_retry_backoff_seconds(DummyLimiter(), 1, bytes_written=5 * 1024 * 1024) == 12.0
+    assert _stream_retry_backoff_seconds(DummyLimiter(), 2, bytes_written=5 * 1024 * 1024) == 13.5
+
+    # When keep_partial_on_retryable=True and stream breaks after >= 1 MiB:
+    # v3.11 recycles the session, schedules retry_backoff >= 12.0s on limiter, and performs
+    # an in-place Range retry (bytes={written}-) to complete the heavy download:
+    from crawler.http import RateLimiter
+
+    limiter_heavy = RateLimiter(3.0, clock=lambda: 0.0, sleep=lambda _s: None)
+    heavy_chunk = b"x" * (1024 * 1024)
+    heavy_drop = FakeResponse(
+        200,
+        [b"\x1f\x8b" + heavy_chunk],
+        requests.exceptions.ChunkedEncodingError("heavy cut at 1 MiB"),
+    )
+    heavy_finish = FakeResponse(206, [payload])
+    client_heavy = _RetryFakeClient([heavy_drop, heavy_finish])
+    client_heavy.limiter = limiter_heavy  # type: ignore[attr-defined]
+    res_heavy = download_source(
+        client_heavy,
+        "2408.16028",
+        2,
+        tmp_dir,
+        spool_max_bytes=16 * 1024 * 1024,
+        keep_partial_on_retryable=True,
+    )
+    assert res_heavy.http_status == 200
+    assert res_heavy.range_resumed is True
+    assert len(client_heavy.calls) == 2  # In-place Range retry fired and completed!
+    assert client_heavy.calls[1] == (
+        "/src/2408.16028v2",
+        {"stream": True, "headers": {"Range": f"bytes={len(heavy_chunk) + 2}-"}},
+    )
+    assert limiter_heavy._retry_backoff == 12.0  # noqa: SLF001
+    assert not resume_partial_path(tmp_dir, "2408.16028", 2).exists()
+
+    # And if in-place retries are exhausted without completing, it stashes partial bytes and raises:
+    heavy_drop_2 = FakeResponse(
+        206,
+        [],
+        requests.exceptions.ChunkedEncodingError("cut again on Range retry"),
+    )
+    client_exhausted = _RetryFakeClient([heavy_drop, heavy_drop_2])
+    with pytest.raises(requests.exceptions.ChunkedEncodingError, match="cut again on Range retry"):
+        download_source(
+            client_exhausted,
+            "2408.16029",
+            1,
+            tmp_dir,
+            spool_max_bytes=16 * 1024 * 1024,
+            keep_partial_on_retryable=True,
+        )
+    assert len(client_exhausted.calls) == 2
+    assert resume_partial_path(tmp_dir, "2408.16029", 1).stat().st_size == len(heavy_chunk) + 2
+
+
+def test_download_source_preserves_large_partial_and_cleans_up_on_resumed_429(
+    tar_gz_source: Path,
+    tmp_path: Path,
+) -> None:
+    from crawler.source import _HEAVY_STREAM_BREAK_BYTES, resume_partial_path
+
+    payload = tar_gz_source.read_bytes()
+    tmp_dir = tmp_path / ".tmp-stash-large"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Stash >= 4 MiB: v3.9.6 preserves partial bytes and resumes via Range header
+    large_stashed = resume_partial_path(tmp_dir, "2408.15991", 3)
+    stashed_bytes = b"\x1f\x8b" + b"x" * _HEAVY_STREAM_BREAK_BYTES
+    large_stashed.write_bytes(stashed_bytes)
+    assert large_stashed.is_file()
+
+    client_clean = _RetryFakeClient([FakeResponse(206, [payload])])
+    res_clean = download_source(
+        client_clean,
+        "2408.15991",
+        3,
+        tmp_dir,
+        spool_max_bytes=len(payload) + len(stashed_bytes) + 1024,
+        keep_partial_on_retryable=True,
+    )
+    assert res_clean.http_status == 200
+    assert res_clean.range_resumed is True
+    assert not large_stashed.exists()  # merged and cleaned up!
+    assert client_clean.calls == [
+        (
+            "/src/2408.15991v3",
+            {"stream": True, "headers": {"Range": f"bytes={len(stashed_bytes)}-"}},
+        )
+    ]
+
+    # 2. Resumed Range hitting 429: preserves .part so next attempt resumes after cooldown
+    small_stashed = resume_partial_path(tmp_dir, "2408.16028", 1)
+    small_stashed.write_bytes(payload[:100])
+    assert small_stashed.is_file()
+
+    resp_429 = FakeResponse(429)
+    resp_429.headers = {"Retry-After": "60"}
+    client_429 = _RetryFakeClient([resp_429])
+    res_429 = download_source(
+        client_429,
+        "2408.16028",
+        1,
+        tmp_dir,
+        spool_max_bytes=len(payload) + 1024,
+        keep_partial_on_retryable=True,
+    )
+    assert res_429.http_status == 429
+    assert res_429.retry_after == 60.0
+    assert small_stashed.is_file()  # preserved across 429 for subsequent Range resume!
+    assert small_stashed.read_bytes() == payload[:100]
 
 
 def test_fast_gzip_stream_handles_concatenated_multi_member_gzip_and_many_subdirs(
@@ -929,3 +1039,45 @@ def test_fast_gzip_stream_handles_concatenated_multi_member_gzip_and_many_subdir
         "refs.bib",
     }
     assert not (dest / "sections" / "s1" / "figure.pdf").exists()
+
+
+def test_download_source_paced_streaming_caps_bandwidth_above_512kib(tmp_path: Path) -> None:
+    from crawler.http import RateLimiter
+
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def fake_clock() -> float:
+        return now[0]
+
+    def fake_sleep(sec: float) -> None:
+        sleeps.append(sec)
+        now[0] += sec
+
+    limiter = RateLimiter(3.0, clock=fake_clock, sleep=fake_sleep)
+    # Create 3 MiB of dummy payload (first 512 KiB unthrottled, last 2.5 MiB paced)
+    chunk = b"x" * (256 * 1024)
+    chunks = [b"\x1f\x8b" + chunk[:-2]] + [chunk for _ in range(11)]  # total 12 * 256 KiB = 3 MiB
+
+    class InstantStreamingClient:
+        def __init__(self) -> None:
+            self.limiter = limiter
+
+        def get(self, _path: str, **_kwargs: object) -> FakeResponse:
+            return FakeResponse(200, chunks)
+
+    client = InstantStreamingClient()
+    res = download_source(
+        client,  # type: ignore[arg-type]
+        "2408.06481",
+        2,
+        tmp_path / ".tmp-paced",
+        spool_max_bytes=16 * 1024 * 1024,
+    )
+    assert res.http_status == 200
+    assert res.raw_archive_bytes == 3 * 1024 * 1024
+    # The tail 2.5 MiB (above 512 KiB) was paced via sleep_fn:
+    assert len(sleeps) > 0
+    total_paced = sum(sleeps)
+    # 2.5 MiB / 4.5 MiB/s = ~0.556s:
+    assert 0.50 <= total_paced <= 0.65

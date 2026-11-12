@@ -18,7 +18,7 @@ import tarfile
 import tempfile
 import time
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, BinaryIO
@@ -38,8 +38,27 @@ _STREAM_CHUNK_SIZE = 128 * 1024
 _MAX_STREAM_ATTEMPTS = 2
 _MAX_TOTAL_STREAM_ATTEMPTS = 2  # v3.9: 1 initial + 1 Range to avoid per-URL 429
 _MIN_PROGRESS_BYTES = 512 * 1024
-_HEAVY_STREAM_BREAK_BYTES = 4 * 1024 * 1024
-_HEAVY_STREAM_BREAK_BONUS = 3.0
+_HOT_STREAM_DEFER_BYTES = 1024 * 1024  # v3.9.3: heavy stream threshold for backoff bonus
+_HEAVY_STREAM_BREAK_BYTES = 4 * 1024 * 1024  # threshold constant kept for backward compatibility
+_PACED_STREAM_START_BYTES = (
+    512 * 1024
+)  # v3.9.7: unthrottled first 512 KiB; pace >= 512 KiB at 4.5 MiB/s (v3.10)
+
+
+def _resolve_max_stream_bps() -> int:
+    env_val = os.environ.get("CRAWLER_MAX_STREAM_MBPS", "").strip()
+    if env_val:
+        try:
+            parsed = float(env_val)
+            if parsed > 0:
+                return int(parsed * 1024 * 1024)
+        except ValueError:
+            pass
+    return int(4.5 * 1024 * 1024)  # v3.10 Clean Lean Turbo: 4.5 MiB/s sustained stream cap
+
+
+_MAX_SUSTAINED_STREAM_BPS = _resolve_max_stream_bps()
+_HEAVY_STREAM_BREAK_BONUS = 9.0  # v3.11: +9.0s ensures >= 12s-14s for Fastly edge recovery
 _KEEPALIVE_DRAIN_BYTES = 64 * 1024
 _STREAM_RETRY_ERRORS = (ChunkedEncodingError, ConnectionError, Timeout)
 _GZIP_MAGIC = b"\x1f\x8b"
@@ -72,6 +91,9 @@ class DownloadResult:
     retry_after: float | None = None  # seconds from Retry-After on 429
     data: bytes | bytearray | None = None  # in-memory archive bytes when <= spool_max_bytes
     range_resumed: bool = False  # True when HTTP 206 Range resumed a broken stream (T2)
+    download_seconds: float = field(
+        default=0.0, compare=False
+    )  # pure wire streaming duration in seconds (excludes limiter.wait)
 
 
 @dataclass
@@ -340,13 +362,13 @@ def _stream_retry_backoff_seconds(
     *,
     bytes_written: int = 0,
 ) -> float:
-    """Return End-to-Start backoff (>= 3.0 s on arXiv, +3.0 s cushion after >= 4 MiB drop)."""
+    """Return End-to-Start backoff (>= 3.0 s on arXiv, +9.0 s cushion after >= 1 MiB drop)."""
     base_floor = float(getattr(limiter, "_base_floor", 0.0) or 0.0)
     if base_floor <= 0.0:
         return 0.0
     min_interval = float(getattr(limiter, "_min_interval", base_floor) or base_floor)
     floor = max(min_interval, 3.0)
-    bonus = _HEAVY_STREAM_BREAK_BONUS if bytes_written >= _HEAVY_STREAM_BREAK_BYTES else 0.0
+    bonus = _HEAVY_STREAM_BREAK_BONUS if bytes_written >= _HOT_STREAM_DEFER_BYTES else 0.0
     return round(floor + 1.5 * max(retry_number - 1, 0) + bonus, 4)
 
 
@@ -426,6 +448,8 @@ def download_source(
                     resume_path.unlink(missing_ok=True)
                 else:
                     temp_path = resume_path
+            else:
+                resume_path.unlink(missing_ok=True)
         except OSError:
             resume_path.unlink(missing_ok=True)
             header.clear()
@@ -494,13 +518,23 @@ def download_source(
             if status == 404:
                 _cleanup_partial()
                 return DownloadResult(path=None, http_status=status)
-            if status in (403, 429):
-                if status == 429 and _stash_partial():
+            if status == 403:
+                _cleanup_partial()
+                return DownloadResult(path=None, http_status=status)
+            if status == 429:
+                # HTTP 429 is rate limit / bandwidth throttling, NOT a Range rejection.
+                # Never discard partial bytes; stash them so next attempt resumes via Range.
+                if _stash_partial():
                     _cleanup_partial(remove_resume=False)
                 else:
                     _cleanup_partial()
-                retry_after = _retry_after_seconds(response) if status == 429 else None
-                return DownloadResult(path=None, http_status=status, retry_after=retry_after)
+                retry_after = _retry_after_seconds(response)
+                return DownloadResult(
+                    path=None,
+                    http_status=status,
+                    retry_after=retry_after,
+                    range_resumed=range_resumed,
+                )
             if status == 416 and written > 0:
                 # Server rejected byte range; reset buffer and retry full object if attempts remain.
                 _cleanup_partial()
@@ -549,6 +583,15 @@ def download_source(
                 else _CHUNK_SIZE
             )
 
+            limiter_obj = getattr(client, "limiter", None)
+            pace_enabled = float(getattr(limiter_obj, "_base_floor", 0.0) or 0.0) >= 3.0
+            clock_fn = getattr(limiter_obj, "_clock", time.monotonic)
+            sleep_fn = getattr(limiter_obj, "_sleep", time.sleep)
+            attempt_bytes = 0
+            t_pace_start: float | None = None
+            paced_sleep_total = 0.0
+
+            t_stream_start = time.monotonic()
             for chunk in response.iter_content(chunk_size=read_chunk_size):
                 if not chunk:
                     continue
@@ -572,6 +615,7 @@ def download_source(
                             ):
                                 for _ in response.iter_content(chunk_size=read_chunk_size):
                                     pass
+                            dl_secs = max(0.0, time.monotonic() - t_stream_start)
                             if disk_out is not None:
                                 disk_out.seek(0)
                                 disk_out.truncate()
@@ -585,6 +629,7 @@ def download_source(
                                     http_status=200,
                                     raw_archive_bytes=written,
                                     range_resumed=range_resumed,
+                                    download_seconds=dl_secs,
                                 )
                             if keep_partial_on_retryable:
                                 resume_path.unlink(missing_ok=True)
@@ -594,6 +639,7 @@ def download_source(
                                 raw_archive_bytes=written,
                                 data=stub,
                                 range_resumed=range_resumed,
+                                download_seconds=dl_secs,
                             )
 
                 if disk_out is None and written + len(chunk) > spool_max_bytes:
@@ -610,7 +656,21 @@ def download_source(
                 else:
                     mem_buf.extend(chunk)
                 written += len(chunk)
+                attempt_bytes += len(chunk)
+                if pace_enabled and attempt_bytes > _PACED_STREAM_START_BYTES:
+                    if t_pace_start is None:
+                        t_pace_start = clock_fn()
+                    else:
+                        paced_bytes = attempt_bytes - _PACED_STREAM_START_BYTES
+                        target_dt = paced_bytes / _MAX_SUSTAINED_STREAM_BPS
+                        actual_dt = max(0.0, clock_fn() - t_pace_start)
+                        if target_dt > actual_dt:
+                            step_sleep = min(target_dt - actual_dt, 0.20)
+                            if step_sleep >= 0.005:
+                                sleep_fn(step_sleep)
+                                paced_sleep_total += step_sleep
 
+            dl_secs = max(0.0, (time.monotonic() - t_stream_start) - paced_sleep_total)
             if disk_out is not None:
                 disk_out.close()
                 disk_out = None
@@ -621,6 +681,7 @@ def download_source(
                     http_status=200,
                     raw_archive_bytes=written,
                     range_resumed=range_resumed,
+                    download_seconds=dl_secs,
                 )
             if keep_partial_on_retryable:
                 resume_path.unlink(missing_ok=True)
@@ -630,6 +691,7 @@ def download_source(
                 raw_archive_bytes=written,
                 data=mem_buf,
                 range_resumed=range_resumed,
+                download_seconds=dl_secs,
             )
         except _STREAM_RETRY_ERRORS as exc:
             last_exc = exc
@@ -646,17 +708,20 @@ def download_source(
                 stalled_attempts = 0
             else:
                 stalled_attempts += 1
+            limiter = getattr(client, "limiter", None)
+            retry_delay = _stream_retry_backoff_seconds(
+                limiter,
+                total_attempts,
+                bytes_written=written,
+            )
+            if limiter is not None and hasattr(limiter, "schedule_retry_backoff"):
+                limiter.schedule_retry_backoff(retry_delay)
             if stalled_attempts >= max_attempts or total_attempts >= max_total_attempts:
                 if _stash_partial():
                     _cleanup_partial(remove_resume=False)
                 else:
                     _cleanup_partial()
                 raise
-            retry_delay = _stream_retry_backoff_seconds(
-                getattr(client, "limiter", None),
-                total_attempts,
-                bytes_written=written,
-            )
             logger.warning(
                 "stream %sv%d failed at %d bytes (+%d B, %s); retry %d/%d in %.1fs (stalled %d/%d)",
                 arxiv_id,
@@ -670,9 +735,6 @@ def download_source(
                 stalled_attempts,
                 max_attempts,
             )
-            limiter = getattr(client, "limiter", None)
-            if limiter is not None and hasattr(limiter, "schedule_retry_backoff"):
-                limiter.schedule_retry_backoff(retry_delay)
         except BaseException:
             _cleanup_partial()
             raise

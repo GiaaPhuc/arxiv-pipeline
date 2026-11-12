@@ -321,6 +321,47 @@ def test_arxiv_rate_limiter_adapts_above_3s_floor_on_429_and_recovers():
     assert 3.15 <= sleeps[0] <= 3.45
 
 
+def test_arxiv_rate_limiter_enter_ramp_up_and_idle_gap_recovery():
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(round(seconds, 4))
+        now[0] += seconds
+
+    limiter = RateLimiter(3.15, clock=clock, sleep=fake_sleep, min_idle_gap=3.05)
+    limiter.note_429()
+    assert limiter._min_interval == 3.65  # noqa: SLF001
+    assert limiter._min_idle_gap == 3.45  # noqa: SLF001
+
+    limiter.enter_ramp_up(start_interval=5.0, start_idle_gap=4.5)
+    assert limiter._min_interval == 5.0  # noqa: SLF001
+    assert limiter._min_idle_gap == 4.5  # noqa: SLF001
+
+    for _ in range(2):
+        limiter.note_success()
+    assert limiter._min_interval == 4.25  # noqa: SLF001
+    assert limiter._min_idle_gap == 4.05  # noqa: SLF001
+
+    for _ in range(2):
+        limiter.note_success()
+    assert limiter._min_interval == 3.5  # noqa: SLF001
+    assert limiter._min_idle_gap == 3.3  # noqa: SLF001
+
+    for _ in range(2):
+        limiter.note_success()
+    assert limiter._min_interval == 3.15  # noqa: SLF001
+    assert limiter._min_idle_gap == 3.05  # noqa: SLF001
+
+    limiter.enter_ramp_up(start_interval=5.0)
+    limiter.reset_interval()
+    assert limiter._min_interval == 3.15  # noqa: SLF001
+    assert limiter._min_idle_gap == 3.05  # noqa: SLF001
+
+
 def test_unified_retry_clock_does_not_stack_retry_sleep_and_rate_limiter():
     now = [0.0]
     sleeps: list[float] = []

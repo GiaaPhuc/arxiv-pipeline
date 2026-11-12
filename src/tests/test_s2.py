@@ -248,3 +248,116 @@ def test_batch_falls_back_when_reference_count_exceeds_embedded_list():
     assert result.venue == "NeurIPS 2024"
     assert result.references[0].ref_title == "From pagination"
     assert result.raw["source"] == "references"
+
+
+def test_extract_local_references_bib_and_bbl(tmp_path):
+    from crawler.s2 import extract_local_references
+
+    # Create dummy bib file
+    tex_dir = tmp_path / "v1" / "tex"
+    tex_dir.mkdir(parents=True)
+    bib_content = """
+    @article{vaswani2017attention,
+      title = {Attention is all you need},
+      author = {Vaswani, Ashish and Shazeer, Noam},
+      year = {2017},
+      eprint = {1706.03762},
+      archivePrefix = {arXiv}
+    }
+    @book{goodfellow2016deep,
+      title = {Deep Learning},
+      author = {Goodfellow, Ian and Bengio, Yoshua},
+      year = {2016}
+    }
+    """
+    (tex_dir / "refs.bib").write_text(bib_content, encoding="utf-8")
+
+    refs = extract_local_references(tmp_path)
+    assert len(refs) == 2
+    r1 = next(r for r in refs if r.ref_arxiv_id == "1706.03762")
+    assert r1.ref_title == "Attention is all you need"
+    assert "Vaswani, Ashish" in r1.ref_authors
+    assert r1.ref_submission_date == "2017"
+
+    r2 = next(r for r in refs if r.ref_title == "Deep Learning")
+    assert r2.ref_arxiv_id is None
+    assert r2.ref_submission_date == "2016"
+
+
+@responses.activate
+def test_batch_bib_fallback_when_s2_returns_null(tmp_path):
+    from crawler.s2 import fetch_references_batch
+
+    client = DummyS2Client()
+    tex_dir = tmp_path / "v1" / "tex"
+    tex_dir.mkdir(parents=True)
+    (tex_dir / "refs.bib").write_text(
+        "@article{a, title={Fallback Paper}, author={Author One}, "
+        "year={2023}, eprint={2301.00001}}",
+        encoding="utf-8",
+    )
+
+    responses.add(
+        responses.POST,
+        "https://api.semanticscholar.org/graph/v1/paper/batch",
+        json=[None],
+    )
+
+    # Without fallback enabled
+    out_no_fb = fetch_references_batch(
+        client, ["2310.99999"], paper_dirs={"2310.99999": tmp_path}, enable_bib_fallback=False
+    )
+    assert out_no_fb["2310.99999"].found is False
+
+    # With fallback enabled
+    out_fb = fetch_references_batch(
+        client, ["2310.99999"], paper_dirs={"2310.99999": tmp_path}, enable_bib_fallback=True
+    )
+    res = out_fb["2310.99999"]
+    assert res.found is True
+    assert res.raw["source"] == "local_bib"
+    assert len(res.references) == 1
+    assert res.references[0].ref_arxiv_id == "2301.00001"
+    assert res.references[0].ref_title == "Fallback Paper"
+
+
+@responses.activate
+def test_batch_bisection_on_payload_too_large():
+    from crawler.s2 import fetch_references_batch
+
+    client = DummyS2Client()
+
+    # 1) When batch receives 2 IDs, return 413 Payload Too Large
+    def batch_callback(request):
+        import json
+
+        body = json.loads(request.body)
+        if len(body["ids"]) > 1:
+            return 413, {}, "Payload Too Large"
+        paper_id = body["ids"][0].removeprefix("ARXIV:")
+        return (
+            200,
+            {},
+            json.dumps(
+                [
+                    {
+                        "paperId": f"p-{paper_id}",
+                        "venue": "Test Venue",
+                        "referenceCount": 0,
+                        "references": [],
+                    }
+                ]
+            ),
+        )
+
+    responses.add_callback(
+        responses.POST,
+        "https://api.semanticscholar.org/graph/v1/paper/batch",
+        callback=batch_callback,
+        content_type="application/json",
+    )
+
+    out = fetch_references_batch(client, ["2310.00001", "2310.00002"])
+    assert len(out) == 2
+    assert out["2310.00001"].found is True
+    assert out["2310.00002"].found is True
