@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T5 12/11/2026 ~23:05 (Asia/Saigon)** — **Rà soát & tối ưu hóa toàn diện Kế hoạch Triển khai Milestone 3** (`docs/plans/milestone3-implementation-plan-vi.md`): (1) **Đúc kết 5 bài học xương máu từ M1** (Scale shock 4 triệu cặp, Sequential blockers làm nghẽn tiến độ, Schema drift/edge cases, Data leakage, Over-engineering) và thiết lập 5 nguyên tắc kỹ thuật phòng ngừa sớm; (2) **Tối ưu hóa tính toán**: chuẩn hóa dùng `rapidfuzz` (C++ vectorization) kết hợp cơ chế **2-Stage Candidate Blocking** (giảm 75–85% chi phí trích xuất đặc trưng nặng); (3) **Tối ưu hóa phân công (Zero-Wait Parallelism)**: áp dụng mô hình **Mock-First với Synthetic Fixtures** giúp cả 5 thành viên (A–E) code và test độc lập ngay từ Ngày 1 mà không phụ thuộc tiến độ M1/M2; (4) **Xử lý an toàn các trường hợp biên**: `normalize_arxiv_id()` cắt bỏ version suffix, an toàn khi $n < 5$ tham chiếu (ghi `None`), hỗ trợ dòng toàn âm (Null Ground Truth). — **M1 Phase 0 ✅ · Phase 1 ✅**; **M1 Phase 2**: crawl **25.000 ID** một máy. **M2 Phase 0 ✅**: đã khóa `models.py` + khung pipeline đa nhân/profiler để B–E code song song (06–12/11); **400 passed** toàn suite (278 test M1 + 122 test C/E M2), `ruff` sạch 100%.
+> Cập nhật lần cuối: **T5 12/11/2026 ~23:15 (Asia/Saigon)** — (1) **Milestone 3**: Rà soát & tối ưu hóa toàn diện Kế hoạch Triển khai M3 (`docs/plans/milestone3-implementation-plan-vi.md`) dựa trên 5 bài học M1, bổ sung cơ chế 2-Stage Candidate Blocking (`rapidfuzz`) và phân công Mock-First độc lập (A–E); (2) **Crawler v3.14.0**: hoàn thiện Proportional Bandwidth Breather & Dynamic Wire-Speed Streaming (`--max-stream-mbps`); (3) **Milestone 2**: Đồng bộ module Role B (`M2-B1..B4`, PR #28 của Sơn: `INITIALS`, `\cite` macro protect, `\href`, sizing) và Role C (PR #26); test suite toàn dự án đạt 100% xanh, `ruff` sạch 100%.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -13,9 +13,14 @@
 
 ### Đề và phạm vi
 
-- Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. Hiện đang hoàn thiện dữ liệu **Milestone 1** (thu thập 25k ID) và khởi động **Milestone 2** (Phase 0 đã xong: Leader A đã khóa hợp đồng `src/parsing/models.py` và khung `pipeline.py` / `run_parse.py` / `colab_parse.ipynb`; B–E bắt đầu code song song 06–12/11). Kế hoạch kỹ thuật & phân công **Milestone 3** (đối sánh BibTeX với bảng `references`, MRR@5, poster A2 dọc, dataset Hugging Face) đã chuẩn bị sẵn sàng tại `docs/plans/milestone3-implementation-plan-vi.md`.
+- Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. Hiện đang hoàn thiện dữ liệu **Milestone 1** (thu thập 25k ID) và hoàn thiện các trụ cột **Milestone 2** (Phase 0 đã xong; B và C đã hoàn thiện module cốt lõi; D và E đang phối hợp ghép nối). Kế hoạch kỹ thuật & phân công **Milestone 3** (đối sánh BibTeX với bảng `references`, MRR@5, poster A2 dọc, dataset Hugging Face) đã chuẩn bị sẵn sàng tại `docs/plans/milestone3-implementation-plan-vi.md`.
 - Nộp Milestone 1 qua Moodle: link repo mã công khai + link Jupyter Book (repo sách riêng, GitHub Pages). **Không nộp dữ liệu** ở mốc này. Viết bằng tiếng Việt. Không nộp trễ.
 - Khi nộp, repo mã chỉ được chứa mã (`.py` / `.ipynb`), `requirements.txt` và `README.md`. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md`, `plans/`, `project requirements/` đang ở trong repo để làm việc — xử lý lúc đóng băng (R6, T5.3 trong Phase 2).
+
+### Phần B M2 — hoàn thành và kiểm thử 12/11 (PR #28)
+
+- `cleaner.py` mở rộng macro an toàn (`\newcommand`, `\def`, 0–3 tham số, tối đa 5 vòng lặp, bảo vệ lệnh cấu trúc và cite/url) và dọn lệnh trình bày; `math_normalizer.py` state-machine chuyển toán nội dòng về `$...$` và toán khối về `\begin{equation}`, bảo vệ `\$` và URL; `sentence_splitter.py` Protect–Mask–Guard–Split–Restore tách câu lá chính xác, bảo vệ toán, trích dẫn, URL, số thập phân và danh mục từ viết tắt, loại trừ sentence starters tránh nuốt câu sau ký tự in hoa đơn lẻ.
+- **84 passed** tests B offline (không mạng, không dữ liệu); toàn bộ test suite **467 passed** (30,72 s); `ruff check` & `ruff format` sạch 100%. Tốc độ chuẩn hóa toán đạt ~19 MB/s, macro ~8.3 MB/s.
 
 ### Milestone 1 — đề vs hiện trạng
 
@@ -57,6 +62,7 @@
 | Ngày | Quyết định |
 | --- | --- |
 | 12/11 | **v3.14 — In-Place Resolution & Proportional Bandwidth Breather:** Loại bỏ hoàn toàn cơ chế hoãn bài nặng dồn toa về cuối (vốn làm cạn Token Bucket Fastly và gây bão 429 liên hoàn). Thay thế bằng xử lý dứt điểm bài nặng tại chỗ (In-Place) kết hợp nghỉ nạp hồi Token Bucket tỷ lệ thuận theo dung lượng thực tế ($S / 4.0\text{ MiB/s}$); bổ sung `--max-stream-mbps` và env `CRAWLER_MAX_STREAM_MBPS` cho phép kéo 12.0–18.0 MiB/s wire speed trên Colab/Cloud, rút ngắn 65–75% thời gian download bài nặng mà không bị phạt |
+| 12/11 | **M2-B / Tinh chỉnh Parser & Splitter:** Thêm danh mục `SENTENCE_STARTERS` vào `INITIALS` tránh dính câu sau chữ hoa đơn lẻ (`Appendix A. The...`), bảo vệ macro trong `\cite` có opt-args/`*`, thêm `\href` vào `PROTECT` và bổ sung `Huge`/`HUGE`/`normalsize` vào `PRESENTATION_COMMANDS`. Toàn bộ 84 test B và 467 test dự án đều pass xanh |
 | 08/11 | **M2-C / chọn root:** chỉ cộng điểm include khi đích tĩnh tìm được từ thư mục root ứng viên trong mapping nguồn; giữ trọng số khác, API/schema và fallback. Tránh file mẫu có nhiều include thiếu thắng root thật (`2408.11049` v4/v5). Lượt thử C với hook truyền nguyên văn không thay tích hợp B/D thật |
 | 17/10 | Nguồn dữ liệu: arXiv API (`id_list`) + `/src/{id}vN` trên `export.arxiv.org` + S2 Graph API. Pipeline resumable bằng SQLite manifest; hai worker theo host (≥ 3 s arXiv, ≥ 1 s S2); chỉ giữ `.tex`/`.bib`, giữ cấu trúc thư mục; lưu JSON thô trước |
 | 17/10 | Dải ID = 4 trường `start_month,start_id,end_month,end_id`, tính cả hai đầu. ID không tồn tại ghi `not_found`, tách khỏi `failed` |
