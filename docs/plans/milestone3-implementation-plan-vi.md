@@ -45,6 +45,22 @@ Từ 2 nguồn dữ liệu độc lập đã hoàn thiện ở các cột mốc 
 
 ---
 
+### 0.4. Bài học Xương máu từ M1 & 5 Nguyên tắc Thiết kế Chống nghẽn (Zero-Friction Principles)
+
+Quá trình triển khai Milestone 1 đã phải trải qua 14 phiên bản tái cấu trúc (từ `v1` đến `v3.14.0`) do các sai lầm cốt tử: (1) Đánh giá sai quy mô khi scale từ pilot 30 ID lên 25.000 ID dẫn đến cạn Token Bucket Fastly và bão 429; (2) Tràn RAM do đệm dữ liệu tùy tiện; (3) Nghẽn phụ thuộc tuần tự (thành viên B–E bị động chờ Leader A sửa core); (4) Lỗi môi trường đa nền tảng (Windows SQLite lock, `#` temp path); (5) Lệch hợp đồng dữ liệu giữa chừng.
+
+Để **tuyệt đối không lặp lại sai lầm này ở Milestone 3**, toàn bộ pipeline M3 được khóa chặt theo **5 Nguyên tắc Chống nghẽn**:
+
+| Bài học từ M1 | Nguy cơ tương đương ở M3 | Giải pháp Kỹ thuật & Ràng buộc Bắt buộc cho M3 |
+| :--- | :--- | :--- |
+| **1. Bùng nổ Quy mô (Scale Shock)** | Áp dụng Auto-Matcher cho $\ge 10\%$ số bài (2.500 bài $\times$ 1.600 cặp) tạo ra **4.000.000 cặp ứng viên**! Nếu tính chuỗi bằng `fuzzywuzzy`/`thefuzz` hoặc loop Python thuần $\rightarrow$ mất hàng chục tiếng hoặc OOM. | **Chuẩn hóa `rapidfuzz` (C++ backend) + 2-Stage Blocking:** Chỉ dùng `rapidfuzz` (nhanh hơn 50–100 lần, zero-build). Bổ sung tầng lọc thô (Stage 1 Blocking) để loại ngay 85% cặp âm hiển nhiên trước khi tính 18 đặc trưng nặng (Stage 2). Xử lý streaming theo từng bài báo, không giữ 4M cặp trong RAM. |
+| **2. Nghẽn Bàn giao (Sequential Blocker)** | B, C, D, E ngồi chờ dữ liệu 25k M1 hoặc parsing M2 hoàn tất mới bắt đầu code $\rightarrow$ dồn toa cuối kỳ, không kịp debug. | **Decoupled Development (Mock-First):** Tạo ngay `synthetic_fixture.py` (5 bài báo giả lập đầy đủ AST, BibTeX, References) và dùng subset 1.000 bài có sẵn (`arxiv-data/`). Cả 5 người code và test CI xanh ngay từ Ngày 1 mà không phụ thuộc tiến độ M1/M2. |
+| **3. Lệch Schema & Lỗi Biên (Edge Cases)** | Format ID bị đổi (`v1` vs unversioned, `hep-th/`), bài rỗng, crash khi thiếu DOI hoặc năm, đường dẫn Windows. | **Triệt để Null-Safety & ID Normalizer:** Mọi so khớp mỏ neo phải qua `normalize_arxiv_id()` (cắt bỏ hậu tố `vN`, lowercase, bỏ `arxiv:`). Xử lý an toàn khi bài có $n < 5$ tham chiếu (điền `None` cho `cand4`, `cand5`, không crash). Dòng toàn âm (Null Ground Truth) được hỗ trợ ở cấp độ mô hình. |
+| **4. Rò rỉ Dữ liệu (Data Leakage)** | Chia Train/Valid/Test theo dòng hoặc cặp ứng viên dẫn tới rò rỉ thông tin cùng bài báo, mô hình overfit số liệu ảo. | **Group-Level Partitioning:** Bắt buộc phân chia tập theo cấp độ **Bài báo (`arxivid`)**. Đánh giá MRR@5 trên tập Test bắt buộc tách riêng: Test-Manual (Gold Standard người gán nhãn) và Test-Auto (Silver Standard) để phát hiện overfit vào heuristic. |
+| **5. Lạc trôi Công nghệ (Over-engineering)** | Sa đà vào Fine-tune LLM / BERT tốn GPU, chạy chậm, và bị hội đồng đưa vào diện "chấm riêng biệt" theo đề bài. | **LightGBM LambdaMART Thực dụng:** Tối ưu hóa trực tiếp ranking NDCG/MRR, huấn luyện < 30 giây trên CPU, không cần GPU, dễ giải thích SHAP feature importance trên Poster A2. |
+
+---
+
 ## 1. Phân tích Yêu cầu Đề bài $\rightarrow$ Hệ quả Kỹ thuật & Hợp đồng Dữ liệu
 
 ### 1.1. Bảng Đối chiếu Yêu cầu Đề bài sang Thiết kế Hệ thống
@@ -215,13 +231,35 @@ flowchart TD
 Được áp dụng cho **ít nhất 10% số công bố ngoài tập thủ công** (nếu tập dữ liệu có 1.000 bài $\rightarrow$ áp dụng cho $\ge 100$ bài; nếu 25.000 bài $\rightarrow \ge 2.500$ bài). Bộ đối sánh tự động phải gán nhãn cho **100% mục BibTeX** của các bài này:
 
 ```python
+from rapidfuzz import fuzz
+
+
+def normalize_arxiv_id(raw_id: str | None) -> str | None:
+    """Chuẩn hóa arXiv ID: cắt version 'v1', lowercase, bỏ tiền tố 'arxiv:'."""
+    if not raw_id:
+        return None
+    cleaned = raw_id.strip().lower()
+    if cleaned.startswith("arxiv:"):
+        cleaned = cleaned[6:].strip()
+    # Loại bỏ hậu tố phiên bản vd: 2408.11045v1 -> 2408.11045
+    import re
+
+    cleaned = re.sub(r"v\d+$", "", cleaned)
+    return cleaned if cleaned else None
+
+
 def heuristic_match(bib_item: BibtexRow, candidates: list[Reference]) -> str | None:
-    """Cascade 3 cấp độ với độ chính xác cao (High Precision > 99%)."""
+    """Cascade 3 cấp độ với độ chính xác cao (High Precision > 99%).
+
+    Tối ưu hóa:
+    - Chuẩn hóa ID triệt để tránh lệch version suffix.
+    - Dùng rapidfuzz C++ engine siêu tốc, short-circuit ngay khi bắt mỏ neo cứng.
+    """
     # Cấp 1: Bắt mỏ neo cứng arXiv ID từ URL, journal, note, eprint
-    arxiv_id_match = extract_arxiv_id_from_bib(bib_item)
+    arxiv_id_match = normalize_arxiv_id(extract_arxiv_id_from_bib(bib_item))
     if arxiv_id_match:
         for ref in candidates:
-            if ref.ref_arxiv_id == arxiv_id_match:
+            if normalize_arxiv_id(ref.ref_arxiv_id) == arxiv_id_match:
                 return ref.ref_arxiv_id
 
     # Cấp 2: Khớp chính xác DOI
@@ -235,7 +273,16 @@ def heuristic_match(bib_item: BibtexRow, candidates: list[Reference]) -> str | N
     best_candidate = None
     best_score = 0.0
     for ref in candidates:
-        title_sim = token_sort_ratio(bib_item.title, ref.ref_title) / 100.0
+        # Lọc nhanh độ dài trước khi tính fuzzy
+        if not ref.ref_title or not bib_item.title:
+            continue
+        len_ratio = min(len(bib_item.title), len(ref.ref_title)) / max(
+            len(bib_item.title), len(ref.ref_title)
+        )
+        if len_ratio < 0.70:
+            continue
+
+        title_sim = fuzz.token_sort_ratio(bib_item.title, ref.ref_title) / 100.0
         author_match = check_first_author_match(bib_item.authors, ref.ref_authors)
         year_diff = abs(bib_item.year - ref.year) if (bib_item.year and ref.year) else 0
 
@@ -281,6 +328,17 @@ Với mỗi cặp ứng viên $(b_i, r_j)$ giữa mục BibTeX $b_i$ và tham ch
 | **Chuẩn hóa Cục bộ (Relative)** | `title_sim_rank_in_query` | Integer | Thứ hạng của độ tương đồng tiêu đề ứng viên $j$ so với các ứng viên khác của cùng truy vấn $b_i$. |
 | | `title_sim_margin_to_top2` | Float | Khoảng cách điểm tương đồng giữa ứng viên tốt nhất và ứng viên thứ nhì (đo độ tự tin vượt trội). |
 
+#### Chiến lược Tối ưu Tính toán: 2-Stage Candidate Blocking (Khử bùng nổ $m \times n$)
+Để tránh tình trạng tính toán 18 đặc trưng nặng trên toàn bộ $4.000.000$ cặp ứng viên dẫn tới nghẽn CPU hàng chục tiếng hoặc OOM:
+1. **Ngưỡng kích hoạt:** Áp dụng khi bài báo có số tham chiếu $n > 15$.
+2. **Stage 1 (Lọc Thô Siêu Tốc - Fast Pruning < 0,05 ms/cặp):**
+   - Giữ lại ngay mọi ứng viên có mỏ neo cứng (`normalize_arxiv_id` trùng khớp hoặc `doi` trùng khớp).
+   - Với các ứng viên còn lại, tính nhanh: Khớp họ tác giả đầu tiên (`first_author_match == 1`) HOẶC tỷ lệ độ dài tiêu đề $\ge 0,60$ HOẶC độ chênh lệch năm $\le 3$.
+   - Chọn ra tối đa Top 15 ứng viên tiềm năng nhất cho mỗi mục BibTeX. Loại bỏ ngay 75% - 85% cặp âm vô vọng.
+3. **Stage 2 (Trích xuất Đặc trưng Chuyên sâu - Heavy Feature Extraction):**
+   - Chỉ tính toán 18 đặc trưng đầy đủ (Levenshtein, Jaccard 3-gram, TF-IDF Cosine, AST Context) trên tập ứng viên đã lọc của Stage 1.
+   - Nhờ đó, thời gian trích xuất đặc trưng cho toàn bộ 2.500 bài báo giảm từ **~4 giờ** xuống chỉ còn **~8 phút** trên CPU đa nhân!
+
 ---
 
 ### 3.4. Trụ cột 4: Mô hình hóa Học máy Xếp hạng (Supervised Ranking) & Tối ưu MRR@5
@@ -301,15 +359,17 @@ Thay vì dùng phân loại nhị phân độc lập (dễ bị ảnh hưởng b
 #### B. Hậu xử lý & Dự đoán Top-5 (Post-Processing Strategy)
 1. **Quy tắc Ưu tiên Tuyệt đối (Hard Anchor Boost):** Nếu phát hiện đặc trưng `arxiv_id_in_bib_text == 1` hoặc `doi_exact_match == 1`, ứng viên đó tự động được đẩy lên vị trí xếp hạng 1 (`cand1`).
 2. **Lọc Ngưỡng Tin cậy cho Dòng Toàn Âm (Null Ground Truth Handling):**
-   - Nếu xác suất / điểm số cao nhất của Top-1 ứng viên nhỏ hơn ngưỡng phân định $\theta_{\text{null}}$ (được tối ưu trên tập Validation qua F1-score), mô hình ghi nhận rằng mục BibTeX này không tương ứng với tham chiếu arXiv nào.
-   - Vẫn xuất đủ 5 ứng viên theo thứ tự điểm giảm dần cho các cột `cand1` $\dots$ `cand5` để đảm bảo tuân thủ định dạng bảng `predictions`.
+   - Nếu xác suất / điểm số cao nhất của Top-1 ứng viên nhỏ hơn ngưỡng phân định $\theta_{\text{null}}$ (được tối ưu trên tập Validation qua F1-score), mô hình ghi nhận rằng mục BibTeX này không tương ứng với tham chiếu arXiv nào (`groundtrutharxivid = None`).
+   - Vẫn xuất đủ các ứng viên tốt nhất theo thứ tự điểm giảm dần cho các cột `cand1` $\dots$ `cand5` để đảm bảo tuân thủ định dạng bảng `predictions`.
+3. **Xử lý An toàn Trường hợp Thiếu Ứng viên ($n < 5$):**
+   - Nếu công bố chỉ có $n < 5$ tham chiếu đã crawl (ví dụ $n=3$), sau khi điền `cand1`, `cand2`, `cand3`, các cột còn lại (`cand4`, `cand5`) bắt buộc phải ghi `None` (PyArrow null). Tuyệt đối không lặp lại ứng viên hoặc điền giá trị rỗng/giả mạo gây lỗi schema.
 
-#### C. Công thức Đánh giá Chuẩn MRR@5
+#### C. Đánh giá Đa chiều MRR@5 trên Test Set (Chống Bẫy Overfit Heuristic)
 $$\text{MRR@5} = \frac{1}{|Q|} \sum_{i=1}^{|Q|} \frac{1}{\text{rank}_i}$$
-Trong đó:
-- $|Q|$ là tổng số mục BibTeX được gán nhãn trong tập Test (gồm 1 bài thủ công + 1 bài tự động).
-- $\text{rank}_i \in \{1, 2, 3, 4, 5\}$ là vị trí xuất hiện của tham chiếu đúng trong 5 ứng viên `cand1` $\dots$ `cand5`.
-- Nếu tham chiếu đúng không nằm trong Top-5 (hoặc đối với các mục có ground truth đúng mà mô hình không tìm ra), $\frac{1}{\text{rank}_i} = 0$.
+Đề bài quy định Test Set gồm 1 bài thủ công ($Q_{\text{man}} \ge 20$) và 1 bài tự động ($Q_{\text{auto}}$). Module đánh giá sẽ xuất 3 góc nhìn:
+1. $\text{MRR@5}_{\text{manual}}$ (**Gold Standard**): Đánh giá trên bài do con người gán nhãn thủ công — thước đo chuẩn xác nhất về năng lực tổng quát hóa thực tế của mô hình.
+2. $\text{MRR@5}_{\text{auto}}$ (**Silver Standard**): Đánh giá trên bài đối sánh tự động — kiểm tra xem mô hình có bị lệch pha so với luật heuristic không.
+3. $\text{MRR@5}_{\text{overall}}$: Tổng hợp toàn bộ $|Q|$ theo đúng công thức của đề bài để nộp báo cáo và in poster.
 
 ---
 
@@ -477,15 +537,17 @@ class EvaluationMetrics:
 
 ---
 
-## 5. Phân công Công việc Chi tiết 5 Thành viên (A, B, C, D, E)
+## 5. Phân công Công việc Chi tiết 5 Thành viên (A, B, C, D, E) — Cơ chế Song song Hóa Độc lập (Zero-Wait Parallelism)
 
-| Thành viên | Vai trò & Trọng tâm | Module / Tệp phụ trách | Điều kiện Hoàn thành (Done When) |
-| :--- | :--- | :--- | :--- |
-| **A — Phúc** *(Leader)* | **Điều phối, Hợp đồng Dữ liệu & Xuất bản Hugging Face** | `src/matching/models.py`<br/>`src/matching/export_hf.py`<br/>`src/run_matching.py`<br/>`src/tests/test_matching_pipeline.py` | 1. Khóa hợp đồng `models.py`;<br/>2. Ghép nối pipeline chạy trơn tru từ đầu vào M1/M2 đến dự đoán M3;<br/>3. Xuất đủ 6 bảng Parquet và Dataset Card `README.md` hợp lệ trên Hugging Face. |
-| **B — Sơn** | **Tiền xử lý Văn bản & Kỹ thuật Đặc trưng Chuỗi / Từ vựng** | `src/matching/cleaner.py`<br/>`src/matching/lexical_features.py`<br/>`src/tests/test_matching_cleaner.py` | 1. Làm sạch triệt để tiêu đề và tác giả BibTeX/Reference;<br/>2. Trích xuất chính xác 9 đặc trưng chuỗi, từ vựng và mỏ neo định danh;<br/>3. Đạt 100% unit tests và xử lý được các ký tự escaped kỳ dị. |
-| **C — Quỳnh** | **Khung Gán nhãn Chuẩn (Manual Tool & Heuristic Matcher)** | `src/matching/labelling.py`<br/>`src/matching/auto_matcher.py`<br/>`src/tests/test_labelling.py` | 1. Xây dựng công cụ gán nhãn thủ công cho $\ge 5$ bài ($\ge 20$ mục/bài, tổng $\ge 100$ mục);<br/>2. Cài đặt Cascade Heuristic Matcher tự động gán nhãn $\ge 10\%$ bài ngoài tập thủ công;<br/>3. Phân chia tập Train/Valid/Test không rò rỉ. |
-| **D — Thụ** | **Mô hình hóa Học máy Xếp hạng & Tối ưu Top-5 MRR** | `src/matching/ranker.py`<br/>`src/matching/train_ranker.py`<br/>`src/tests/test_ranker.py` | 1. Cài đặt LightGBM LambdaMART Ranker và các mô hình Baseline;<br/>2. Huấn luyện mô hình, tối ưu siêu tham số trên tập Valid;<br/>3. Xuất dự đoán Top-5 (`cand1` $\dots$ `cand5`) đạt $\text{MRR@5} \ge 0,85$ trên Test Set. |
-| **E — Triệu** | **Đặc trưng Cấu trúc M2, Bộ Đánh giá MRR & Thiết kế Poster A2** | `src/matching/hierarchy_features.py`<br/>`src/matching/evaluation.py`<br/>`docs/poster/`<br/>`src/tests/test_evaluation.py` | 1. Khai thác đặc trưng từ bảng `hierarchy` và `elements` của M2;<br/>2. Module đánh giá tính toán chính xác chỉ số MRR@5 theo công thức đề bài;<br/>3. Hoàn thiện file thiết kế Poster A2 dọc (`.pptx`) và số liệu trực quan hóa. |
+Để tránh tình trạng "nghẽn cổ chai tuần tự" (người này ngồi chờ người kia hoặc chờ dữ liệu M1/M2) như từng xảy ra ở M1, **tất cả 5 thành viên bắt đầu lập trình song song ngay từ Ngày 1** dựa trên bộ fixture chuẩn `src/tests/fixtures/synthetic_matching_data.py`:
+
+| Thành viên | Trọng tâm & Module phụ trách | Đầu vào Độc lập (Mock-First Input) | Điều kiện Hoàn thành (Done When — Độc lập) | Bẫy Kỹ thuật & Ràng buộc Phòng ngừa |
+| :--- | :--- | :--- | :--- | :--- |
+| **A — Phúc** *(Leader)* | **Điều phối, Hợp đồng & Xuất bản Hugging Face**<br/>`src/matching/models.py`<br/>`src/matching/export_hf.py`<br/>`src/run_matching.py` | Fixture mock 6 bảng Parquet giả lập | 1. Khóa hợp đồng `models.py` & hàm `normalize_arxiv_id`;<br/>2. Cung cấp fixture mock chung cho cả nhóm;<br/>3. Script `export_hf.py` xuất 6 bảng Parquet phẳng nén ZSTD + `README.md` YAML đạt 100% kiểm tra Hugging Face Hub. | **Bẫy:** Schema chứa kiểu phức hợp (struct/list lồng nhau) làm hỏng HF Viewer. **Khóa:** 100% kiểu nguyên thủy PyArrow phẳng. |
+| **B — Sơn** | **Làm sạch Văn bản & Đặc trưng Lexical / Entity**<br/>`src/matching/cleaner.py`<br/>`src/matching/lexical_features.py` | Danh sách chuỗi BibTeX & Reference thô từ fixture | 1. Khử toàn bộ lệnh macro LaTeX (`\textit`, `\textbf`, `\c{c}`, `\'e` $\rightarrow$ Unicode NFC);<br/>2. Tách họ tác giả đa văn hóa (`van der`, `von`, `et al.`);<br/>3. Tính 9 đặc trưng chuỗi/mỏ neo bằng `rapidfuzz` C++ vectorization; unit test `test_matching_cleaner.py` xanh 100%. | **Bẫy:** Dùng `fuzzywuzzy`/`thefuzz` chậm hoặc lỗi C-build trên Windows. **Khóa:** Bắt buộc dùng `rapidfuzz`. |
+| **C — Quỳnh** | **Khung Gán nhãn Chuẩn (CLI Tool & Auto Matcher)**<br/>`src/matching/labelling.py`<br/>`src/matching/auto_matcher.py` | 5 bài thật từ subset `arxiv-data/` + mock data | 1. Công cụ CLI tương tác hỗ trợ gán nhãn $\ge 5$ bài ($\ge 20$ mục/bài, tổng $\ge 100$ mục), có kiểm tra double-blind $\kappa \ge 0,95$;<br/>2. Heuristic Matcher 3 cấp tự động gán nhãn $\ge 10\%$ số bài ngoài tập thủ công;<br/>3. Hàm `split_partitions()` chia tập theo `arxivid` tuyệt đối không rò rỉ. | **Bẫy:** Lệch hậu tố version (`v1`) khiến không khớp mỏ neo; chia tập ở mức cặp gây rò rỉ. **Khóa:** Bắt buộc qua `normalize_arxiv_id()`. |
+| **D — Thụ** | **Mô hình hóa Học máy Xếp hạng & Tối ưu Top-5 MRR**<br/>`src/matching/ranker.py`<br/>`src/matching/train_ranker.py` | Ma trận đặc trưng `MatchFeatures` tổng hợp từ fixture | 1. Cài đặt `LGBMRanker` (LambdaMART Grouped Ranking) + 3 baselines (Heuristic, BM25, Logistic);<br/>2. Huấn luyện mô hình, tối ưu ngưỡng $\theta_{\text{null}}$ trên tập Valid;<br/>3. Dự đoán Top-5 (`cand1` $\dots$ `cand5`) đạt $\text{MRR@5} \ge 0,85$ trên Test Set; xử lý an toàn khi $n < 5$ (ghi `None`). | **Bẫy:** Coi bài toán là phân loại nhị phân độc lập $\rightarrow$ lệch Top-5 và overfit class imbalance. **Khóa:** Dùng `LGBMRanker(lambdarank)`. |
+| **E — Triệu** | **Đặc trưng Cấu trúc M2, Đánh giá MRR & Poster A2**<br/>`src/matching/hierarchy_features.py`<br/>`src/matching/evaluation.py`<br/>`docs/poster/` | Cây phân cấp M2 từ fixture mock + bảng predictions | 1. Trích xuất đặc trưng `cite_frequency` và section depth từ AST M2 (có fallback an toàn khi bài không có AST);<br/>2. Module đánh giá tính toán $\text{MRR@5}_{\text{manual}}$, $\text{MRR@5}_{\text{auto}}$ và tổng hợp;<br/>3. Hoàn thiện file PowerPoint Poster A2 dọc (`.pptx`) 1 trang và script vẽ biểu đồ tự động. | **Bẫy:** Crash khi bài báo M2 không parse được cây AST. **Khóa:** Fallback giá trị mặc định (`cite_freq = 0, depth = 0`). |
 
 ---
 
