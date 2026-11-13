@@ -61,3 +61,59 @@ def test_real_cli_pipeline_dedup_export_and_validator(tmp_path):
     assert r"\cite{vaswani2017}" in sentences[0]["content"]
     # Existing output is refused explicitly; never overwrite shards on a rerun.
     assert run_parse.main(args) == 2
+
+
+def test_cli_resume_coverage_bbl_and_collapsed_hierarchy(tmp_path):
+    import csv
+
+    _paper(tmp_path, "2408.11045", {1: "k"})
+    source = tmp_path / "papers/2408-11045/v1/tex"
+    (source / "main.tex").write_text(
+        r"\documentclass{article}\begin{document}"
+        r"\section{Experiments}\subsection{Experiments}"
+        r"Use \cite{k}.\bibliography{refs}\end{document}"
+    )
+    (source / "main.bbl").write_text(
+        r"\begin{thebibliography}{9}\bibitem{k} A. Author, Broken Title, 2020."
+        r"\end{thebibliography}"
+    )
+    args = ["--data-dir", str(tmp_path), "--workers", "1"]
+    assert run_parse.main(args) == 0
+    assert validate(tmp_path) == []
+    with (tmp_path / "stats/m2_papers_stats.csv").open() as handle:
+        row = next(csv.DictReader(handle))
+    assert row["bibtex_before"] == "2" and row["bibtex_after"] == "1"
+    assert row["title_before"] == "2" and row["year_before"] == "2"
+    assert row["doi_before"] == "0"
+    # Simulate interruption after exporting but before recording _done.txt.
+    (tmp_path / "parsed/_done.txt").unlink()
+    _paper(tmp_path, "2408.11046", {1: "other"})
+    assert run_parse.main(args + ["--resume"]) == 0
+    assert validate(tmp_path) == []
+    summary = json.loads((tmp_path / "stats/m2_summary.json").read_text())
+    assert summary["papers"] == 2
+    assert len(pq.read_table(tmp_path / "parsed/bibtex")) == 2
+    assert run_parse.main(args + ["--resume"]) == 0
+    assert len(pq.read_table(tmp_path / "parsed/bibtex")) == 2
+
+
+def test_failed_paper_is_retryable_with_real_exporter(tmp_path):
+    _paper(tmp_path, "2408.11045", {1: "k"})
+    bib = tmp_path / "papers/2408-11045/v1/tex/refs.bib"
+    original = bib.read_text()
+    bib.write_text("@article{broken")
+    args = ["--data-dir", str(tmp_path), "--workers", "1"]
+    assert run_parse.main(args) == 0
+    assert "2408.11045" in (tmp_path / "parsed/_errors.jsonl").read_text()
+    bib.write_text(original)
+    assert run_parse.main(args + ["--resume"]) == 0
+    assert validate(tmp_path) == []
+
+
+def test_coverage_crosses_process_pool(tmp_path):
+    import csv
+
+    _paper(tmp_path, "2408.11045", {1: "k"})
+    assert run_parse.main(["--data-dir", str(tmp_path), "--workers", "2"]) == 0
+    with (tmp_path / "stats/m2_papers_stats.csv").open() as handle:
+        assert next(csv.DictReader(handle))["title_before"] == "1"

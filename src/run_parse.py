@@ -4,7 +4,7 @@ Owner: A | Reviewer: A | Task: M2-A2
 
     python src/run_parse.py --data-dir data --out-dir data/parsed --workers 2
 
-Run the SAME command again to resume: papers already written to a shard are skipped,
+Run the command again with --resume: papers already written to a shard are skipped,
 while papers that previously failed are retried.
 Exit codes: 0 done (even if some papers failed, see ``_errors.jsonl``) · 2 bad setup
 · 130 interrupted.
@@ -35,6 +35,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--limit", type=int, default=None, help="only the first N papers (pilot)")
     p.add_argument("--batch-size", type=int, default=500, help="papers per Parquet shard")
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="append to existing output and recover interrupted batches",
+    )
     p.add_argument("--ids", nargs="*", default=None, help="parse only these arXiv ids")
     p.add_argument(
         "--dry-run",
@@ -102,9 +107,14 @@ def main(argv: list[str] | None = None) -> int:
 
     _setup_logging(args.data_dir)
     try:
-        exporter = ShardedParquetExporter(out_dir, stats_dir, batch_size=args.batch_size)
-    except FileExistsError as exc:
-        print(f"error: {exc}; exporter requires fresh --out-dir and --stats-dir", file=sys.stderr)
+        exporter = ShardedParquetExporter(
+            out_dir, stats_dir, batch_size=args.batch_size, resume=args.resume
+        )
+    except (FileExistsError, ValueError) as exc:
+        print(
+            f"error: {exc}; use fresh directories or --resume with the original directories",
+            file=sys.stderr,
+        )
         return 2
     try:
         summary = pipeline.run_pipeline(
@@ -118,9 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             arxiv_ids=args.ids,
         )
     except KeyboardInterrupt:
-        logger.warning(
-            "interrupted; exporter requires fresh output/stats directories for another run"
-        )
+        logger.warning("interrupted; rerun with --resume and the same output/stats directories")
         return 130
     logger.info("summary: %s", summary)
     print(summary)

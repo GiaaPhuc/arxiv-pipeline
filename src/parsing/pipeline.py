@@ -11,9 +11,8 @@ Exporter contract (``parsing.export_m2.ShardedParquetExporter(out_dir, stats_dir
     exporter.flush() -> None                          # write a shard for the buffered papers
     exporter.close() -> None                          # flush the rest + write stats/
 
-The concrete D exporter currently requires fresh output directories and does not
-resume existing shards. The orchestration checkpoint protocol below is available
-for exporters that support appending.
+The concrete D exporter supports explicit resume and recovers committed paper IDs
+from its statistics if interruption occurred before the orchestration checkpoint.
 
 Resume: after each successful ``flush`` the batch's arXiv ids are appended to
 ``<out_dir>/_done.txt``; the next run skips them. Papers that raised are logged to
@@ -167,6 +166,10 @@ def process_paper(corpus: Corpus, arxiv_id: str, stages: Stages) -> PaperResult:
             stats.timings["bib"] += time.perf_counter() - t
 
         t = time.perf_counter()
+        result.bib_fields_before = {
+            field: sum(bool(getattr(entry, field)) for entry in bib_entries)
+            for field in ("title", "authors", "year", "doi", "journal", "url")
+        }
         bibtex, rename_map = stages.deduplicate_references(bib_entries)
         result.elements, result.hierarchy = stages.dedup_elements(arxiv_id, trees, rename_map)
         result.bibtex = _fix_bibtex_arxivid(bibtex, arxiv_id)
@@ -335,7 +338,12 @@ def run_pipeline(
         if arxiv_ids is not None
         else sorted(p.arxiv_id for p in Corpus(data_dir).papers())
     )
-    done = read_done(out_dir)
+    done = set(exporter.seen) if hasattr(exporter, "seen") else read_done(out_dir)
+    if hasattr(exporter, "seen"):
+        # Repair a stale checkpoint after rollback or a committed export that
+        # was interrupted before the orchestrator appended its paper IDs.
+        with atomic_write(out_dir / DONE_FILE) as tmp:
+            tmp.write_text("".join(i + "\n" for i in sorted(done)), encoding="utf-8")
     todo = [i for i in all_ids if i not in done]
     if limit is not None:
         todo = todo[:limit]
@@ -398,6 +406,20 @@ def run_pipeline(
             resources = sampler.stop()
 
     wall = time.perf_counter() - t0
+    # Keep only unresolved failures in the validator's error log. Full exception
+    # history remains in parse.log; successful retries must be able to validate.
+    errors_path = out_dir / ERRORS_FILE
+    if errors_path.exists():
+        completed = set(exporter.seen) if hasattr(exporter, "seen") else read_done(out_dir)
+        with atomic_write(errors_path) as tmp, errors_path.open(encoding="utf-8") as source:
+            with tmp.open("w", encoding="utf-8") as target:
+                for line in source:
+                    try:
+                        resolved = json.loads(line).get("arxivid") in completed
+                    except (ValueError, AttributeError):
+                        resolved = False
+                    if not resolved:
+                        target.write(line)
     peak_mb = round(resources["ram_peak_bytes"] / 1e6, 1)
     mean_mb = round(resources["ram_mean_bytes"] / 1e6, 1)
     input_bytes = tree_size(data_dir / "papers")

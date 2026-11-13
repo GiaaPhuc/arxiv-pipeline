@@ -1,11 +1,15 @@
 """Reference union, citation rewriting, then exact content pooling.
 
+Owner: D | Reviewer: E | Task: M2-D2, M2-D3
+Done when: reference union and hierarchy invariants pass regression tests.
 Input objects are not mutated."""
 
 from __future__ import annotations
 
+import logging
 import re
 from collections import Counter, defaultdict
+from copy import deepcopy
 from difflib import SequenceMatcher
 
 from crawler.ids import id_to_dirname
@@ -27,15 +31,18 @@ def _doi(value: str) -> str:
 
 
 def _arxiv(entry: RawBibEntry) -> str:
-    match = ARXIV.search(entry.url)
+    match = ARXIV.search(entry.url) or ARXIV.search(entry.journal)
     return match[1].lower() if match else ""
 
 
 def _surname(entry: RawBibEntry) -> str:
     if not entry.authors:
         return ""
-    name = entry.authors[0]
-    return _norm(name.split(",")[0] if "," in name else name.split()[-1])
+    name = entry.authors[0].strip()
+    if not name:
+        return ""
+    first = name.split(",")[0]
+    return _norm(first.split()[-1] if "." in first or "," not in name else first)
 
 
 def _conflict(a: RawBibEntry, b: RawBibEntry) -> bool:
@@ -48,17 +55,21 @@ def _match(a: RawBibEntry, b: RawBibEntry) -> bool:
     if (_doi(a.doi) and _doi(a.doi) == _doi(b.doi)) or (_arxiv(a) and _arxiv(a) == _arxiv(b)):
         return True
     ta, tb = _norm(a.title), _norm(b.title)
-    similar = bool(ta and tb and SequenceMatcher(None, ta, tb).ratio() >= 0.85)
     evidence = (a.year is not None and a.year == b.year) or (
         _surname(a) and _surname(a) == _surname(b)
     )
-    if similar and evidence:
+    if (
+        evidence
+        and min(len(ta), len(tb)) >= 12
+        and 2 * min(len(ta), len(tb)) / (len(ta) + len(tb)) >= 0.85
+        and SequenceMatcher(None, ta, tb).ratio() >= 0.85
+    ):
         return True
     # Same key is weak evidence; do not merge empty records or changed numeric slots.
     return bool(
         a.version != b.version
         and a.citation_key == b.citation_key
-        and ta
+        and len(ta) >= 12
         and ta == tb
         and not (a.year and b.year and a.year != b.year)
     )
@@ -69,10 +80,26 @@ def deduplicate_references(
 ) -> tuple[list[BibtexRow], dict[tuple[int, str], str]]:
     """Union within one paper; explicit arxiv_id fills the output contract's missing ID.
 
-    Pairwise candidate matching is quadratic in the number of bibliography entries.
+    Candidates share an identifier, key, year or first-author surname.
     Cluster-level identifier checks prevent a sparse entry bridging conflicting DOIs.
     """
-    entries = sorted(entries, key=lambda e: (e.version, e.citation_key, repr(e)))
+    # A citation location has one meaning. Prefer structured BibTeX, then the first
+    # declaration; fill missing fields only when identifiers do not conflict.
+    locations = {}
+    for entry in sorted(entries, key=lambda e: (e.version, e.citation_key, e.source_kind != "bib")):
+        location = (entry.version, entry.citation_key)
+        if location not in locations:
+            locations[location] = deepcopy(entry)
+            continue
+        logging.getLogger(__name__).warning(
+            "Duplicate citation location %s; keeping first preferred source", location
+        )
+        kept = locations[location]
+        if not _conflict(kept, entry):
+            for field in ("title", "authors", "year", "doi", "journal", "url"):
+                if not getattr(kept, field):
+                    setattr(kept, field, deepcopy(getattr(entry, field)))
+    entries = sorted(locations.values(), key=lambda e: (e.version, e.citation_key, repr(e)))
     parents = list(range(len(entries)))
     members = {i: [i] for i in parents}
 
@@ -82,8 +109,23 @@ def deduplicate_references(
             i = parents[i]
         return i
 
+    blocks = defaultdict(set)
     for i, a in enumerate(entries):
-        for j in range(i):
+        keys = [
+            (name, value)
+            for name, value in (
+                ("doi", _doi(a.doi)),
+                ("arxiv", _arxiv(a)),
+                ("year", a.year),
+                ("surname", _surname(a)),
+                ("key", a.citation_key),
+            )
+            if value
+        ]
+        candidates = set().union(*(blocks[key] for key in keys))
+        for key in keys:
+            blocks[key].add(i)
+        for j in sorted(candidates):
             x, y = root(i), root(j)
             if (
                 x != y
@@ -179,6 +221,15 @@ def rewrite_citations_and_dedup_elements(
         if len(by_id) != len(nodes) or len(roots) != 1 or roots[0].kind != "document":
             raise ValueError("Expected unique node IDs and exactly one document root")
         ids = {}
+        original = defaultdict(set)
+        children = defaultdict(list)
+        for node in nodes:
+            if node.parent_node_id is not None:
+                if node.parent_node_id not in by_id:
+                    raise ValueError("Missing parent node")
+                original[node.parent_node_id].add(node.node_id)
+                children[node.parent_node_id].append(node)
+        _acyclic(original)
         for node in sorted(nodes, key=lambda n: n.node_id):
 
             def rewrite(match, version=version):
@@ -189,7 +240,10 @@ def rewrite_citations_and_dedup_elements(
                 return match[1] + "{" + ",".join(dict.fromkeys(keys)) + "}"
 
             content = re.sub(
-                r"(\\cite\*?(?:\[[^\]]*\]){0,2})\s*\{([^{}]*)\}", rewrite, node.content
+                r"(\\(?:cite[tp]?|citeal[pt]|citeauthor|citeyear|parencite|textcite|autocite)\*?"
+                r"(?:\s*\[[^\]]*\]){0,2})\s*\{([^{}]*)\}",
+                rewrite,
+                node.content,
             )
             if node.kind == "document":
                 if node is not roots[0]:
@@ -208,12 +262,28 @@ def rewrite_citations_and_dedup_elements(
             ids[node.node_id] = eid
         graph = defaultdict(set)
         seen_edges = set()
-        for node in nodes:
+        # Parent-first traversal keeps all pooled elements reachable when a
+        # redundant back-edge is collapsed, including descendants of that node.
+        ordered = []
+        stack = [roots[0]]
+        while stack:
+            node = stack.pop()
+            ordered.append(node)
+            stack.extend(reversed(children[node.node_id]))
+        for node in ordered:
             if node.parent_node_id is None:
                 continue
             if node.parent_node_id not in ids:
                 raise ValueError("Missing parent node")
             edge = (ids[node.node_id], ids[node.parent_node_id])
+            reachable, pending = set(), [edge[0]]
+            while pending:
+                current = pending.pop()
+                if current not in reachable:
+                    reachable.add(current)
+                    pending.extend(graph[current])
+            if edge[1] in reachable:
+                continue
             graph[edge[1]].add(edge[0])
             if edge not in seen_edges:
                 hierarchy.append(HierarchyRow(arxiv_id, version, *edge))

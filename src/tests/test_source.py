@@ -1081,3 +1081,60 @@ def test_download_source_paced_streaming_caps_bandwidth_above_512kib(tmp_path: P
     total_paced = sum(sleeps)
     # 2.5 MiB / 4.5 MiB/s = ~0.556s:
     assert 0.50 <= total_paced <= 0.65
+
+
+def test_download_source_dynamic_stream_bps_via_config(tmp_path: Path) -> None:
+    """v3.14: verify dynamic max_stream_mbps via Config scales wire pacing."""
+    from crawler.config import Config
+    from crawler.http import RateLimiter
+
+    timeline = 0.0
+    sleeps: list[float] = []
+
+    def fake_clock() -> float:
+        return timeline
+
+    def fake_sleep(secs: float) -> None:
+        nonlocal timeline
+        sleeps.append(secs)
+        timeline += secs
+
+    limiter = RateLimiter(3.0, clock=fake_clock, sleep=fake_sleep)
+    chunk = b"x" * (256 * 1024)
+    chunks = [b"\x1f\x8b" + chunk[:-2]] + [chunk for _ in range(11)]  # 3 MiB total
+
+    class DummyResponse:
+        status_code = 200
+        headers = {"Content-Length": str(3 * 1024 * 1024)}
+
+        def iter_content(self, chunk_size=None):
+            yield from chunks
+
+        def close(self):
+            pass
+
+    # Config configured with 10.0 MiB/s:
+    cfg = Config(tmp_path / "data", "test@example.com", max_stream_mbps=10.0)
+
+    class DummyClient:
+        def __init__(self):
+            self.limiter = limiter
+            self._config = cfg
+
+        def get(self, *args, **kwargs):
+            return DummyResponse()
+
+    client = DummyClient()
+    res = download_source(
+        client,  # type: ignore[arg-type]
+        "2408.06481",
+        2,
+        tmp_path / ".tmp-paced-dynamic",
+        spool_max_bytes=16 * 1024 * 1024,
+    )
+    assert res.http_status == 200
+    assert res.raw_archive_bytes == 3 * 1024 * 1024
+    assert len(sleeps) > 0
+    total_paced = sum(sleeps)
+    # 2.5 MiB / 10.0 MiB/s = 0.25s:
+    assert 0.20 <= total_paced <= 0.30

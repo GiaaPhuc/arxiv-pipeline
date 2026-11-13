@@ -1644,3 +1644,62 @@ def test_v397_stream_break_never_escalates_429_streak_or_triggers_false_cooldown
     assert dummy_run.consecutive_stream_failures == 0
 
     dummy_run.manifest.close()
+
+
+def test_v314_proportional_breather_and_giant_package_recycle(tmp_path, monkeypatch):
+    """v3.14: verify proportional breather scales with package size and recycles giant sockets."""
+    from crawler.config import Config
+    from crawler.http import HostClient, RateLimiter
+
+    # 1. Direct unit test of _compute_proportional_breather:
+    # Under 2 MiB -> 0.0
+    assert pipeline._compute_proportional_breather(3.15, 1 * 1024 * 1024, False, 0.5) == 0.0
+    # 2 MiB and 10 MiB -> 3.15s
+    assert pipeline._compute_proportional_breather(3.15, 2 * 1024 * 1024, False, 0.5) == 3.15
+    assert pipeline._compute_proportional_breather(3.15, 10 * 1024 * 1024, False, 0.5) == 3.15
+    # 20 MiB -> 5.0s
+    assert pipeline._compute_proportional_breather(3.15, 20 * 1024 * 1024, False, 1.0) == 5.0
+    # 32 MiB -> 8.0s
+    assert pipeline._compute_proportional_breather(3.15, 32 * 1024 * 1024, False, 2.0) == 8.0
+    # 60 MiB -> capped at 12.0s
+    assert pipeline._compute_proportional_breather(3.15, 60 * 1024 * 1024, False, 3.0) == 12.0
+
+    # 2. End-to-end integration with _download_version:
+    cfg = Config(tmp_path / "data", "test@example.com", max_stream_mbps=16.0)
+    assert cfg.max_stream_mbps == 16.0
+    limiter = RateLimiter(3.15, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=3.05)
+    client = HostClient("https://export.arxiv.org", limiter, cfg)
+    dummy_run = pipeline._Run(
+        config=cfg,
+        manifest=pipeline.Manifest(tmp_path / "data" / "manifest.sqlite"),
+        arxiv=client,
+        s2=pipeline.make_s2_client(cfg),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    paper_meta = pipeline.PaperMeta(
+        arxiv_id="2408.00099",
+        title="heavy test",
+        authors=[],
+        submission_date="2024-08-01",
+        num_versions=1,
+    )
+    # Mock download of 32 MiB package:
+    monkeypatch.setattr(
+        pipeline,
+        "download_source",
+        lambda *_a, **_kw: pipeline.DownloadResult(
+            path=None,
+            http_status=200,
+            data=bytearray(b"x"),
+            raw_archive_bytes=32 * 1024 * 1024,
+            download_seconds=2.0,
+        ),
+    )
+    initial_recycles = client.session_recycles
+    pipeline._download_version(dummy_run, paper_meta, 1)
+    # Proportional breather must be scheduled to 8.0s (32 MiB / 4.0 MiB/s):
+    assert limiter._retry_backoff == 8.0  # noqa: SLF001
+    # Giant package (>= 30 MiB) must trigger session recycle:
+    assert client.session_recycles == initial_recycles + 1
+    dummy_run.manifest.close()

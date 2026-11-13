@@ -1,5 +1,7 @@
 """Parse BibTeX and best-effort bibitems without network access.
 
+Owner: D | Reviewer: E | Task: M2-D1
+Done when: BibTeX and bibitem regressions pass offline.
 Free-form bibliography parsing uses heuristics."""
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ def plain(text: str) -> str:
     return " ".join(text.replace("{", "").replace("}", "").split()).strip()
 
 
-def _strip_comments(text: str) -> str:
+def _strip_comments(text: str, *, entry_file: bool = False) -> str:
     """Ignore percent comments outside values; preserve escaped/URL percent signs."""
     output = []
     depth = 0
@@ -49,14 +51,14 @@ def _strip_comments(text: str) -> str:
             output.append(text[i : i + 2])
             i += 2
             continue
-        if char == '"' and depth == 0:
+        if char == '"' and depth == (1 if entry_file else 0):
             quoted = not quoted
         if not quoted:
             if char == "{":
                 depth += 1
             elif char == "}":
                 depth -= 1
-        if char == "%" and depth == 0 and not quoted:
+        if char == "%" and depth <= (1 if entry_file else 0) and not quoted:
             end = text.find("\n", i)
             i = len(text) if end == -1 else end
             continue
@@ -137,7 +139,9 @@ def _authors(value: str) -> list[str]:
 def _entry(fields: dict[str, str], key: str, kind: str, version: int, source: str):
     year = re.search(r"\b(?:18|19|20|21)\d{2}\b", fields.get("year", ""))
     url = fields.get("url", "")
-    eprint = fields.get("eprint", fields.get("arxivid", ""))
+    eprint = re.sub(
+        r"^arxiv:\s*", "", fields.get("eprint") or fields.get("arxivid", ""), flags=re.I
+    )
     if not url and re.fullmatch(r"(?:\d{4}\.\d{4,5}|[a-z.-]+/\d{7})(?:v\d+)?", eprint, re.I):
         url = f"https://arxiv.org/abs/{eprint}"
     return RawBibEntry(
@@ -148,7 +152,7 @@ def _entry(fields: dict[str, str], key: str, kind: str, version: int, source: st
         _authors(fields.get("author", "")),
         int(year[0]) if year else None,
         fields.get("doi", ""),
-        plain(fields.get("journal", fields.get("booktitle", eprint))),
+        plain(fields.get("journal") or fields.get("booktitle") or eprint),
         url,
         source,
     )
@@ -158,7 +162,7 @@ def parse_bib_file(bib_content: str, version: int) -> list[RawBibEntry]:
     """Parse braced entries, string macros and concatenation; reject malformed groups."""
     strings, entries = {}, []
     # BibTeX percent comments outside escaped percent characters.
-    text = _strip_comments(bib_content)
+    text = _strip_comments(bib_content, entry_file=True)
     i = 0
     while match := re.search(r"@(\w+)\s*\{", text[i:]):
         kind = match[1].lower()
@@ -174,6 +178,25 @@ def parse_bib_file(bib_content: str, version: int) -> list[RawBibEntry]:
             raise ValueError("BibTeX entry requires a citation key")
         entries.append(_entry(_fields(rest, strings), key.strip(), kind, version, "bib"))
     return entries
+
+
+def _sentences(text: str) -> list[str]:
+    prose = plain(text)
+    prose = re.sub(
+        r"\b(?:[A-Z]|Phys|Rev|Lett|Proc|Conf|Int|Symp|Trans|Ann|Math|Comput|al|vol|no|pp|eds)\.(?=\s)",
+        lambda m: m[0][:-1] + "\x01",
+        prose,
+    )
+    return [part.replace("\x01", ".") for part in re.split(r"\.\s+", prose)]
+
+
+def _author_title(text: str) -> tuple[str, str]:
+    parts = _sentences(text.strip(" ,."))
+    if len(parts) >= 2:
+        return parts[0], parts[1].strip(" ,.")
+    author, sep, title = parts[0].partition(",")
+    title = re.split(r",\s*(?:18|19|20|21)\d{2}\b", title)[0]
+    return (author.strip(), title.strip(" ,.")) if sep else ("", "")
 
 
 def parse_bibitems(thebibliography_blocks: list[str], version: int) -> list[RawBibEntry]:
@@ -204,30 +227,41 @@ def parse_bibitems(thebibliography_blocks: list[str], version: int) -> list[RawB
             arxiv = ARXIV.search(body)
             if arxiv:
                 fields["url"] = f"https://arxiv.org/abs/{arxiv[1]}"
-            year = re.search(r"\b(?:18|19|20|21)\d{2}\b", body)
+            year_text = ARXIV.sub("", DOI.sub("", body))
+            year_text = re.sub(
+                r"https?://[^\s{}<>]+|(?:pp?\.?\s*)?\d+\s*(?:--?|–)\s*\d+", "", year_text
+            )
+            year = re.search(r"\b(?:18|19|20|21)\d{2}\b", year_text)
             if year:
                 fields.setdefault("year", year[0])
-            quoted = re.search(r"``(.*?)''|\"([^\"]+)\"", body, re.S)
-            command = re.search(r"\\(enquote|emph|textit)\s*\{", body)
+            quoted = re.search(r"``(.*?)''|(?<!\\)\"((?:\\.|[^\"\\])+)(?<!\\)\"", body, re.S)
+            command = re.search(r"\\(enquote|emph|textit)\s*\{|\{\\(em|it)\s+", body)
             if quoted:
                 fields.setdefault("title", quoted[1] or quoted[2])
                 fields.setdefault("author", body[: quoted.start()].strip(" ,."))
                 fields.setdefault("journal", plain(body[quoted.end() :]).strip(" ,."))
             elif command:
-                value, end = group(body, command.end() - 1)
+                if command[1]:
+                    value, end = group(body, command.end() - 1)
+                else:
+                    value, end = group(body, command.start())
+                    value = re.sub(r"^\\(?:em|it)\s+", "", value)
                 is_venue = command[1] != "enquote" and (
-                    re.search(r"Phys\. Rev\.|IEEE|Proc\.|\bJ\.|Vol\.", value)
+                    re.search(
+                        r"Phys\.|Rev\.|Lett\.|IEEE|Proc\.|\bJ\.|Vol\.|Journal|Trans\.|Conf\.|Ann\.",
+                        value,
+                    )
                     or re.search(r"\\textbf\{\d+\}", body[end:])
                 )
                 if is_venue:
                     fields.setdefault("journal", value)
+                    author, title = _author_title(body[: command.start()])
+                    fields.setdefault("author", author)
+                    fields.setdefault("title", title)
                 else:
                     fields.setdefault("title", value)
                     fields.setdefault("author", body[: command.start()].strip(" ,."))
-            # Guard author initials when splitting the prose template.
-            prose = plain(body)
-            prose = re.sub(r"\b([A-Z])\.\s", lambda m: m[1] + "\x01 ", prose)
-            segments = [s.replace("\x01", ".") for s in re.split(r"\.\s+", prose)]
+            segments = _sentences(body)
             if "title" not in fields and len(segments) >= 3:
                 fields.setdefault("author", segments[0])
                 fields["title"] = segments[1]
@@ -238,6 +272,10 @@ def parse_bibitems(thebibliography_blocks: list[str], version: int) -> list[RawB
                 if sep:
                     fields.setdefault("author", author)
                     fields["title"] = title.strip(" ,.")
+            if "title" not in fields:
+                author, title = _author_title(body)
+                fields.setdefault("author", author)
+                fields.setdefault("title", title)
             entries.append(
                 _entry(
                     fields,

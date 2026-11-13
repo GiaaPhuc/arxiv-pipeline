@@ -67,17 +67,22 @@ def test_strong_identifiers(field, value):
 
 def test_sparse_bridge_does_not_merge_conflicting_dois():
     entries = [
-        RawBibEntry(v, str(v), "article", "Same title", ["Doe"], 2020, doi)
+        RawBibEntry(v, str(v), "article", "Same sufficiently long title", ["Doe"], 2020, doi)
         for v, doi in [(1, "10.1/a"), (2, ""), (3, "10.1/b")]
     ]
     assert len(deduplicate_references(ID, entries)[0]) == 2
 
 
-def test_ambiguous_key_within_version_rejected():
-    with pytest.raises(ValueError, match="Ambiguous"):
-        deduplicate_references(
-            ID, [RawBibEntry(1, "k", "misc", "First"), RawBibEntry(1, "k", "misc", "Other")]
-        )
+def test_duplicate_location_prefers_bib_and_does_not_mutate(caplog):
+    entries = [
+        RawBibEntry(1, "k", "misc", "Broken", source_kind="bibitem"),
+        RawBibEntry(1, "k", "article", "Correct structured title"),
+    ]
+    original = deepcopy(entries)
+    rows, mapping = deduplicate_references(ID, entries)
+    assert len(rows) == 1 and rows[0].title == "Correct structured title"
+    assert mapping == {(1, "k"): "k"}
+    assert entries == original and "Duplicate citation" in caplog.text
 
 
 def test_empty_version_and_kind_sensitive_pool():
@@ -118,13 +123,55 @@ def test_multikey_optional_citations():
             RawNode(1, 2, "sentence", "a"),
             RawNode(2, 1, "sentence", "b"),
         ],
-        [
-            RawNode(0, None, "document", ""),
-            RawNode(1, 0, "heading", "a"),
-            RawNode(2, 1, "heading", "a"),
-        ],
     ],
 )
 def test_invalid_or_pooling_cycle_rejected(nodes):
     with pytest.raises(ValueError):
         rewrite_citations_and_dedup_elements(ID, {1: nodes}, {})
+
+
+@pytest.mark.parametrize("contents", [["A", "A", "child"], ["A", "B", "A", "child"]])
+def test_pooling_collapses_ancestor_cycle_without_losing_descendants(contents):
+    nodes = [RawNode(0, None, "document", "")]
+    nodes += [RawNode(i, i - 1, "heading", content) for i, content in enumerate(contents, 1)]
+    elements, edges = rewrite_citations_and_dedup_elements(ID, {1: list(reversed(nodes))}, {})
+    assert len(elements) == len(set(contents)) + 1
+    assert all(e.elementid != e.parentid for e in edges)
+    reachable = {e.elementid for e in elements if e.kind == "document"}
+    for _ in elements:
+        reachable.update(e.elementid for e in edges if e.parentid in reachable)
+    assert reachable == {e.elementid for e in elements}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"\citealp",
+        r"\citealt",
+        r"\citeauthor",
+        r"\citeyear",
+        r"\autocite",
+        r"\cite [p. 1]",
+        r"\textcite* [see] [p. 1]",
+    ],
+)
+def test_all_validator_citation_commands_rewritten(command):
+    nodes = [RawNode(0, None, "document", ""), RawNode(1, 0, "sentence", command + "{old}")]
+    rows, _ = rewrite_citations_and_dedup_elements(ID, {1: nodes}, {(1, "old"): "new"})
+    assert rows[-1].content == command + "{new}"
+
+
+def test_short_titles_do_not_merge_and_journal_arxiv_does():
+    entries = [RawBibEntry(v, str(v), "misc", "Rev", ["Doe"], 2020) for v in [1, 2]]
+    assert len(deduplicate_references(ID, entries)[0]) == 2
+    entries[0].journal = "arXiv preprint arXiv:2408.11045v1"
+    entries[1].url = "https://arxiv.org/abs/2408.11045v2"
+    assert len(deduplicate_references(ID, entries)[0]) == 1
+
+
+def test_surname_and_blank_author():
+    from parsing.dedup import _surname
+
+    assert _surname(RawBibEntry(1, "k", "misc", authors=["A. Author, B. Coauthor"])) == "author"
+    assert _surname(RawBibEntry(1, "k", "misc", authors=["Vaswani, Ashish"])) == "vaswani"
+    assert _surname(RawBibEntry(1, "k", "misc", authors=["  "])) == ""

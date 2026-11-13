@@ -1,5 +1,5 @@
-﻿# Runtime dependencies for Milestone 1 (crawler). Pin ranges; freeze exact versions
-# in the README once the team has settled on a Colab-tested set.
+﻿# Runtime dependencies for Milestones 1-3 (crawler, parser, matcher, HF export).
+# Pin ranges; freeze exact versions in README.md once tested on Colab.
 # arXiv metadata is read from the Atom API over plain HTTP (requests) through one shared
 # rate limiter, so the `arxiv` package is not needed.
 requests>=2.32,<3
@@ -7,3 +7,9 @@ urllib3>=2.2,<3
 pandas>=2.2
 pyarrow>=16
 psutil>=5.9
+numpy>=1.26
+rapidfuzz>=3.9
+scikit-learn>=1.5
+lightgbm>=4.3
+datasets>=2.20
+matplotlib>=3.8

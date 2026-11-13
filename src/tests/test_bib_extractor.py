@@ -96,3 +96,71 @@ def test_arxiv_url_preserved_alongside_doi():
     )[0]
     assert entry.doi == "10.1234/a"
     assert entry.url == "https://arxiv.org/abs/2408.11045"
+
+
+@pytest.mark.parametrize(
+    "author", [r"H. M\"uller and K. G\"odel", r"E. Schr\"odinger and H. M\"uller"]
+)
+def test_escaped_umlauts_are_not_title_quotes(author):
+    entry = parse_bibitems([r"\bibitem{k} " + author + ", A study on neural nets, 2020."], 1)[0]
+    assert entry.title == "A study on neural nets"
+    assert entry.year == 2020
+    assert len(entry.authors) == 2
+
+
+@pytest.mark.parametrize(
+    "venue", [r"\emph{Phys. Rev. Lett.}", r"{\em Phys. Rev. Lett.}", r"{\it Phys. Rev. Lett.}"]
+)
+@pytest.mark.parametrize("separator", [", ", ". "])
+def test_emphasized_venue_preserves_title(venue, separator):
+    entry = parse_bibitems(
+        [
+            r"\bibitem{k} A. Author"
+            + separator
+            + "A Study on Quantum Dots, "
+            + venue
+            + r" \textbf{100}, 2020."
+        ],
+        1,
+    )[0]
+    assert entry.title == "A Study on Quantum Dots"
+    assert entry.authors == ["A. Author"]
+    assert entry.journal == "Phys. Rev. Lett."
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [
+        "arXiv:1912.01234",
+        "arXiv:2005.01234",
+        "arXiv:2103.00001",
+        "arXiv:1807.00001",
+        "pp. 1900--1920",
+        "10.1234/2019.456",
+        "https://example.org/2021",
+    ],
+)
+@pytest.mark.parametrize("year", ["", " (2024)"])
+def test_identifiers_and_pages_do_not_supply_year(identifier, year):
+    entry = parse_bibitems([r"\bibitem{k} A. Author, Some Title, " + identifier + year], 1)[0]
+    assert entry.year == (2024 if year else None)
+
+
+@pytest.mark.parametrize("comment", ["{unbalanced", "}unbalanced", '"unbalanced'])
+def test_comments_inside_entry_do_not_break_groups(comment):
+    entry = parse_bib_file(
+        "@article{k,\n title={Ok},\n % "
+        + comment
+        + '\n year=2020, url="https://example.org/a%20b"\n}',
+        1,
+    )[0]
+    assert entry.title == "Ok" and entry.year == 2020
+    assert entry.url.endswith("a%20b")
+
+
+def test_empty_journal_and_prefixed_eprint_fallback():
+    entry = parse_bib_file(
+        "@article{k,journal={},booktitle={Conference},eprint={arXiv:2408.11045}}", 1
+    )[0]
+    assert entry.journal == "Conference"
+    assert entry.url == "https://arxiv.org/abs/2408.11045"
