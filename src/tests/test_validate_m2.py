@@ -1389,3 +1389,16 @@ def test_end_to_end_with_real_gathering_and_hierarchy(data_dir: Path) -> None:
         [],
     )
     assert validate(data_dir) == []
+
+
+def test_exporter_summary_keys_and_labeled_ref_heading_detected(data_dir: Path) -> None:
+    _build_valid_dataset(data_dir)
+    (data_dir / "stats" / "m2_summary.json").write_text(
+        json.dumps({"papers": 1, "versions": 2}), encoding="utf-8"
+    )
+    problems = validate(data_dir)
+    assert any("m2_summary.json: papers=1 != M1 corpus papers (2)" in p for p in problems)
+    assert any("m2_summary.json: versions=2 != M1 corpus versions (4)" in p for p in problems)
+    from validate_m2 import _normalize_heading_title
+
+    assert _normalize_heading_title(r"References\label{sec:refs}") == "references"

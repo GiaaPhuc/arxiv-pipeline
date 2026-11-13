@@ -117,3 +117,27 @@ def test_preserve_macro_names_inside_verbatim_environment():
     assert extract_and_expand_macros(preamble, body) == (
         r"\begin{verbatim}\R\end{verbatim} then \mathbb{R}"
     )
+
+
+def test_empty_inline_math_does_not_become_display_delimiter():
+    assert normalize_math(r"inequality $ $: \begin{equation}x=1\end{equation}") == (
+        r"inequality : \begin{equation}x=1\end{equation}"
+    )
+
+
+def test_preserve_macro_names_inside_additional_cite_variants():
+    preamble = r"\newcommand{\K}{key}"
+    body = r"\citealp{\K} \citeauthor{\K} \citeyear{\K} outside \K"
+    assert extract_and_expand_macros(preamble, body) == (
+        r"\citealp{\K} \citeauthor{\K} \citeyear{\K} outside key"
+    )
+
+
+def test_trailing_control_space_in_math_does_not_escape_closing_delimiter():
+    actual = normalize_math(r"$\mu\ $ and $$x\ $$ and $\\$")
+    assert actual == r"$\mu\ $ and \begin{equation}x\ \end{equation} and $\\$"
+
+
+def test_unclosed_verb_does_not_swallow_following_lines():
+    actual = normalize_math("\\verb#unclosed\n\\(x+1\\)")
+    assert actual == "\\verb#unclosed\n$x+1$"

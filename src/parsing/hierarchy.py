@@ -31,6 +31,7 @@ _RANKS = {
     )
 }
 _REFERENCES = {"references", "bibliography", "literature cited", "works cited"}
+_REF_LABEL_RE = re.compile(r"\\label\s*\{[^}]*\}")
 _LISTS = {"itemize", "enumerate", "description"}
 _FIGURES = {"figure", "figure*", "table", "table*", "wrapfigure", "algorithm", "algorithm*"}
 _MAX_NESTING = 64
@@ -126,8 +127,20 @@ class _Builder:
         body_end, end, closed = _environment_span(text, cmd)
         if not closed:
             self.warn(f"unclosed {cmd.arg}; recovering at next heading or end")
+            in_bib = cmd.arg == "thebibliography"
             for next_cmd in _commands(text[cmd.end :]):
-                if next_cmd.name in _RANKS or next_cmd.name == "appendix":
+                if (
+                    next_cmd.name in _RANKS
+                    or next_cmd.name == "appendix"
+                    or (
+                        not in_bib
+                        and (
+                            next_cmd.name == "bibitem"
+                            or (next_cmd.name == "begin" and next_cmd.arg == "thebibliography")
+                        )
+                    )
+                    or (next_cmd.name == "end" and next_cmd.arg == "document")
+                ):
                     body_end = end = cmd.end + next_cmd.start
                     break
         return body_end, end
@@ -184,7 +197,10 @@ class _Builder:
                 else:
                     flush(cmd.start)
                 title = self.clean(arg[0])
-                if " ".join(title.casefold().split()) in _REFERENCES:
+                norm_title = " ".join(_REF_LABEL_RE.sub(" ", title).casefold().split()).strip(
+                    ".:*-–— "
+                )
+                if norm_title in _REFERENCES:
                     ref_rank, ref_start = rank, arg[1]
                 else:
                     while headings[-1][1] >= rank:

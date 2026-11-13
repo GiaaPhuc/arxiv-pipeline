@@ -223,7 +223,7 @@ def _check_non_nulls(table_name: str, table: pa.Table, label: str) -> list[str]:
 
 def _normalize_heading_title(text: str) -> str:
     """Normalize heading text to detect leaked References / Bibliography sections."""
-    cleaned = text.strip()
+    cleaned = re.sub(r"\\(?:label|ref|eqref|index)\*?\s*\{[^{}]*\}", "", text.strip())
     for _ in range(4):
         updated = _CMD_WRAPPER_RE.sub(r"\1", cleaned)
         if updated == cleaned:
@@ -680,13 +680,13 @@ def _check_version_coverage(
         if isinstance(sdata, dict):
             expected_total_papers = len(corpus_versions)
             expected_total_versions = sum(len(v) for v in corpus_versions.values())
-            for p_key in ("papers_total", "total_papers", "n_papers"):
+            for p_key in ("papers", "papers_total", "total_papers", "n_papers"):
                 if p_key in sdata and int(sdata[p_key]) != expected_total_papers:
                     problems.append(
                         f"m2_summary.json: {p_key}={sdata[p_key]} != "
                         f"M1 corpus papers ({expected_total_papers})"
                     )
-            for v_key in ("versions_total", "total_versions", "n_versions"):
+            for v_key in ("versions", "versions_total", "total_versions", "n_versions"):
                 if v_key in sdata and int(sdata[v_key]) != expected_total_versions:
                     problems.append(
                         f"m2_summary.json: {v_key}={sdata[v_key]} != "
