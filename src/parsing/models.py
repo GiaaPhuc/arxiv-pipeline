@@ -145,3 +145,5 @@ class PaperResult:
     hierarchy: list[HierarchyRow] = field(default_factory=list)
     bibtex: list[BibtexRow] = field(default_factory=list)
     stats: PaperStats | None = None
+    # Optional pre-union coverage; None means an older caller did not measure it.
+    bib_fields_before: dict[str, int] | None = None

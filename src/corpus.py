@@ -89,7 +89,7 @@ class Corpus:
         return versions
 
     def tex_files(self, arxiv_id: str, version: int) -> dict[str, bytes]:
-        """Read .tex/.bib bytes only under tex/, preserving paths relative to tex/.
+        """Read .tex/.bib/.bbl bytes under tex/, preserving paths relative to tex/.
 
         Return an empty dict when an existing version has no TeX directory or files.
         """
@@ -106,7 +106,7 @@ class Corpus:
         for file_path in tex_dir.rglob("*"):
             if not file_path.is_file():
                 continue
-            if file_path.suffix.lower() not in (".tex", ".bib"):
+            if file_path.suffix.lower() not in (".tex", ".bib", ".bbl"):
                 continue
             relative_path = file_path.relative_to(tex_dir)
             files[relative_path.as_posix()] = file_path.read_bytes()

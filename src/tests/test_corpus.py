@@ -221,6 +221,19 @@ def test_tex_files_ignores_sources_outside_tex_directory(mock_corpus):
     assert files["sections/intro.tex"] == b"Introduction\n"
 
 
+def test_tex_files_includes_bbl_only_under_tex_directory(mock_corpus):
+    version_dir = mock_corpus.papers_dir / "2408-11045" / "v1"
+    (version_dir / "tex" / "main.bbl").write_bytes(
+        b"\\begin{thebibliography}{1}\\end{thebibliography}\n"
+    )
+    (version_dir / "outside.bbl").write_bytes(b"ignored\n")
+
+    files = mock_corpus.tex_files("2408.11045", 1)
+
+    assert files["main.bbl"] == b"\\begin{thebibliography}{1}\\end{thebibliography}\n"
+    assert "outside.bbl" not in files
+
+
 @pytest.mark.parametrize("status", ["no_source", "ok_no_tex"])
 @pytest.mark.parametrize("create_tex_directory", [False, True])
 def test_versions_without_tex_remain_readable(data_dir, status, create_tex_directory):

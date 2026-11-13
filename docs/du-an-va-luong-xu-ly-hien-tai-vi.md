@@ -614,3 +614,27 @@ Khi tổng hợp dữ liệu đưa vào báo cáo và poster, nhóm tập trung 
 ---
 
 *Tài liệu kỹ thuật được rà soát, tái cấu trúc và đồng bộ hóa chính xác 100% với mã nguồn `arxiv-pipeline` ngày **13/11/2026**.*
+
+
+## Tích hợp M2 trên nhánh D (13/11/2026)
+
+`default_stages()` nối C gathering/hierarchy, B cleaner/math/split và D bib/dedup.
+`Corpus.tex_files()` đọc cả `.bbl`; khóa trùng cùng phiên bản ưu tiên `.bib`,
+giữ khai báo đầu khi cùng nguồn và ghi cảnh báo. Pool nội dung bỏ cạnh gây chu
+trình, giữ nội dung con và các invariant DAG/duy nhất `(kind, content)`.
+
+Pipeline chuyển số đếm `bib_fields_before` qua `PaperResult` kể cả khi chạy
+nhiều worker. Exporter ghi Parquet ZSTD, dictionary int8 và cột bắt buộc non-null;
+shard rỗng có 0 row groups. CLI vẫn từ chối output cũ nếu không có `--resume`.
+
+Để tiếp tục, dùng cùng lệnh và thêm `--resume`, giữ nguyên output/stats.
+Mỗi lô ghi marker `_export_pending.json` trước ba shard và CSV; khi khởi động
+lại, lô dở được rollback. CSV đã commit là nguồn khôi phục ID bài nếu `_done.txt`
+chưa kịp ghi. Summary và phân bố kind cộng cả cũ + mới. Bài lỗi được thử lại;
+lỗi đã giải quyết được gỡ khỏi `_errors.jsonl`, lịch sử giữ ở `parse.log`.
+Chỉ hỗ trợ một tiến trình ghi vào một output; chưa thử mất điện/hỏng filesystem.
+
+Test tích hợp dùng dữ liệu tổng hợp qua CLI → C/B/D → Parquet → validator E,
+gồm `.bib` + `.bbl`, heading tổ tiên trùng, resume, lỗi rồi retry và 2 worker.
+Chưa chạy corpus thật hoặc benchmark Colab. Giữ nguyên phần M1 v3.14 và M3-A
+đã nhận từ `origin/main` (`5980068`).

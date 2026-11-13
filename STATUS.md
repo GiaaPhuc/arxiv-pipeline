@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T6 13/11/2026 ~11:50 (Asia/Saigon)** — (1) **Milestone 3 (phần A — Phúc):** Hoàn tất code-complete `M3-A0..A3` (`src/matching/models.py`, `features.py`, `pipeline.py`, `export_hf.py`, `src/run_matching.py`, `src/tests/matching_fixtures.py`, `test_matching_pipeline.py`, `test_export_hf.py`, cập nhật `requirements*.txt` & cài `.venv`); **12 passed** tests M3 phần A, toàn suite **496 passed (47,99 s)**, `ruff check` & `ruff format --check` sạch 100%; (2) **Milestone 3 (tổng thể):** Chờ PR của B/C/D/E trước 16/11 và dữ liệu M1 `stats/` + M2 `parsed/` để chạy slice 5.000 ID (`--range-index <0..4>`) & đẩy Dataset HF cá nhân hạn 20/11.
+> Cập nhật lần cuối: **13/11/2026, 23:05 (Asia/Saigon)** — hoàn thiện review M2-D trên `m2/d-integration_v2` (fix `is_venue` `\textbf`, năm `(2020a)`, `depth` ngoài entry, chống lặp `_errors.jsonl`, thêm unit test `.bbl`), giữ M1 v3.14/M3-A từ `origin/main` (`5980068`).
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -16,6 +16,15 @@
 - Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. Hiện đang hoàn thiện dữ liệu **Milestone 1** (thu thập 25k ID) và hoàn thiện các trụ cột **Milestone 2** (Phase 0 đã xong; B và C đã hoàn thiện module cốt lõi; D và E đang phối hợp ghép nối). Ở **Milestone 3** (Code-Complete trước **16/11**, nộp Dataset HF **5.000 ID** trước **20/11**, Poster A2 dọc chung **27/11**), Leader **A (Phúc)** đã hoàn thành phần mã `M3-A0..A3` trên nhánh làm việc cục bộ; đang chờ PR các module B/C/D/E theo kế hoạch tại [`docs/plans/m3/milestone3-implementation-plan-vi.md`](./docs/plans/m3/milestone3-implementation-plan-vi.md).
 - Nộp Milestone 1 qua Moodle: link repo mã công khai + link Jupyter Book (repo sách riêng, GitHub Pages). **Không nộp dữ liệu** ở mốc này. Viết bằng tiếng Việt. Không nộp trễ.
 - Khi nộp, repo mã chỉ được chứa mã (`.py` / `.ipynb`), `requirements.txt` và `README.md`. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md`, `plans/`, `project requirements/` đang ở trong repo để làm việc — xử lý lúc đóng băng (R6, T5.3 trong Phase 2).
+
+### M2 — D và kiểm thử tích hợp sau review (13/11)
+
+- Sửa trích tiêu đề/năm (gồm hậu tố chữ `(2020a)`), neo `\textbf` sát venue cho `is_venue` và kẹp `depth >= 0` ngoài entry cho comment BibTeX; hỗ trợ nhóm em/it, fallback venue/eprint. Bộ đọc vẫn báo lỗi với BibTeX sai cú pháp thực sự; bibitem vẫn là heuristic.
+- Khóa trùng cùng phiên bản ưu tiên `.bib`, rồi khai báo đầu; ghi cảnh báo. Chặn tiêu đề ngắn, lập chỉ mục ứng viên, kiểm xung đột định danh cấp cụm. Collapse cạnh gây chu trình sau pooling, giữ nội dung con.
+- `Corpus.tex_files()` đọc `.bbl` (đã thêm unit test trong `test_corpus.py`); pipeline truyền `PaperResult.bib_fields_before` tùy chọn để xuất đủ độ phủ qua CLI/nhiều worker. Hợp đồng M1 không đổi.
+- Thêm `--resume`, rollback lô ghi dở bằng marker + offset CSV; khôi phục checkpoint từ CSV đã commit và tổng hợp thống kê cũ + mới; `_errors.jsonl` chỉ giữ 1 bản ghi mới nhất cho mỗi bài lỗi chưa khắc phục. Parquet dùng ZSTD/int8/non-null, shard rỗng 0 row groups. Chỉ một tiến trình ghi; chưa kiểm mất điện/hỏng filesystem.
+- Kiểm tra: **581 passed**; Ruff check/format sạch. Test tổng hợp có CLI → C/B/D → validator E, `.bib` + `.bbl`, heading tổ tiên trùng, resume sau lỗi/ngắt ghi và 2 worker. Chưa chạy corpus thật hoặc benchmark Colab.
+- Báo cáo phần D: `docs/m2/02_standardization_dedup.md`; chưa ghép/build repo sách, chuẩn bị tạo PR vào `main`.
 
 ### Phần B M2 — hoàn thành và kiểm thử 12/11 (PR #28)
 
@@ -43,7 +52,7 @@
 - Ruff check/format đạt; **359 passed (24,94 s)** sau ghép main `ea13d45`, gồm **98 test C**. Unit test dùng nguồn tổng hợp, không gọi mạng; không phải benchmark hay số parse thật.
 - Trên Windows, lần full-suite đầu lỗi 7 test checkpoint/export do đường dẫn Temp sandbox có `#` làm URI SQLite bị cắt. Đặt `TEMP`/`TMP` của tiến trình test dưới `.venv/m2c-temp`, dùng basetemp mới thì toàn bộ đạt; không sửa checkpoint/export.
 - Người dùng xác nhận `arxiv-data/` do leader cung cấp, đã giải nén: **1.000 bài / 1.678 phiên bản** theo metadata (1.526 `ok`, 148 `no_source`, 4 `not_found`); không có `.bbl`. Chỉ kiểm hash **349 tệp** của mẫu 10 bài, chưa validate toàn subset hoặc xác nhận hoàn tất 25k.
-- **C độc lập:** 26/26 phiên bản mẫu + 3/3 đối chứng đạt kiểm tra cây/marker References với hook truyền nguyên văn; dùng **265/324 TeX**, 6 phiên bản mẫu cảnh báo bibliography thiếu trong subset. Chưa chứng minh chất lượng macro/math/split hoặc trích tham khảo/dedup B/D thật. M2-C vẫn 🟡; A/D cần nối `.bbl` qua `Corpus.tex_files()` (hiện chỉ trả `.tex/.bib`).
+- **C độc lập:** 26/26 phiên bản mẫu + 3/3 đối chứng đạt kiểm tra cây/marker References với hook truyền nguyên văn; dùng **265/324 TeX**, 6 phiên bản mẫu cảnh báo bibliography thiếu trong subset. Chưa chứng minh chất lượng macro/math/split hoặc trích tham khảo/dedup B/D thật. M2-C vẫn 🟡; D đã nối `.bbl` qua `Corpus.tex_files()` ngày 13/11; chưa đánh giá lại mẫu thật.
 - **Session handoff 08/11:** `docs/SESSION_HANDOFF.md` đã ghi bằng chứng mẫu thật, lỗi root đã sửa và các bước tích hợp còn chờ. Đã commit C `935b3dc`, đối chiếu và nhận main `ea13d45` (v3.9); người dùng tự tạo PR trên trình duyệt sau khi push.
 
 ### Milestone 3 — đề vs hiện trạng
@@ -59,7 +68,8 @@
 
 - **M3 (Phase 0 & phần A):** `M3-A0..A3` đã xong và kiểm thử offline (**12 passed** M3, **496 passed** toàn suite); đang chờ PR của B (`cleaner`, `lexical_features`), C (`auto_matcher`, `labelling`), D (`ranker`, `train_ranker`) và E (`hierarchy_features`, `evaluation`, `plots`) trước 16/11; hoàn thiện `README.md` cuối ở Phase 3A sau khi chạy 5.000 ID và có link HF.
 
-- **M2-C:** cấu trúc C đã thử 10 bài thật; chờ B/D thật, A/D nối `.bbl` và xác minh bibliography thiếu, E validate/ghép Book. Danh sách bàn giao trong bảng kiểm chứng; chưa gửi tin nhóm.
+- **M2-D:** đã sửa review và kiểm thử tổng hợp; chờ pilot thật, rà soát trường hợp bibliography khó và ghép Book.
+- **M2-C:** cấu trúc C đã thử 10 bài thật; `.bbl` đã nối, còn xác minh bibliography thiếu trên dữ liệu thật, E validate/ghép Book. Danh sách bàn giao trong bảng kiểm chứng; chưa gửi tin nhóm.
 - **Go/no-go:** Pilot 30 ID ✅. V̄ pilot **~1,9** phiên bản/bài → ~**47.500** request `/src/`; chỉ chờ 3 s/arXiv ≈ **~40 h** (+ tải/trích). Wall pilot (27–28/10, gồm S2 429 trước batch) cỡ **~2 h** cho 30 ID → nhân tuyến tính **~7 ngày** wall nếu S2 vẫn nghẽn; với batch + key ổn định kỳ vọng **~2–3 ngày** một máy (R1 — cần đo lại sau vài trăm ID đầu T4.1).
 - **T4.1 (A):** `python src/run_crawl.py --ranges src/id_ranges.csv` trên máy chính; sao lưu định kỳ `data/` + `manifest.sqlite`.
 - **T4.2–T4.4:** retry `failed` theo dải; validate ≥ 20 phiên bản; đẩy `stats/` vào sách.
@@ -167,7 +177,7 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | M2-A1 | Điều phối `src/parsing/pipeline.py` + `src/run_parse.py` + `src/colab_parse.ipynb` + `test_parse_pipeline.py` | A | 06/11 (khung) · 13/11 (tích hợp) | 🟡 (khung + 11 test ✅; chờ module B–E để chạy pilot ~100 bài & full 25k) |
 | M2-C | `gathering.py`, `hierarchy.py`, unit tests, mục 1 báo cáo | C | 06–12/11 | 🟡 98 test C đạt; suite 359 passed. 10 bài / 26 phiên bản thật + 3 đối chứng đạt kiểm tra C bằng hook truyền nguyên văn; đã sửa root v4/v5. Còn B/D thật, bibliography thiếu và đường `.bbl`; bản thảo/bảng kiểm chứng sẵn giao E |
 | M2-B | `cleaner.py`, `math_normalizer.py`, `sentence_splitter.py`, unit tests, nửa đầu mục 2 báo cáo | B | 06–12/11 | ⬜ |
-| M2-D | `bib_extractor.py`, `dedup.py`, `export_m2.py`, unit tests, nửa sau mục 2 báo cáo | D | 06–12/11 | ⬜ |
+| M2-D | `bib_extractor.py`, `dedup.py`, `export_m2.py`, unit tests, nửa sau mục 2 báo cáo | D | 06–12/11 | 🟡 Mã + test + bản thảo xong sau review; chờ pilot thật/ghép Book |
 | M2-E | `validate_m2.py`, `arxiv-book/m2/*` (`03_parsing_statistics.ipynb`, `04_parser_performance.ipynb`) | E | 06–13/11 | ⬜ |
 
 ### Milestone 3 — Khớp tài liệu tham khảo (Code-Complete < 16/11 · HF cá nhân 20/11 · Poster 27/11)
