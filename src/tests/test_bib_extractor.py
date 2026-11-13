@@ -164,3 +164,37 @@ def test_empty_journal_and_prefixed_eprint_fallback():
     )[0]
     assert entry.journal == "Conference"
     assert entry.url == "https://arxiv.org/abs/2408.11045"
+
+
+def test_emphasized_title_before_bold_volume_and_disambiguated_year():
+    title_entry = parse_bibitems(
+        [r"\bibitem{k} A. Author, \emph{A Study on Quantum Dots}, Nature \textbf{100}, (2020a)."],
+        1,
+    )[0]
+    assert title_entry.title == "A Study on Quantum Dots"
+    assert title_entry.authors == ["A. Author"]
+    assert title_entry.year == 2020
+
+    venue_entry = parse_bibitems(
+        [r"\bibitem{k} A. Author, Quantum Dots, \emph{Nature} \textbf{100}, 2020."],
+        1,
+    )[0]
+    assert venue_entry.journal == "Nature"
+    assert venue_entry.title == "Quantum Dots"
+
+    decade_entry = parse_bibitems(
+        [r"\bibitem{k} A. Author, A survey of the 1990s, 2024."],
+        1,
+    )[0]
+    assert decade_entry.year == 2024
+
+
+def test_stray_outer_brace_before_entry_keeps_percent_and_quotes():
+    entry = parse_bib_file(
+        "stray } before\n"
+        '@article{k, title={50% growth}, url="https://example.org/a%20b", year=2020}',
+        1,
+    )[0]
+    assert entry.title == "50% growth"
+    assert entry.url == "https://example.org/a%20b"
+    assert entry.year == 2020

@@ -104,9 +104,14 @@ def test_failed_paper_is_retryable_with_real_exporter(tmp_path):
     bib.write_text("@article{broken")
     args = ["--data-dir", str(tmp_path), "--workers", "1"]
     assert run_parse.main(args) == 0
-    assert "2408.11045" in (tmp_path / "parsed/_errors.jsonl").read_text()
+    errors_file = tmp_path / "parsed/_errors.jsonl"
+    assert "2408.11045" in errors_file.read_text()
+    # A second failed attempt must keep only one record per unresolved paper.
+    assert run_parse.main(args + ["--resume"]) == 0
+    assert len(errors_file.read_text().splitlines()) == 1
     bib.write_text(original)
     assert run_parse.main(args + ["--resume"]) == 0
+    assert errors_file.read_text() == ""
     assert validate(tmp_path) == []
 
 

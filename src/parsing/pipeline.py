@@ -411,15 +411,26 @@ def run_pipeline(
     errors_path = out_dir / ERRORS_FILE
     if errors_path.exists():
         completed = set(exporter.seen) if hasattr(exporter, "seen") else read_done(out_dir)
-        with atomic_write(errors_path) as tmp, errors_path.open(encoding="utf-8") as source:
-            with tmp.open("w", encoding="utf-8") as target:
-                for line in source:
-                    try:
-                        resolved = json.loads(line).get("arxivid") in completed
-                    except (ValueError, AttributeError):
-                        resolved = False
-                    if not resolved:
-                        target.write(line)
+        kept_by_id: dict[str, str] = {}
+        unparsed_lines: list[str] = []
+        with errors_path.open(encoding="utf-8") as source:
+            for line in source:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                    raw_id = record.get("arxivid") if isinstance(record, dict) else None
+                    arxiv_id = raw_id if isinstance(raw_id, str) and raw_id else None
+                except ValueError:
+                    arxiv_id = None
+                if arxiv_id is None:
+                    unparsed_lines.append(line)
+                elif arxiv_id not in completed:
+                    kept_by_id.pop(arxiv_id, None)
+                    kept_by_id[arxiv_id] = line
+        with atomic_write(errors_path) as tmp, tmp.open("w", encoding="utf-8") as target:
+            target.writelines(kept_by_id.values())
+            target.writelines(unparsed_lines)
     peak_mb = round(resources["ram_peak_bytes"] / 1e6, 1)
     mean_mb = round(resources["ram_mean_bytes"] / 1e6, 1)
     input_bytes = tree_size(data_dir / "papers")

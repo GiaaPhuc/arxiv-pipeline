@@ -57,7 +57,7 @@ def _strip_comments(text: str, *, entry_file: bool = False) -> str:
             if char == "{":
                 depth += 1
             elif char == "}":
-                depth -= 1
+                depth = max(0, depth - 1)
         if char == "%" and depth <= (1 if entry_file else 0) and not quoted:
             end = text.find("\n", i)
             i = len(text) if end == -1 else end
@@ -231,9 +231,9 @@ def parse_bibitems(thebibliography_blocks: list[str], version: int) -> list[RawB
             year_text = re.sub(
                 r"https?://[^\s{}<>]+|(?:pp?\.?\s*)?\d+\s*(?:--?|–)\s*\d+", "", year_text
             )
-            year = re.search(r"\b(?:18|19|20|21)\d{2}\b", year_text)
+            year = re.search(r"\b((?:18|19|20|21)\d{2})(?=[a-e]?\b)", year_text)
             if year:
-                fields.setdefault("year", year[0])
+                fields.setdefault("year", year[1])
             quoted = re.search(r"``(.*?)''|(?<!\\)\"((?:\\.|[^\"\\])+)(?<!\\)\"", body, re.S)
             command = re.search(r"\\(enquote|emph|textit)\s*\{|\{\\(em|it)\s+", body)
             if quoted:
@@ -246,12 +246,12 @@ def parse_bibitems(thebibliography_blocks: list[str], version: int) -> list[RawB
                 else:
                     value, end = group(body, command.start())
                     value = re.sub(r"^\\(?:em|it)\s+", "", value)
-                is_venue = command[1] != "enquote" and (
+                is_venue = command[1] != "enquote" and bool(
                     re.search(
                         r"Phys\.|Rev\.|Lett\.|IEEE|Proc\.|\bJ\.|Vol\.|Journal|Trans\.|Conf\.|Ann\.",
                         value,
                     )
-                    or re.search(r"\\textbf\{\d+\}", body[end:])
+                    or re.match(r"[\s,.]*\\textbf\{\d+\}", body[end:])
                 )
                 if is_venue:
                     fields.setdefault("journal", value)

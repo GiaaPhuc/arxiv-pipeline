@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **13/11/2026, 22:30 (Asia/Saigon)** — sửa review M2-D và đồng bộ `origin/main` (`5980068`), giữ cập nhật M1 v3.14/M3-A.
+> Cập nhật lần cuối: **13/11/2026, 23:05 (Asia/Saigon)** — hoàn thiện review M2-D trên `m2/d-integration_v2` (fix `is_venue` `\textbf`, năm `(2020a)`, `depth` ngoài entry, chống lặp `_errors.jsonl`, thêm unit test `.bbl`), giữ M1 v3.14/M3-A từ `origin/main` (`5980068`).
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -19,12 +19,12 @@
 
 ### M2 — D và kiểm thử tích hợp sau review (13/11)
 
-- Sửa trích tiêu đề/năm và comment BibTeX; hỗ trợ nhóm em/it, fallback venue/eprint. Bộ đọc vẫn báo lỗi với BibTeX sai cú pháp thực sự; bibitem vẫn là heuristic.
+- Sửa trích tiêu đề/năm (gồm hậu tố chữ `(2020a)`), neo `\textbf` sát venue cho `is_venue` và kẹp `depth >= 0` ngoài entry cho comment BibTeX; hỗ trợ nhóm em/it, fallback venue/eprint. Bộ đọc vẫn báo lỗi với BibTeX sai cú pháp thực sự; bibitem vẫn là heuristic.
 - Khóa trùng cùng phiên bản ưu tiên `.bib`, rồi khai báo đầu; ghi cảnh báo. Chặn tiêu đề ngắn, lập chỉ mục ứng viên, kiểm xung đột định danh cấp cụm. Collapse cạnh gây chu trình sau pooling, giữ nội dung con.
-- `Corpus.tex_files()` đọc `.bbl`; pipeline truyền `PaperResult.bib_fields_before` tùy chọn để xuất đủ độ phủ qua CLI/nhiều worker. Hợp đồng M1 không đổi.
-- Thêm `--resume`, rollback lô ghi dở bằng marker + offset CSV; khôi phục checkpoint từ CSV đã commit và tổng hợp thống kê cũ + mới. Parquet dùng ZSTD/int8/non-null, shard rỗng 0 row groups. Chỉ một tiến trình ghi; chưa kiểm mất điện/hỏng filesystem.
-- Kiểm tra: **578 passed** (8,52 s); Ruff check/format sạch. Test tổng hợp có CLI → C/B/D → validator E, `.bib` + `.bbl`, resume sau lỗi/ngắt ghi và 2 worker. Chưa chạy corpus thật hoặc benchmark Colab.
-- Báo cáo phần D: `docs/m2/02_standardization_dedup.md`; chưa ghép/build repo sách, chưa push remote.
+- `Corpus.tex_files()` đọc `.bbl` (đã thêm unit test trong `test_corpus.py`); pipeline truyền `PaperResult.bib_fields_before` tùy chọn để xuất đủ độ phủ qua CLI/nhiều worker. Hợp đồng M1 không đổi.
+- Thêm `--resume`, rollback lô ghi dở bằng marker + offset CSV; khôi phục checkpoint từ CSV đã commit và tổng hợp thống kê cũ + mới; `_errors.jsonl` chỉ giữ 1 bản ghi mới nhất cho mỗi bài lỗi chưa khắc phục. Parquet dùng ZSTD/int8/non-null, shard rỗng 0 row groups. Chỉ một tiến trình ghi; chưa kiểm mất điện/hỏng filesystem.
+- Kiểm tra: **581 passed**; Ruff check/format sạch. Test tổng hợp có CLI → C/B/D → validator E, `.bib` + `.bbl`, heading tổ tiên trùng, resume sau lỗi/ngắt ghi và 2 worker. Chưa chạy corpus thật hoặc benchmark Colab.
+- Báo cáo phần D: `docs/m2/02_standardization_dedup.md`; chưa ghép/build repo sách, chuẩn bị tạo PR vào `main`.
 
 ### Phần B M2 — hoàn thành và kiểm thử 12/11 (PR #28)
 
