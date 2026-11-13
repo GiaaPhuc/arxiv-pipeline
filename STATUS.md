@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **T6 13/11/2026 ~09:50 (Asia/Saigon)** — (1) **Milestone 3**: Hoàn thiện kế hoạch M3 tại [`docs/plans/m3/milestone3-implementation-plan-vi.md`](./docs/plans/m3/milestone3-implementation-plan-vi.md) & [`docs/plans/m3/milestone3-phan-cong-task-B-E-vi.md`](./docs/plans/m3/milestone3-phan-cong-task-B-E-vi.md): đóng băng toàn bộ mã chung **Code-Complete trước 16/11 (hết 15/11)**, từ **16–20/11 mỗi thành viên tự chạy CLI `--range-index <0..4>` trên dải 5.000 ID của mình** (gán nhãn $\ge 5$ bài manual + $\ge 10\%$ auto, train/eval, xuất 6 bảng Parquet) để nộp Hugging Face cá nhân đúng hạn 20/11; (2) **Crawler v3.14.0**: hoàn thiện Proportional Bandwidth Breather & Dynamic Wire-Speed Streaming (`--max-stream-mbps`); (3) **Milestone 2**: Đồng bộ module Role B (`M2-B1..B4`, PR #28 của Sơn) và Role C (PR #26).
+> Cập nhật lần cuối: **T6 13/11/2026 ~11:50 (Asia/Saigon)** — (1) **Milestone 3 (phần A — Phúc):** Hoàn tất code-complete `M3-A0..A3` (`src/matching/models.py`, `features.py`, `pipeline.py`, `export_hf.py`, `src/run_matching.py`, `src/tests/matching_fixtures.py`, `test_matching_pipeline.py`, `test_export_hf.py`, cập nhật `requirements*.txt` & cài `.venv`); **12 passed** tests M3 phần A, toàn suite **496 passed (47,99 s)**, `ruff check` & `ruff format --check` sạch 100%; (2) **Milestone 3 (tổng thể):** Chờ PR của B/C/D/E trước 16/11 và dữ liệu M1 `stats/` + M2 `parsed/` để chạy slice 5.000 ID (`--range-index <0..4>`) & đẩy Dataset HF cá nhân hạn 20/11.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -13,7 +13,7 @@
 
 ### Đề và phạm vi
 
-- Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. Hiện đang hoàn thiện dữ liệu **Milestone 1** (thu thập 25k ID) và hoàn thiện các trụ cột **Milestone 2** (Phase 0 đã xong; B và C đã hoàn thiện module cốt lõi; D và E đang phối hợp ghép nối). Kế hoạch kỹ thuật & phân công **Milestone 3** (Code-Complete trước **16/11**, mỗi thành viên tự làm & nộp Dataset HF **5.000 ID** trước **20/11**, Poster A2 dọc chung **27/11**) đã chuẩn bị sẵn sàng tại [`docs/plans/m3/milestone3-implementation-plan-vi.md`](./docs/plans/m3/milestone3-implementation-plan-vi.md).
+- Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. Hiện đang hoàn thiện dữ liệu **Milestone 1** (thu thập 25k ID) và hoàn thiện các trụ cột **Milestone 2** (Phase 0 đã xong; B và C đã hoàn thiện module cốt lõi; D và E đang phối hợp ghép nối). Ở **Milestone 3** (Code-Complete trước **16/11**, nộp Dataset HF **5.000 ID** trước **20/11**, Poster A2 dọc chung **27/11**), Leader **A (Phúc)** đã hoàn thành phần mã `M3-A0..A3` trên nhánh làm việc cục bộ; đang chờ PR các module B/C/D/E theo kế hoạch tại [`docs/plans/m3/milestone3-implementation-plan-vi.md`](./docs/plans/m3/milestone3-implementation-plan-vi.md).
 - Nộp Milestone 1 qua Moodle: link repo mã công khai + link Jupyter Book (repo sách riêng, GitHub Pages). **Không nộp dữ liệu** ở mốc này. Viết bằng tiếng Việt. Không nộp trễ.
 - Khi nộp, repo mã chỉ được chứa mã (`.py` / `.ipynb`), `requirements.txt` và `README.md`. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md`, `plans/`, `project requirements/` đang ở trong repo để làm việc — xử lý lúc đóng băng (R6, T5.3 trong Phase 2).
 
@@ -46,7 +46,18 @@
 - **C độc lập:** 26/26 phiên bản mẫu + 3/3 đối chứng đạt kiểm tra cây/marker References với hook truyền nguyên văn; dùng **265/324 TeX**, 6 phiên bản mẫu cảnh báo bibliography thiếu trong subset. Chưa chứng minh chất lượng macro/math/split hoặc trích tham khảo/dedup B/D thật. M2-C vẫn 🟡; A/D cần nối `.bbl` qua `Corpus.tex_files()` (hiện chỉ trả `.tex/.bib`).
 - **Session handoff 08/11:** `docs/SESSION_HANDOFF.md` đã ghi bằng chứng mẫu thật, lỗi root đã sửa và các bước tích hợp còn chờ. Đã commit C `935b3dc`, đối chiếu và nhận main `ea13d45` (v3.9); người dùng tự tạo PR trên trình duyệt sau khi push.
 
-### Việc đang làm — **Phase 2** (sau go/no-go 28/10)
+### Milestone 3 — đề vs hiện trạng
+
+| Hạng mục đề | Đề yêu cầu (rút gọn) | Hiện trạng |
+| --- | --- | --- |
+| Hợp đồng dữ liệu & 21 đặc trưng | Non-LLM / non-pretrained matching engine; hợp đồng dữ liệu thống nhất và feature per-paper | ✅ `src/matching/models.py` (`SCHEMA_VERSION = 1`, `FEATURE_COLUMNS` 21 cột, `CitationContextStats`, `PaperCitationIndex`, `MatchFeatures`, `PredictionRow`, `EvaluationMetrics`); `src/matching/features.py` (`extract_paper_features` dùng `rapidfuzz.process.cdist` + `fuzz.QRatio` Stage-1 blocking `top_k_qratio=20` khi $n > 50$ + 3 query-relative features) |
+| Điều phối pipeline & CLI 5.000 ID | Tách split ở mức bài báo (`train`/`valid`/`test`), giữ negative-only queries, chạy từng dải 5.000 ID hoặc 25k ID | 🟡 `src/matching/pipeline.py` (`MatchingStages`, `run_matching_pipeline`, `inspect_matching_inputs`, tải DOI từ `s2_references.raw.json.gz`, giữ nguyên `groundtrutharxivid` bản gốc trong `PredictionRow` và chuẩn hóa `base_arxiv_id` khi gán label train) + `src/run_matching.py` CLI xong với mock stages (8 tests ✅); chờ PR module B/C/D/E để nối `default_matching_stages()` |
+| Xuất Dataset Hugging Face | 6 bảng Parquet (`papers`, `references`, `elements`, `hierarchy`, `bibtex`, `predictions`) theo dải 5.000 ID + YAML `README.md` | ✅ `src/matching/export_hf.py` (`export_hf_dataset`, `verify_hf_dataset` qua `datasets.load_dataset`, nén ZSTD thành các shard `train-00000-of-0000N.parquet`, xử lý shard 0 dòng bằng `pq.ParquetWriter.close()` tương thích `datasets 5.2.0`); 4 tests pass ✅ |
+| Chạy thật 5.000 ID & nộp HF | Gán nhãn tay $\ge 5$ bài + auto-match $\ge 10\%$, huấn luyện & đánh giá `MRR@5`, đẩy Hugging Face | ⬜ Chờ M1 `data/stats/`, M2 `data/parsed/` và merge PR B/C/D/E để chạy Phase 3A (16–20/11) |
+
+### Việc đang làm — **Phase 2 / chuẩn bị Phase 3 (M3)**
+
+- **M3 (Phase 0 & phần A):** `M3-A0..A3` đã xong và kiểm thử offline (**12 passed** M3, **496 passed** toàn suite); đang chờ PR của B (`cleaner`, `lexical_features`), C (`auto_matcher`, `labelling`), D (`ranker`, `train_ranker`) và E (`hierarchy_features`, `evaluation`, `plots`) trước 16/11; hoàn thiện `README.md` cuối ở Phase 3A sau khi chạy 5.000 ID và có link HF.
 
 - **M2-C:** cấu trúc C đã thử 10 bài thật; chờ B/D thật, A/D nối `.bbl` và xác minh bibliography thiếu, E validate/ghép Book. Danh sách bàn giao trong bảng kiểm chứng; chưa gửi tin nhóm.
 - **Go/no-go:** Pilot 30 ID ✅. V̄ pilot **~1,9** phiên bản/bài → ~**47.500** request `/src/`; chỉ chờ 3 s/arXiv ≈ **~40 h** (+ tải/trích). Wall pilot (27–28/10, gồm S2 429 trước batch) cỡ **~2 h** cho 30 ID → nhân tuyến tính **~7 ngày** wall nếu S2 vẫn nghẽn; với batch + key ổn định kỳ vọng **~2–3 ngày** một máy (R1 — cần đo lại sau vài trăm ID đầu T4.1).
@@ -159,6 +170,20 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | M2-D | `bib_extractor.py`, `dedup.py`, `export_m2.py`, unit tests, nửa sau mục 2 báo cáo | D | 06–12/11 | ⬜ |
 | M2-E | `validate_m2.py`, `arxiv-book/m2/*` (`03_parsing_statistics.ipynb`, `04_parser_performance.ipynb`) | E | 06–13/11 | ⬜ |
 
+### Milestone 3 — Khớp tài liệu tham khảo (Code-Complete < 16/11 · HF cá nhân 20/11 · Poster 27/11)
+
+| Mã | Việc | Owner | Mốc | TT |
+| --- | --- | --- | --- | --- |
+| M3-A0 | `src/matching/__init__.py`, `models.py` (13 schema/21 features), `matching_fixtures.py`, `requirements*.txt` | A (Phúc) | 13/11 | ✅ `test_models_contract_matches_21_features` pass; `.venv` đã cài đủ deps M3 |
+| M3-A1 | `src/matching/features.py` (`extract_paper_features`, Stage-1 blocking $n>50$, 3 query-relative features) | A (Phúc) | < 16/11 | ✅ 3 tests feature & blocking pass offline |
+| M3-A2 | `src/matching/pipeline.py` (`MatchingStages`, S2 raw DOI hints, predictions/eval) + `src/run_matching.py` CLI | A (Phúc) | < 16/11 | ✅ 4 tests pipeline/CLI (`--dry-run`, zero-cand, versioned GT) pass với mock stages |
+| M3-A3 | `src/matching/export_hf.py` (6 bảng ZSTD shards, YAML `README.md`, `verify_hf_dataset`) | A (Phúc) | < 16/11 | ✅ 4 tests export/verify (gồm shard rỗng & E2E CLI `--export-hf --verify-hf`) pass |
+| M3-B | `cleaner.py`, `lexical_features.py` + unit tests | B | < 16/11 | ⬜ Chờ PR |
+| M3-C | `auto_matcher.py`, `labelling.py` + unit tests | C | < 16/11 | ⬜ Chờ PR |
+| M3-D | `ranker.py`, `train_ranker.py` + unit tests | D | < 16/11 | ⬜ Chờ PR |
+| M3-E | `hierarchy_features.py`, `evaluation.py`, `plots.py` + unit tests | E | < 16/11 | ⬜ Chờ PR |
+| M3-3A | Chạy thật `--range-index <0..4> --export-hf --verify-hf`, cập nhật `README.md`, nộp HF & Poster A2 | Cả nhóm | 16–27/11 | ⬜ Chờ đủ dữ liệu M1/M2 & merge B–E |
+
 ---
 
 ## 3. Rủi ro và vấn đề đang mở
@@ -174,6 +199,7 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | R6 | Đề chỉ cho phép mã + `requirements.txt` + `README.md` trong repo nộp. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md` là file làm việc | TB | Gỡ ở T5.3, hoặc hỏi giảng viên trước khi nộp | Leader |
 | R7 | Bảo vệ `main` / quyền thành viên — Phase 0 đóng; kiểm tra lại trước đóng băng nộp | Thấp | Leader rà soát T5.3 | Leader |
 | R9 | Mẫu 10 bài chỉ dùng hook truyền nguyên văn; 6 phiên bản mẫu thiếu bibliography trong subset; `.bbl` chưa đi qua Corpus và không có trong subset; B/D thật chưa tích hợp | TB | B/A nối hooks thật, A/D xác minh nguồn bibliography và nối `.bbl`, C/E đối chiếu lại mẫu trước khi chốt M2-C | C, A, B, D, E |
+| R10 | M3: Các module B/C/D/E chưa merge nên `default_matching_stages()` mới kiểm thử qua `MatchingStages` giả; `datasets 5.2.0` lỗi `BatchSize must be greater than 0` nếu đọc file Parquet rỗng có 1 row group 0 dòng | TB | Giữ chữ ký khớp `MatchingStages`; `export_hf.py` ghi shard rỗng bằng `pq.ParquetWriter.close()` (0 row groups) và `verify_hf_dataset` luôn kiểm tra schema PyArrow trước | A, B, C, D, E |
 
 ---
 
@@ -183,6 +209,7 @@ Chỉ ghi sự kiện **đưa được vào Jupyter Book**: cách thu thập, c�
 
 | Ngày | Sự kiện |
 | --- | --- |
+| 13/11 | **Cài đặt khung điều phối, bộ trích xuất 21 đặc trưng (`rapidfuzz`/`scikit-learn`/`lightgbm`) và công cụ đóng gói Hugging Face `datasets` cho Milestone 3 (`src/matching/`).** Thiết kế vector đặc trưng 21 chiều kết hợp Stage-1 blocking bằng `rapidfuzz.process.cdist` (`fuzz.QRatio`, giữ `top_k_qratio=20` cùng neo arXiv ID / DOI / họ tác giả đầu khi bài có $> 50$ tham khảo ứng viên) và 3 đặc trưng tương đối trong từng query (`title_sim_rank_in_query`, `title_sim_diff_from_max`, `title_sim_margin_to_top2`). Bộ xuất HF (`export_hf.py`) lọc 6 bảng Parquet (`papers`, `references`, `elements`, `hierarchy`, `bibtex`, `predictions`) theo `id_ranges.csv`, nén ZSTD theo shard `< max_shard_mb` (`train-00000-of-0000N.parquet`) kèm YAML `README.md`; phát hiện hạn chế `datasets 5.2.0` báo `ArrowInvalid: BatchSize must be greater than 0` khi gặp file Parquet 0 dòng có 1 row group nên đã xử lý ghi shard rỗng bằng `pq.ParquetWriter.close()` (0 row groups) và bỏ qua `datasets.load_dataset` khi bảng 0 dòng sau khi đã xác thực schema PyArrow. Kiểm thử toàn repo đạt **496 passed (47,99 s)** (gồm **12 passed** offline M3 phần A), `ruff` sạch 100%. |
 | 12/11 | **`v3.14.0 Proportional Bandwidth Breather & Dynamic Wire-Speed Streaming` (`--max-stream-mbps`).** Khắc phục triệt để hiện tượng bão 429 và cooldown liên hoàn khi dồn bài nặng về cuối: (1) Thay thế hoàn toàn chiến lược dồn toa bằng **In-Place Resolution** kết hợp **Proportional Bandwidth Breather** (`_compute_proportional_breather`): các gói $\ge 2\text{ MiB}$ được tự động điều chỉnh thời gian nghỉ socket hồi phục tỷ lệ thuận với dung lượng thực tế theo công thức $S / 4.0\text{ MiB/s}$ (sàn $\ge 3.05\text{s}$, trần $12.0\text{s}$, tự động xoay session TCP khi gói $\ge 30\text{ MiB}$), bảo đảm nạp đầy 100% Token Bucket của Fastly Edge trước request tiếp theo và tận dụng các bài nhẹ phía sau làm vùng tản nhiệt tự nhiên; (2) **Hỗ trợ Wire-Speed Streaming linh hoạt**: bổ sung đối số CLI `--max-stream-mbps` và env `CRAWLER_MAX_STREAM_MBPS` cho phép kéo 12.0–18.0 MiB/s trên hạ tầng Cloud/Colab, rút ngắn 65–75% thời gian download bài nặng trong benchmark (`download_seconds` giảm từ 15s xuống 2.5s) mà vẫn an toàn tuyệt đối 0% 429. **400 passed** toàn suite, `ruff` sạch 100%. |
 | 11/11 | **`v3.13.0 Kaggle Snapshot Metadata Discovery & Two-Stage Decoupled Protocol` tối ưu hóa cào trên 1 máy hoàn toàn miễn phí.** Dựa trên định hướng từ đề bài (*'OAI-PMH và Kaggle chỉ là hộp công cụ'*): (1) **Kaggle Metadata Snapshot Parser & Version Partitioning** (`src/crawler/snapshot.py`, cờ `--snapshot`): đọc streaming tệp `arxiv-metadata-oai-snapshot.json` (tải miễn phí từ Kaggle), lọc offline 25.000 ID trong <60s, ghi `paper.json` theo chuẩn `PaperMeta` giúp bỏ qua 100% cuộc gọi Atom API qua mạng, phân loại bài 1 version ($v1$, chiếm ~74%) và bài đa phiên bản ($v2..vN$, chiếm ~26%); (2) **Quy trình 2 giai đoạn (Two-Stage Decoupled Protocol)**: Stage 1 cào thuần source arXiv với `--skip-s2` tập trung toàn bộ băng thông và tránh đứt kết nối, Stage 2 làm giàu độc lập siêu dữ liệu trích dẫn qua `--s2-only --enable-bib-fallback` theo lô 25 bài. **398 passed**, `ruff` sạch 100%. |
 | 10/11 | **`v3.12.0 Dual-Engine Reference Fallback, Batch Bisection & OAI-PMH History Recovery (Khắc phục triệt để S2 404/413 & Thiếu ngày version trung gian)`.** Bổ sung trích dẫn dự phòng từ `.bib/.bbl` (`--enable-bib-fallback`), hạ batch S2 mặc định xuống 25 kèm chia đôi lô (Bisection) đệ quy khi gặp 413/5xx, tích hợp khôi phục ngày version qua OAI-PMH `arXivRaw` (`--enable-oai-dates`), thêm script `enrich_references.py` và `audit_corpus.py`. Bảo toàn 100% schema và backup cũ. |
