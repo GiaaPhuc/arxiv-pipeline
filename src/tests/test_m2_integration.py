@@ -122,3 +122,76 @@ def test_coverage_crosses_process_pool(tmp_path):
     assert run_parse.main(["--data-dir", str(tmp_path), "--workers", "2"]) == 0
     with (tmp_path / "stats/m2_papers_stats.csv").open() as handle:
         assert next(csv.DictReader(handle))["title_before"] == "1"
+
+
+def test_empty_inline_math_does_not_leak_thebibliography_into_elements(tmp_path):
+    _paper(tmp_path, "2408.11045", {1: "k1"})
+    tex_dir = tmp_path / "papers/2408-11045/v1/tex"
+    (tex_dir / "refs.bib").unlink()
+    (tex_dir / "main.tex").write_text(
+        "\\documentclass{article}\\begin{document}\n"
+        "The following inequality $ $:\n"
+        "\\begin{equation}x=1\\end{equation}\n"
+        "Proof text \\cite{k1}.\n"
+        "\\begin{thebibliography}{9}\n"
+        "\\bibitem{k1} S.\\ Weinberg, \\href{}{\\textit{Cosmology} (1972)}.\n"
+        "\\end{thebibliography}\n"
+        "\\end{document}\n"
+    )
+    assert run_parse.main(["--data-dir", str(tmp_path), "--workers", "1"]) == 0
+    assert validate(tmp_path) == []
+    elems = pq.read_table(tmp_path / "parsed/elements").to_pylist()
+    assert not any("bibitem" in row["content"] for row in elems)
+    bibs = pq.read_table(tmp_path / "parsed/bibtex").to_pylist()
+    assert len(bibs) == 1 and "Cosmology" in bibs[0]["title"]
+
+
+def test_default_stages_filters_uncited_bib_and_handles_nocite_all(tmp_path):
+    _paper(tmp_path, "2408.11045", {1: "CitedKey"})
+    tex_dir1 = tmp_path / "papers/2408-11045/v1/tex"
+    (tex_dir1 / "main.tex").write_text(
+        "\\documentclass{article}\\begin{document}\n"
+        "See \\cite{citedkey}.\n"
+        "\\bibliography{refs}\n"
+        "\\end{document}\n"
+    )
+    (tex_dir1 / "refs.bib").write_text(
+        "@article{UncitedBroken, author={X}, badfield}\n"
+        "@article{, title={NoKey}}\n"
+        "@article{CitedKey, author={Doe, Jane}, title={Kept Paper}, year={2023}}\n"
+        "@article{UncitedValid, author={Smith}, title={Ignored Paper}, year={2022}}\n"
+    )
+
+    _paper(tmp_path, "2408.11046", {1: "a"})
+    tex_dir2 = tmp_path / "papers/2408-11046/v1/tex"
+    (tex_dir2 / "main.tex").write_text(
+        "\\documentclass{article}\\begin{document}\n"
+        "All refs \\nocite{*}.\n"
+        "\\bibliography{refs}\n"
+        "\\end{document}\n"
+    )
+    (tex_dir2 / "refs.bib").write_text(
+        "@article{a, author={Alpha}, title={First Entry}, year={2021}}\n"
+        "@article{b, author={Beta}, title={Second Entry}, year={2022}}\n"
+    )
+
+    assert run_parse.main(["--data-dir", str(tmp_path), "--workers", "1"]) == 0
+    assert validate(tmp_path) == []
+    bibs = pq.read_table(tmp_path / "parsed/bibtex").to_pylist()
+    by_paper = {}
+    for row in bibs:
+        by_paper.setdefault(row["arxivid"], []).append(row["title"])
+    assert by_paper["2408.11045"] == ["Kept Paper"]
+    assert sorted(by_paper["2408.11046"]) == ["First Entry", "Second Entry"]
+
+
+def test_totally_broken_bib_logs_to_errors_jsonl(tmp_path):
+    import json
+
+    _paper(tmp_path, "2408.11045", {1: "k"})
+    (tmp_path / "papers/2408-11045/v1/tex/refs.bib").write_text("@article{broken")
+    code = run_parse.main(["--data-dir", str(tmp_path), "--workers", "1"])
+    assert code == 0
+    errors = (tmp_path / "parsed/_errors.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(errors) == 1
+    assert json.loads(errors[0])["arxivid"] == "2408.11045"

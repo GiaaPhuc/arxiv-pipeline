@@ -70,7 +70,14 @@ def _math_body(value: str, block: bool) -> str:
     value = value.strip()
     if block:
         value = LABEL.sub("", value).strip()
+        if value and (len(value) - len(value.rstrip("\\"))) % 2 == 1:
+            value += " "
         return "\\begin{equation}" + value + "\\end{equation}"
+    if not value:
+        return ""
+    # Preserve trailing control-space `\ ` so `$x\ $` does not turn into `$x\$`.
+    if (len(value) - len(value.rstrip("\\"))) % 2 == 1:
+        value += " "
     return "$" + value + "$"
 
 
@@ -110,7 +117,8 @@ def normalize_math(text: str) -> str:
             m = VERB.match(text, i)
             if m and m.end() < len(text):
                 marker = text[m.end()]
-                end = text.find(marker, m.end() + 1)
+                line_end = text.find("\n", m.end() + 1)
+                end = text.find(marker, m.end() + 1, line_end if line_end >= 0 else len(text))
                 if end >= 0:
                     out.append(text[i : end + 1])
                     i = end + 1

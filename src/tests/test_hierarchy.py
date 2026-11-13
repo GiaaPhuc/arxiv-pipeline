@@ -388,3 +388,32 @@ def test_real_c_functions_plug_into_pipeline_with_fake_b_d(tmp_path):
     assert len(seen["blocks"]) == 1
     assert not any("bibitem" in row.content for row in result.elements)
     assert any(row.content == "Hello." for row in result.elements)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        r"\begin{Verbatim}df$root\end{Verbatim}",
+        "\\verb#unclosed\n",
+        r"Unclosed \( x + 1 ",
+        r"Unclosed $ y ",
+        r"\begin{equation}x=1",
+    ],
+)
+def test_unclosed_constructs_and_fancyvrb_do_not_swallow_bibliography(prefix):
+    nodes, blocks = build(prefix + r"\begin{thebibliography}{1}\bibitem{k}REF\end{thebibliography}")
+    assert len(blocks) == 1 and r"\bibitem{k}" in blocks[0]
+    assert all("bibitem" not in n.content and "thebibliography" not in n.content for n in nodes)
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
+        r"\section{\label{sec:References}References}",
+        r"\subsubsection{References.\label{bibby}}",
+    ],
+)
+def test_reference_headings_with_labels_or_punctuation_are_excluded(heading):
+    nodes, blocks = build(heading + "\nRef item.\n")
+    assert all(n.kind != "heading" for n in nodes)
+    assert blocks == ["Ref item."]

@@ -10,12 +10,13 @@ Collect LaTeX sources and metadata now (Milestone 1); parse and match references
 
 [![CI](https://github.com/GiaaPhuc/arxiv-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/GiaaPhuc/arxiv-pipeline/actions/workflows/ci.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776ab?logo=python&logoColor=white)
-![Milestone](https://img.shields.io/badge/milestone-1%20(crawl)-informational)
+![Milestone](https://img.shields.io/badge/milestone-2%20(parsing%20%26%20dedup)-informational)
 
 <br>
 
 [Quick start](#quick-start) ·
 [Run](#running-the-crawler) ·
+[Milestone 2](#milestone-2--parsing-normalization--dedup) ·
 [Colab](#google-colab) ·
 [Layout](#source-layout) ·
 [Contributing](CONTRIBUTING.md)
@@ -26,7 +27,7 @@ Collect LaTeX sources and metadata now (Milestone 1); parse and match references
 
 ## Overview
 
-This repo implements **Milestone 1** under `src/crawler/`. For each assigned arXiv ID it:
+This repo implements **Milestone 1** under `src/crawler/`, **Milestone 2** under `src/parsing/`, and **Milestone 3** scaffolding under `src/matching/`. For Milestone 1, for each assigned arXiv ID it:
 
 | Step | What happens |
 | --- | --- |
@@ -236,6 +237,40 @@ Detailed guide (Vietnamese): [`docs/huong-dan-crawl-colab-vi.md`](docs/huong-dan
 
 ---
 
+## Milestone 2 — Parsing, Normalization & Dedup
+
+Milestone 2 (`src/parsing/`) parses extracted TeX/BibTeX sources across every paper version into deduplicated structural elements, versioned containment hierarchies, and canonical references.
+
+### Running the parser
+
+```bash
+# Dry-run paper count
+python src/run_parse.py --data-dir data --dry-run
+
+# Pilot (first 100 papers)
+python src/run_parse.py --data-dir data --limit 100 --workers 2
+
+# Full local run (or resume an interrupted/partial run)
+python src/run_parse.py --data-dir data --workers 4 --batch-size 500 --resume
+```
+
+- Exit codes: `0` finished (check `data/parsed/_errors.jsonl` if individual papers failed), `2` invalid CLI/setup, `130` interrupted (`--resume` skips papers in `_done.txt` and retries previously failed papers).
+- Colab workflow: [`src/colab_parse.ipynb`](src/colab_parse.ipynb) runs a 100-paper pilot (`--workers 1 --limit 100`), resumes the remaining corpus (`--resume`), and runs `src/validate_m2.py`.
+
+### Validating & inspecting outputs
+
+```bash
+# Full audit (Parquet invariants + M1 Corpus coverage + stats CSV/JSON)
+python src/validate_m2.py --data-dir data
+
+# Parquet-only audit without checking M1 raw source directories
+python src/validate_m2.py --data-dir data --skip-corpus-check
+```
+
+Outputs are written under:
+- `data/parsed/` — ZSTD-compressed Parquet shards for `elements/`, `hierarchy/`, `bibtex/`, plus `_done.txt` and optional `_errors.jsonl`.
+- `data/stats/` — `m2_papers_stats.csv`, `m2_elements_kind.csv`, `m2_summary.json`, and `m2_performance.json`.
+
 ## Source layout
 
 <details open>
@@ -255,11 +290,29 @@ src/
 │   ├── metrics.py      timing and resource use
 │   ├── pipeline.py     orchestration
 │   └── export.py       tables and stats
+├── parsing/              Milestone 2 parser, normalizer & dedup modules
+│   ├── models.py
+│   ├── gathering.py
+│   ├── hierarchy.py
+│   ├── cleaner.py
+│   ├── math_normalizer.py
+│   ├── sentence_splitter.py
+│   ├── bib_extractor.py
+│   ├── dedup.py
+│   ├── export_m2.py
+│   └── pipeline.py
+├── matching/             Milestone 3 feature extraction, matching & HF export
 ├── corpus.py             read API (Milestones 2–3)
+├── audit_corpus.py
+├── enrich_references.py
 ├── validate_corpus.py
+├── validate_m2.py
 ├── export_data.py
 ├── run_crawl.py
+├── run_parse.py
+├── run_matching.py
 ├── colab_run.ipynb
+├── colab_parse.ipynb
 └── tests/                pytest, mocked HTTP only
 ```
 

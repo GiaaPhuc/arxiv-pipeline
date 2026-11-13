@@ -49,30 +49,51 @@ def _conflict(a: RawBibEntry, b: RawBibEntry) -> bool:
     return any(x and y and x != y for x, y in [(_doi(a.doi), _doi(b.doi)), (_arxiv(a), _arxiv(b))])
 
 
-def _match(a: RawBibEntry, b: RawBibEntry) -> bool:
-    if _conflict(a, b):
-        return False
-    if (_doi(a.doi) and _doi(a.doi) == _doi(b.doi)) or (_arxiv(a) and _arxiv(a) == _arxiv(b)):
-        return True
-    ta, tb = _norm(a.title), _norm(b.title)
-    evidence = (a.year is not None and a.year == b.year) or (
-        _surname(a) and _surname(a) == _surname(b)
-    )
-    if (
-        evidence
-        and min(len(ta), len(tb)) >= 12
-        and 2 * min(len(ta), len(tb)) / (len(ta) + len(tb)) >= 0.85
-        and SequenceMatcher(None, ta, tb).ratio() >= 0.85
+def _cluster_match(
+    i: int,
+    j: int,
+    dois: list[str],
+    arxivs: list[str],
+    titles: list[str],
+    char_counts: list[Counter[str]],
+    surnames: list[str],
+    years: list[int | None],
+    versions: list[int],
+    ckeys: list[str],
+) -> bool:
+    if (dois[i] and dois[j] and dois[i] != dois[j]) or (
+        arxivs[i] and arxivs[j] and arxivs[i] != arxivs[j]
     ):
+        return False
+    if (dois[i] and dois[i] == dois[j]) or (arxivs[i] and arxivs[i] == arxivs[j]):
         return True
-    # Same key is weak evidence; do not merge empty records or changed numeric slots.
-    return bool(
-        a.version != b.version
-        and a.citation_key == b.citation_key
-        and len(ta) >= 12
-        and ta == tb
-        and not (a.year and b.year and a.year != b.year)
-    )
+    ta, tb = titles[i], titles[j]
+    la, lb = len(ta), len(tb)
+    if min(la, lb) < 12:
+        return False
+    yi, yj = years[i], years[j]
+    evidence = (yi is not None and yi == yj) or (bool(surnames[i]) and surnames[i] == surnames[j])
+    if ta == tb:
+        return evidence or (
+            versions[i] != versions[j] and ckeys[i] == ckeys[j] and not (yi and yj and yi != yj)
+        )
+    if not evidence:
+        return False
+    total = la + lb
+    if 2 * min(la, lb) / total < 0.85:
+        return False
+    # Mathematical upper bound identical to difflib.SequenceMatcher.quick_ratio()
+    ca, cb = char_counts[i], char_counts[j]
+    if len(ca) > len(cb):
+        ca, cb = cb, ca
+    common = 0
+    for ch, count in ca.items():
+        if ch in cb:
+            other = cb[ch]
+            common += count if count < other else other
+    if 2 * common / total < 0.85:
+        return False
+    return SequenceMatcher(None, ta, tb).ratio() >= 0.85
 
 
 def deduplicate_references(
@@ -99,9 +120,22 @@ def deduplicate_references(
             for field in ("title", "authors", "year", "doi", "journal", "url"):
                 if not getattr(kept, field):
                     setattr(kept, field, deepcopy(getattr(entry, field)))
-    entries = sorted(locations.values(), key=lambda e: (e.version, e.citation_key, repr(e)))
+    entries = sorted(locations.values(), key=lambda e: (e.version, e.citation_key))
     parents = list(range(len(entries)))
     members = {i: [i] for i in parents}
+
+    dois = [_doi(e.doi) for e in entries]
+    arxivs = [_arxiv(e) for e in entries]
+    titles = [_norm(e.title) for e in entries]
+    char_counts = [Counter(t) if len(t) >= 12 else Counter() for t in titles]
+    surnames = [_surname(e) for e in entries]
+    years = [e.year for e in entries]
+    versions = [e.version for e in entries]
+    ckeys = [e.citation_key for e in entries]
+    year_counts = Counter(y for y in years if y)
+    surname_counts = Counter(s for s in surnames if s)
+    cluster_doi = list(dois)
+    cluster_arxiv = list(arxivs)
 
     def root(i):
         while parents[i] != i:
@@ -109,33 +143,55 @@ def deduplicate_references(
             i = parents[i]
         return i
 
-    blocks = defaultdict(set)
-    for i, a in enumerate(entries):
-        keys = [
-            (name, value)
-            for name, value in (
-                ("doi", _doi(a.doi)),
-                ("arxiv", _arxiv(a)),
-                ("year", a.year),
-                ("surname", _surname(a)),
-                ("key", a.citation_key),
-            )
-            if value
-        ]
-        candidates = set().union(*(blocks[key] for key in keys))
+    blocks = defaultdict(list)
+    for i in range(len(entries)):
+        ta = titles[i]
+        keys: list[tuple[object, ...]] = []
+        if dois[i]:
+            keys.append(("doi", dois[i]))
+        if arxivs[i]:
+            keys.append(("arxiv", arxivs[i]))
+        if len(ta) >= 12:
+            keys.append(("title", ta))
+        if ckeys[i]:
+            keys.append(("key", ckeys[i]))
+        if (y := years[i]) is not None:
+            if year_counts[y] <= 250:
+                keys.append(("year", y))
+            elif len(ta) >= 12:
+                words = [w for w in ta.split() if len(w) >= 5][:5]
+                for w in words:
+                    keys.append(("yr_w", y, w))
+                keys.append(("yr_pre", y, ta[:5]))
+                keys.append(("yr_suf", y, ta[-5:]))
+        if sn := surnames[i]:
+            if surname_counts[sn] <= 250:
+                keys.append(("surname", sn))
+            elif len(ta) >= 12:
+                keys.append(("sn_pre", sn, ta[:4]))
+                keys.append(("sn_suf", sn, ta[-4:]))
+        seen: set[int] = set()
         for key in keys:
-            blocks[key].add(i)
-        for j in sorted(candidates):
-            x, y = root(i), root(j)
-            if (
-                x != y
-                and _match(a, entries[j])
-                and not any(
-                    _conflict(entries[u], entries[v]) for u in members[x] for v in members[y]
-                )
+            seen.update(blocks[key])
+            blocks[key].append(i)
+        x = root(i)
+        dx, ax = cluster_doi[x], cluster_arxiv[x]
+        for j in sorted(seen):
+            y = root(j)
+            if x == y:
+                continue
+            dy, ay = cluster_doi[y], cluster_arxiv[y]
+            if (dx and dy and dx != dy) or (ax and ay and ax != ay):
+                continue
+            if _cluster_match(
+                i, j, dois, arxivs, titles, char_counts, surnames, years, versions, ckeys
             ):
                 parents[y] = x
                 members[x].extend(members.pop(y))
+                if not dx and dy:
+                    dx = cluster_doi[x] = dy
+                if not ax and ay:
+                    ax = cluster_arxiv[x] = ay
     clusters = sorted((sorted(ids) for ids in members.values()), key=lambda ids: ids[0])
     rows, rename, used = [], {}, set()
     reserved = {e.citation_key for e in entries}
@@ -197,6 +253,37 @@ def _acyclic(edges: dict[str, set[str]]) -> None:
         raise ValueError("Hierarchy cycle, possibly introduced by exact-content pooling")
 
 
+_LITERAL_SPAN_RE = re.compile(
+    r"\\begin\s*\{\s*(?:verbatim|lstlisting|minted)\*?\s*\}.*?\\end\s*\{\s*(?:verbatim|lstlisting|minted)\*?\s*\}"
+    r"|\\verb\*?([^A-Za-z0-9\s]).*?\1",
+    re.DOTALL,
+)
+_CITE_RE = re.compile(
+    r"(\\(?:cite[tp]?|citeal[pt]|citeauthor|citeyear|parencite|textcite|autocite)\*?"
+    r"(?:\s*\[[^\]]*\]){0,2})\s*\{([^{}]*)\}"
+)
+
+
+def _rewrite_citations(text: str, version: int, cite_rename_map: dict[tuple[int, str], str]) -> str:
+    def rewrite(match: re.Match[str]) -> str:
+        raw_keys = [k.strip() for k in match[2].split(",") if k.strip()]
+        if not raw_keys:
+            return match[0]
+        keys = [cite_rename_map.get((version, k), k) for k in raw_keys]
+        return match[1] + "{" + ",".join(dict.fromkeys(keys)) + "}"
+
+    out: list[str] = []
+    pos = 0
+    for lit in _LITERAL_SPAN_RE.finditer(text):
+        if lit.start() > pos:
+            out.append(_CITE_RE.sub(rewrite, text[pos : lit.start()]))
+        out.append(lit.group(0))
+        pos = lit.end()
+    if pos < len(text):
+        out.append(_CITE_RE.sub(rewrite, text[pos:]))
+    return "".join(out)
+
+
 def rewrite_citations_and_dedup_elements(
     arxiv_id: str,
     version_trees: dict[int, list[RawNode]],
@@ -231,20 +318,7 @@ def rewrite_citations_and_dedup_elements(
                 children[node.parent_node_id].append(node)
         _acyclic(original)
         for node in sorted(nodes, key=lambda n: n.node_id):
-
-            def rewrite(match, version=version):
-                keys = [
-                    cite_rename_map.get((version, k.strip()), k.strip())
-                    for k in match[2].split(",")
-                ]
-                return match[1] + "{" + ",".join(dict.fromkeys(keys)) + "}"
-
-            content = re.sub(
-                r"(\\(?:cite[tp]?|citeal[pt]|citeauthor|citeyear|parencite|textcite|autocite)\*?"
-                r"(?:\s*\[[^\]]*\]){0,2})\s*\{([^{}]*)\}",
-                rewrite,
-                node.content,
-            )
+            content = _rewrite_citations(node.content, version, cite_rename_map)
             if node.kind == "document":
                 if node is not roots[0]:
                     raise ValueError("Nested document node")

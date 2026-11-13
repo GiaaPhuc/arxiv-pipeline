@@ -175,3 +175,49 @@ def test_surname_and_blank_author():
     assert _surname(RawBibEntry(1, "k", "misc", authors=["A. Author, B. Coauthor"])) == "author"
     assert _surname(RawBibEntry(1, "k", "misc", authors=["Vaswani, Ashish"])) == "vaswani"
     assert _surname(RawBibEntry(1, "k", "misc", authors=["  "])) == ""
+
+
+def test_trailing_comma_and_literal_spans_during_cite_rewrite():
+    nodes = [
+        RawNode(0, None, "document", ""),
+        RawNode(
+            1,
+            0,
+            "sentence",
+            r"See \cite{old,} and \verb|\cite{old}| and \begin{verbatim}\cite{old}\end{verbatim}.",
+        ),
+    ]
+    elements, _ = rewrite_citations_and_dedup_elements(ID, {1: nodes}, {(1, "old"): "new"})
+    assert elements[-1].content == (
+        r"See \cite{new} and \verb|\cite{old}| and \begin{verbatim}\cite{old}\end{verbatim}."
+    )
+
+
+def test_large_same_year_bucket_sharding_keeps_precision():
+    def word(seed: int) -> str:
+        return "".join(chr(97 + ((seed // (13**k)) % 26)) for k in range(6))
+
+    entries = [
+        RawBibEntry(
+            1,
+            f"k{i}",
+            "article",
+            f"{word(i * 19 + 3)} {word(i * 41 + 7)} {word(i * 73 + 11)}",
+            ["Smith"],
+            2022,
+        )
+        for i in range(260)
+    ]
+    entries.append(
+        RawBibEntry(
+            2,
+            "k42_v2",
+            "article",
+            entries[42].title,
+            ["Smith"],
+            2022,
+        )
+    )
+    rows, mapping = deduplicate_references(ID, entries)
+    assert len(rows) == 260
+    assert mapping[(1, "k42")] == mapping[(2, "k42_v2")]

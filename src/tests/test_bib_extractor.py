@@ -198,3 +198,105 @@ def test_stray_outer_brace_before_entry_keeps_percent_and_quotes():
     assert entry.title == "50% growth"
     assert entry.url == "https://example.org/a%20b"
     assert entry.year == 2020
+
+
+def test_crlf_trailing_comma_and_control_entry():
+    bib = (
+        "@CONTROL{REVTEX42Control}\r\n"
+        "@article{k,\r\n"
+        "\tauthor={Doe, Jane},\r\n"
+        "\ttitle={CRLF Entry},\r\n"
+        "\tyear={2024},\r\n"
+        "\tpages={1--10},\r\n"
+        "}\r\n"
+    )
+    entries = parse_bib_file(bib, 1)
+    assert len(entries) == 1
+    assert entries[0].citation_key == "k"
+    assert entries[0].title == "CRLF Entry"
+
+
+def test_revtex_spaced_bibinfo_and_acmart_bibfield_items():
+    revtex = (
+        r"\bibitem[{\citenamefont{Jankowski}}]{j24} "
+        r"\bibfield {author} {\bibinfo {author} {\bibfnamefont {W.~J.}\ "
+        r"\bibnamefont {Jankowski}} and \bibinfo {author} {\bibnamefont {Slager}}} "
+        r"\bibfield {title} {\bibinfo {title} {Chiral {B}ands}} "
+        r"\bibinfo  {year} {2024}."
+    )
+    acmart = (
+        r"\bibitem[Abadi(2016)]{tf} "
+        r"\bibfield{author}{\bibinfo{person}{Mart\'in Abadi}, "
+        r"\bibinfo{person}{Paul Barham}.} \bibinfo{year}{2016}. "
+        r"\newblock \showarticletitle{TensorFlow System}. "
+        r"In \bibinfo{booktitle}{\emph{Proc. OSDI}}, 265--283."
+    )
+    r_entry, a_entry = parse_bibitems([revtex, acmart], 1)
+    assert r_entry.title == "Chiral Bands" and r_entry.year == 2024
+    assert len(r_entry.authors) == 2
+    assert a_entry.title == "TensorFlow System" and a_entry.year == 2016
+    assert a_entry.authors == [r"Mart\'in Abadi", "Paul Barham"]
+    assert a_entry.journal == "Proc. OSDI"
+
+
+@pytest.mark.parametrize(
+    "item,expected_title",
+    [
+        (
+            r"\bibitem{a} S.\ Weinberg, \href{}{\textit{Gravitation and Cosmology} (1972)}.",
+            "Gravitation and Cosmology",
+        ),
+        (
+            r"\bibitem{b} {\sc R. Backlund}, \href{https://x.org}{\emph{Sur les z\'eros}}, 1914.",
+            r"Sur les z\'eros",
+        ),
+        (
+            r"\bibitem{c} M.~Cowling, {\emph{Spectral multipliers}}, Studia Math. 1994.",
+            "Spectral multipliers",
+        ),
+        (
+            r"\bibitem{d} Armand Borel and Jacques Tits, "
+            r"{\em Compl\'ements \`a ``{G}roupes''}, 1972.",
+            r"Compl\'ements \`a ``Groupes''",
+        ),
+        (
+            r"\bibitem{e} Mulder, J. (2016). Editors' intro {``{B}ayes factors.''} "
+            r"\emph{Journal of Mathematical Psychology}, 72.",
+            "Editors' intro ``Bayes factors.''",
+        ),
+    ],
+)
+def test_wrapped_and_nested_bibitem_formats_do_not_fail(item, expected_title):
+    entry = parse_bibitems([item], 1)[0]
+    assert expected_title in entry.title
+    assert entry.authors and "https://" not in entry.authors[0]
+
+
+def test_allowed_keys_filters_case_insensitively_and_expands_string():
+    bib = (
+        "@string{jname = {Nature}}\n"
+        "@article{UncitedBroken, author={X}, badfield}\n"
+        "@inproceedings{KeyOne, author={Doe, Jane}, booktitle=jname, year={2023}}\n"
+        "@article{KeyTwo, author={Smith}, title={Skip}, year={2022}}\n"
+    )
+    entries = parse_bib_file(bib, 1, allowed_keys={"keyone"})
+    assert [e.citation_key for e in entries] == ["KeyOne"]
+    assert entries[0].journal == "Nature"
+    assert entries[0].year == 2023
+
+
+def test_non_strict_recovers_malformed_entries_and_fails_when_all_broken():
+    bib = (
+        "@comment{unclosed\n"
+        "@article{k1, author={Doe}, title={Valid}, year={2021}}\n"
+        "@article{badmissingcomma author={X}}\n"
+        "@article{, title={NoKey}}\n"
+        "@article{stubentry}\n"
+        "@article{k_badfield, title={NoSep} bad}\n"
+        "@article{k2, author={Lee}, title={AfterErrors}, year={2022}}\n"
+    )
+    entries = parse_bib_file(bib, 1, strict=False)
+    assert [e.citation_key for e in entries] == ["k1", "k2"]
+    assert entries[0].title == "Valid" and entries[1].year == 2022
+    with pytest.raises(ValueError):
+        parse_bib_file("@article{broken", 1, strict=False)

@@ -20,8 +20,11 @@ from .models import CompilationUnit
 logger = logging.getLogger(__name__)
 MAX_INCLUDE_DEPTH = 15
 _CONTROL = re.compile(r"\\([A-Za-z@]+|[^\r\n])")
-_LITERAL_ENVS = {"verbatim", "verbatim*", "lstlisting"}
+_LITERAL_ENVS = {"verbatim", "verbatim*", "Verbatim", "Verbatim*", "lstlisting", "minted"}
 _INCLUDES = {"input", "include", "subfile", "import"}
+_MATH_STOP_BOUNDARY = re.compile(
+    r"\\(?:begin\s*\{(?:document|thebibliography)\}|end\s*\{document\}|bibitem\b)"
+)
 
 
 def _group(text: str, pos: int, opening: str = "{") -> tuple[str, int] | None:
@@ -63,8 +66,10 @@ def _literal_end(text: str, cmd: _Command) -> int | None:
     if cmd.name == "verb":
         pos = cmd.end + (text[cmd.end : cmd.end + 1] == "*")
         if pos < len(text) and not text[pos].isspace():
-            end = text.find(text[pos], pos + 1)
-            return end + 1 if end >= 0 else len(text)
+            line_end = text.find("\n", pos + 1)
+            limit = line_end if line_end >= 0 else len(text)
+            end = text.find(text[pos], pos + 1, limit)
+            return end + 1 if end >= 0 else pos + 1
     if cmd.name == "begin" and cmd.arg in _LITERAL_ENVS:
         end = re.search(r"\\end\s*\{" + re.escape(cmd.arg) + r"\}", text[cmd.end :])
         return cmd.end + end.end() if end else len(text)
@@ -84,14 +89,40 @@ def _command_at(text: str, pos: int) -> _Command | None:
     return _Command(name, pos, arg[1] if arg else end, arg[0] if arg else "")
 
 
+def _math_scan_end(text: str, start: int, delimiter: str, *, single_para: bool) -> int | None:
+    """Find closing math delimiter without crossing structural/paragraph boundaries."""
+    scan = start
+    while scan < len(text):
+        ch = text[scan]
+        if ch == "\\":
+            if delimiter in {r"\)", r"\]"} and text.startswith(delimiter, scan):
+                return scan + len(delimiter)
+            if _MATH_STOP_BOUNDARY.match(text, scan):
+                return None
+            scan += 2
+            continue
+        if single_para and ch == "\n":
+            nxt = scan + 1
+            while nxt < len(text) and text[nxt] in " \t\r":
+                nxt += 1
+            if nxt < len(text) and text[nxt] == "\n":
+                return None
+        if delimiter in {"$", "$$"} and text.startswith(delimiter, scan):
+            return scan + len(delimiter)
+        scan += 1
+    return None
+
+
 def _commands(text: str) -> Iterator[_Command]:
     """Yield commands outside literal regions, URLs and escaped control symbols."""
     pos = 0
     while pos < len(text):
         if text[pos] == "$":
             delimiter = "$$" if text.startswith("$$", pos) else "$"
-            match = re.search(r"(?<!\\)" + re.escape(delimiter), text[pos + len(delimiter) :])
-            end = pos + len(delimiter) + match.end() if match else len(text)
+            end = _math_scan_end(text, pos + len(delimiter), delimiter, single_para=False)
+            if end is None:
+                pos += len(delimiter)
+                continue
             yield _Command("block_math" if delimiter == "$$" else "inline_math", pos, end)
             pos = end
             continue
@@ -104,8 +135,10 @@ def _commands(text: str) -> Iterator[_Command]:
             continue
         if cmd.name in {"[", "("}:
             delimiter = r"\]" if cmd.name == "[" else r"\)"
-            end = text.find(delimiter, cmd.end)
-            end = end + 2 if end >= 0 else len(text)
+            end = _math_scan_end(text, cmd.end, delimiter, single_para=False)
+            if end is None:
+                pos = cmd.end
+                continue
             yield _Command("block_math" if cmd.name == "[" else "inline_math", pos, end)
             pos = end
             continue

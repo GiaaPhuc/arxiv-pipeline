@@ -283,3 +283,17 @@ def test_uppercase_extension_and_safe_parent_resolution():
     )
     assert unit.merged_tex.endswith("YES")
     assert unit.used_tex_files == 2
+
+
+def test_minted_and_double_backslash_before_closing_dollar():
+    from parsing.gathering import _commands
+
+    names = [
+        cmd.name
+        for cmd in _commands(
+            r"\begin{minted}{python}\section{Ignore}\end{minted} $a\\$ \section{Real}"
+        )
+    ]
+    assert "section" in names
+    assert names.count("section") == 1
+    assert "inline_math" in names

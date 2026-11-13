@@ -30,6 +30,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import re
 import time
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor
@@ -86,6 +87,44 @@ class Stages:
         tuple[list[ElementRow], list[HierarchyRow]],
     ]
     hooks: CleanerHooks  # cleaner_hooks handed to build_hierarchy
+    filter_bib: Callable[[str, int, set[str] | None], list[RawBibEntry]] | None = None
+
+
+_NOCITE_ALL_RE = re.compile(r"\\nocite\s*\{\s*\*\s*\}")
+_CITE_KEYS_RE = re.compile(
+    r"\\(?:[a-zA-Z]*[Cc]ite[a-zA-Z]*|nocite|bibentry)\*?"
+    r"(?:\s*\[[^\]]*\]){0,2}\s*\{([^{}]+)\}"
+)
+_BIBITEM_KEY_RE = re.compile(r"\\bibitem\s*(?:\[(?:[^\[\]]|\[[^\[\]]*\])*\]\s*)?\{([^{}]+)\}")
+
+
+def _cited_keys(unit: CompilationUnit, nodes: list[RawNode], blocks: list[str]) -> set[str] | None:
+    """Return casefolded cited keys when filtering .bib is safe, or None to keep all."""
+    if _NOCITE_ALL_RE.search(unit.merged_tex):
+        return None
+    keys: set[str] = set()
+    for text in (unit.merged_tex, *(node.content for node in nodes)):
+        for match in _CITE_KEYS_RE.finditer(text):
+            for key in match.group(1).split(","):
+                cleaned = key.strip()
+                if cleaned:
+                    keys.add(cleaned.casefold())
+    if not keys:
+        return None
+    for block in blocks:
+        for match in _BIBITEM_KEY_RE.finditer(block):
+            cleaned = match.group(1).strip()
+            if cleaned:
+                keys.add(cleaned.casefold())
+    return keys
+
+
+def _parse_bib_for_pipeline(
+    content: str, version: int, allowed_keys: set[str] | None
+) -> list[RawBibEntry]:
+    from parsing import bib_extractor
+
+    return bib_extractor.parse_bib_file(content, version, allowed_keys=allowed_keys, strict=False)
 
 
 def default_stages() -> Stages:
@@ -114,6 +153,7 @@ def default_stages() -> Stages:
         deduplicate_references=lambda entries: dedup.deduplicate_references("", entries),
         dedup_elements=dedup.rewrite_citations_and_dedup_elements,
         hooks=hooks,
+        filter_bib=_parse_bib_for_pipeline,
     )
 
 
@@ -159,8 +199,15 @@ def process_paper(corpus: Corpus, arxiv_id: str, stages: Stages) -> PaperResult:
             t = time.perf_counter()
             blocks = list(unit.raw_bibitems_blocks)
             blocks += [b for b in extra_blocks if b not in blocks]
-            for _, content in sorted(unit.bib_files.items()):
-                bib_entries += stages.parse_bib_file(content, v)
+            if unit.bib_files:
+                allowed = (
+                    _cited_keys(unit, nodes, blocks) if stages.filter_bib is not None else None
+                )
+                for _, content in sorted(unit.bib_files.items()):
+                    if stages.filter_bib is not None:
+                        bib_entries += stages.filter_bib(content, v, allowed)
+                    else:
+                        bib_entries += stages.parse_bib_file(content, v)
             if blocks:
                 bib_entries += stages.parse_bibitems(blocks, v)
             stats.timings["bib"] += time.perf_counter() - t
