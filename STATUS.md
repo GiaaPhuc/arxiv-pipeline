@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **14/11/2026, 17:37 (Asia/Saigon)** — vá `hierarchy.py` (`_normalize_reference_heading`) cho heading References/Bibliography còn `{}` / macro bọc / đánh số mục như `{References}` (`2408.05882`) khớp `validate_m2.py`, sau khi 8 bài `.bib` ở `b7921d8` đã qua trên Colab; toàn suite **614 passed**, Ruff sạch.
+> Cập nhật lần cuối: **14/11/2026, 20:57 (Asia/Saigon)** — M3-D: 3 baseline, LambdaMART 21/18, Top-5 và bàn giao E; **661 passed**, Ruff sạch; chưa đánh giá MRR trên dữ liệu thật.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -16,6 +16,13 @@
 - Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. Hiện đang hoàn thiện dữ liệu **Milestone 1** (thu thập 25k ID) và hoàn thiện các trụ cột **Milestone 2** (Phase 0 đã xong; B và C đã hoàn thiện module cốt lõi; D và E đang phối hợp ghép nối). Ở **Milestone 3** (Code-Complete trước **16/11**, nộp Dataset HF **5.000 ID** trước **20/11**, Poster A2 dọc chung **27/11**), Leader **A (Phúc)** đã hoàn thành phần mã `M3-A0..A3` trên nhánh làm việc cục bộ; đang chờ PR các module B/C/D/E theo kế hoạch tại [`docs/plans/m3/milestone3-implementation-plan-vi.md`](./docs/plans/m3/milestone3-implementation-plan-vi.md).
 - Nộp Milestone 1 qua Moodle: link repo mã công khai + link Jupyter Book (repo sách riêng, GitHub Pages). **Không nộp dữ liệu** ở mốc này. Viết bằng tiếng Việt. Không nộp trễ.
 - Khi nộp, repo mã chỉ được chứa mã (`.py` / `.ipynb`), `requirements.txt` và `README.md`. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md`, `plans/`, `project requirements/` đang ở trong repo để làm việc — xử lý lúc đóng băng (R6, T5.3 trong Phase 2).
+
+### M3-D — Ranker và kiểm thử tích hợp (14/11)
+
+- `train_ranker.py`: gom nhóm `(arxivid, citationkey)`, căn nhãn/trọng số, 21/18 cột; Fuzzy, TF-IDF, StandardScaler + LogisticRegression, LambdaMART; Manual=3/Auto=1. LambdaMART bỏ nhóm toàn âm, early stopping chỉ Valid-Manual có dương; thiếu valid phù hợp thì dùng số cây cố định. Dữ liệu thiếu nhãn/nguồn, không hữu hạn hoặc Train không học được báo lỗi rõ.
+- `ranker.py`: đúng giao diện `RankerProtocol`; Train/Valid tách theo bài; anchor arXiv/DOI trước, điểm giảm dần, bằng điểm giữ thứ tự gốc, dedup ID và đệm `None`. Có `predict_rows` cho E, JSON thời gian fit/cấu hình/thứ tự cột/gain importance; không đổi ground truth/splits.
+- Kiểm chứng: **47 passed** phần D (**42** unit/handoff + **5** tích hợp), gồm LightGBM fit/predict thật và tác động trọng số. Toàn repo **661 passed (14,63 s)**, không fail/skip; `ruff check .` và `ruff format .` sạch. 4 cảnh báo LightGBM 4.7 deprecate `eval_set` (giữ API tương thích >=4.3). Lượt đầu gặp cache HF chỉ đọc và socket multiprocessing bị sandbox chặn; chạy lại offline với cache `/tmp` và quyền socket cục bộ đạt.
+- Tích hợp dùng ranker thật qua `ranker_factory`, B/C/E giả lập bằng fixture A. Chờ E review và ghép các module thật; chưa đo MRR@5, benchmark CPU hay chạy dải 5.000 ID. `NullQueryDetector` tùy chọn chưa làm. Hướng dẫn: [`d-ranker-handoff.md`](docs/reports/m3/d-ranker-handoff.md).
 
 ### M2 — Hoàn thiện, tối ưu và kiểm định trên 10.000 bài thật (14/11)
 
@@ -64,7 +71,7 @@
 
 ### Việc đang làm — **Phase 2 / chuẩn bị Phase 3 (M3)**
 
-- **M3 (Phase 0 & phần A):** `M3-A0..A3` đã xong (toàn suite offline hiện tại **614 passed**); đang chờ PR của B (`cleaner`, `lexical_features`), C (`auto_matcher`, `labelling`), D (`ranker`, `train_ranker`) và E (`hierarchy_features`, `evaluation`, `plots`) trước 16/11; hoàn thiện `README.md` cuối ở Phase 3A sau khi chạy 5.000 ID và có link HF.
+- **M3 (Phase 0 & phần A):** `M3-A0..A3` đã xong (toàn suite offline hiện tại **614 passed**); đang chờ PR của B (`cleaner`, `lexical_features`), C (`auto_matcher`, `labelling`), D (`ranker`, `train_ranker`: đã code + test trên `m3/d-ranker`, chờ review) và E (`hierarchy_features`, `evaluation`, `plots`) trước 16/11; hoàn thiện `README.md` cuối ở Phase 3A sau khi chạy 5.000 ID và có link HF.
 - **M2 (hoàn thiện & kiểm định 10.000 bài thật):** pipeline M2 đã chạy sạch **10.000/10.000 bài** cục bộ (`0` lỗi) và `validate_m2.py` đạt **`PASS`**; còn lại chạy bổ sung 15.000 ID còn thiếu khi có dữ liệu, đo benchmark Colab và ghép notebook/báo cáo vào repo `arxiv-book/m2/*`.
 - **Go/no-go:** Pilot 30 ID ✅. V̄ pilot **~1,9** phiên bản/bài → ~**47.500** request `/src/`; chỉ chờ 3 s/arXiv ≈ **~40 h** (+ tải/trích). Wall pilot (27–28/10, gồm S2 429 trước batch) cỡ **~2 h** cho 30 ID → nhân tuyến tính **~7 ngày** wall nếu S2 vẫn nghẽn; với batch + key ổn định kỳ vọng **~2–3 ngày** một máy (R1 — cần đo lại sau vài trăm ID đầu T4.1).
 - **T4.1 (A):** `python src/run_crawl.py --ranges src/id_ranges.csv` trên máy chính; sao lưu định kỳ `data/` + `manifest.sqlite`.
@@ -186,7 +193,7 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | M3-A3 | `src/matching/export_hf.py` (6 bảng ZSTD shards, YAML `README.md`, `verify_hf_dataset`) | A (Phúc) | < 16/11 | ✅ 4 tests export/verify (gồm shard rỗng & E2E CLI `--export-hf --verify-hf`) pass |
 | M3-B | `cleaner.py`, `lexical_features.py` + unit tests | B | < 16/11 | ⬜ Chờ PR |
 | M3-C | `auto_matcher.py`, `labelling.py` + unit tests | C | < 16/11 | ⬜ Chờ PR |
-| M3-D | `ranker.py`, `train_ranker.py` + unit tests | D | < 16/11 | ⬜ Chờ PR |
+| M3-D | `ranker.py`, `train_ranker.py` + unit tests | D | < 16/11 | ✅ Code + 47 tests (42 unit/handoff, 5 tích hợp); chờ E review, chưa đánh giá thật |
 | M3-E | `hierarchy_features.py`, `evaluation.py`, `plots.py` + unit tests | E | < 16/11 | ⬜ Chờ PR |
 | M3-3A | Chạy thật `--range-index <0..4> --export-hf --verify-hf`, cập nhật `README.md`, nộp HF & Poster A2 | Cả nhóm | 16–27/11 | ⬜ Chờ đủ dữ liệu M1/M2 & merge B–E |
 

@@ -548,6 +548,19 @@ Milestone 3 ánh xạ từng entry BibTeX trong từng bài báo (chỉ giữ b�
 5. **Huấn luyện & Sinh Top-5:** Gán nhãn nhị phân `0/1` theo `base_arxiv_id(gt_id) == base_arxiv_id(ref_arxiv_id)`, huấn luyện `MatchingRanker`, khử trùng và đệm `None` đủ 5 cột `cand1..cand5` (bài có 0 ứng viên ra 5 `None`; giữ nguyên văn `groundtrutharxivid` gồm cả hậu tố phiên bản như `1706.03762v2` khi ghi `predictions.parquet` theo `PREDICTIONS_SCHEMA`).
 6. **Đánh giá `MRR@5`:** Gọi `evaluate_mrr5` cho tập `test` và `valid`, ghi nguyên tử `evaluation_results.json` và `matching_summary.json`.
 
+**Chi tiết bước 5 — M3-D (14/11):** `MatchingRanker()` mặc định LambdaMART 21 cột;
+`include_m2=False` bỏ đúng 3 cột M2 để chạy ablation 18 cột. `train_ranker.py` gom
+nhóm theo `(arxivid, citationkey)` trước khi dựng ma trận/group sizes; Manual có
+trọng số 3, Auto 1. LambdaMART bỏ nhóm toàn âm, chỉ early stop trên Valid-Manual có
+nhãn dương; thiếu tập này dùng số cây cố định. Train/Valid trùng bài bị từ chối.
+Ba baseline dùng `model="fuzzy"`, `"tfidf"`, `"logistic"`; scaler của Logistic chỉ
+fit Train. Hậu xử lý chung ưu tiên anchor arXiv/DOI, điểm giảm dần và thứ tự gốc
+khi bằng điểm, khử ID trùng rồi đệm `None`. Có `predict_rows` cho evaluator E và
+`export_metadata` ghi thời gian fit, cấu hình, cột và gain importance vào
+`data/matching/range_<k>/`; dữ liệu/artifact không commit. Đã kiểm 5 cấu hình qua
+`ranker_factory` với B/C/E giả lập; chưa đánh giá dữ liệu thật. Chi tiết tại
+[`d-ranker-handoff.md`](reports/m3/d-ranker-handoff.md).
+
 ### 3.0.3. Đóng gói & Kiểm tra Dataset Hugging Face (`src/matching/export_hf.py`)
 
 - `export_hf_dataset(...)` lọc đủ 6 bảng Parquet (`papers`, `references`, `elements`, `hierarchy`, `bibtex`, `predictions`) theo `--range-index`, chia shard nén `ZSTD` dưới ngưỡng `--max-shard-mb` (mặc định `80 MB`) với tên `data/<table>/train-00000-of-0000N.parquet` và tạo thẻ `README.md` có YAML `configs` cho `datasets`.
