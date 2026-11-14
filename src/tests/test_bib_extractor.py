@@ -300,3 +300,37 @@ def test_non_strict_recovers_malformed_entries_and_fails_when_all_broken():
     assert entries[0].title == "Valid" and entries[1].year == 2022
     with pytest.raises(ValueError):
         parse_bib_file("@article{broken", 1, strict=False)
+
+
+def test_biblatex_field_names_and_special_string_macro_names():
+    bib = (
+        '@string{I-MIT/WHOI = "MIT/WHOI"}\n'
+        '@string{SP:IC = "Signal Processing: Image Communication"}\n'
+        "@string{ISIT* = {IEEE ISIT}}\n"
+        "@string{eccv = {ECCV}}\n"
+        "@string{eccv4.1 = eccv}\n"
+        "@inproceedings{cannistraci2023,\n"
+        "  title = {From Bricks to Bridges},\n"
+        "  author = {Cannistraci, Irene and Moschella, Luca},\n"
+        "  booktitle = {ICLR 2024 (top 5\\%)},\n"
+        "  journal = SP:IC,\n"
+        "  year = {2024},\n"
+        "  author+an = {2=highlight}\n"
+        "}\n"
+    )
+    entries = parse_bib_file(bib, 1)
+    assert len(entries) == 1
+    assert entries[0].citation_key == "cannistraci2023"
+    assert entries[0].journal == "Signal Processing: Image Communication"
+    assert entries[0].year == 2024
+
+
+def test_non_strict_skips_malformed_string_in_macro_only_file():
+    macro_only = (
+        "@STRING{VALID = {Valid Journal}}\n"
+        "@STRING{CJECE = Canadian J. Elect. Comput. Eng. }\n"
+        "@STRING{PROC = Proc. {IEEE }}\n"
+    )
+    assert parse_bib_file(macro_only, 1, strict=False) == []
+    with pytest.raises(ValueError):
+        parse_bib_file(macro_only, 1, strict=True)

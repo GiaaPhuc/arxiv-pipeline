@@ -19,7 +19,7 @@ ARXIV = re.compile(
 DOI = re.compile(r"10\.\d{4,9}/[^\s{}<>\"]+", re.I)
 _BIB_ENTRY_RE = re.compile(r"@(\w+)\s*\{")
 _NEXT_ENTRY_LINE_RE = re.compile(r"(?m)^[ \t]*@(\w+)\s*\{")
-_FIELD_START_RE = re.compile(r"[\s,]*([\w-]+)\s*=\s*")
+_FIELD_START_RE = re.compile(r"[\s,]*([\w.+:/*-]+)\s*=\s*")
 _BARE_VALUE_RE = re.compile(r"[^,#\s]+")
 _COMMENT_SCAN_RE = re.compile(r'[\\"{}%]')
 _BRACE_SCAN_RE = re.compile(r"[\\{}]")
@@ -249,7 +249,8 @@ def parse_bib_file(
         except ValueError as exc:
             if strict:
                 raise
-            last_error = exc
+            if kind != "string":
+                last_error = exc
             logger.warning("Skipping malformed BibTeX %s entry at offset %d", kind, match.start())
             nxt = _NEXT_ENTRY_LINE_RE.search(text, start + 1)
             i = nxt.start() if nxt else len(text)
@@ -260,10 +261,9 @@ def parse_bib_file(
         if kind == "string":
             try:
                 strings.update(_fields(body, strings))
-            except ValueError as exc:
+            except ValueError:
                 if strict:
                     raise
-                last_error = exc
                 logger.warning("Skipping malformed @string at offset %d", match.start())
             continue
         key, sep, rest = body.partition(",")

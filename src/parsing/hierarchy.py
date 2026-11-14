@@ -31,7 +31,27 @@ _RANKS = {
     )
 }
 _REFERENCES = {"references", "bibliography", "literature cited", "works cited"}
-_REF_LABEL_RE = re.compile(r"\\label\s*\{[^}]*\}")
+_REF_META_RE = re.compile(r"\\(?:label|ref|eqref|index)\*?\s*\{[^{}]*\}")
+_CMD_WRAPPER_RE = re.compile(r"\\[A-Za-z]+\*?\s*\{([^{}]*)\}")
+_LEADING_SEC_NUM_RE = re.compile(
+    r"^(?:(?:section|appendix)\s+)?(?:\d+(?:\.\d+)*|[ivxlcdm]+)\.?\s+",
+    re.IGNORECASE,
+)
+
+
+def _normalize_reference_heading(title: str) -> str:
+    """Normalize a cleaned heading title before checking `_REFERENCES`."""
+    cleaned = _REF_META_RE.sub("", title.strip())
+    for _ in range(4):
+        updated = _CMD_WRAPPER_RE.sub(r"\1", cleaned)
+        if updated == cleaned:
+            break
+        cleaned = updated
+    cleaned = cleaned.replace("{", "").replace("}", "")
+    cleaned = " ".join(cleaned.split()).strip(".:;*-–— ")
+    return _LEADING_SEC_NUM_RE.sub("", cleaned).strip().casefold()
+
+
 _LISTS = {"itemize", "enumerate", "description"}
 _FIGURES = {"figure", "figure*", "table", "table*", "wrapfigure", "algorithm", "algorithm*"}
 _MAX_NESTING = 64
@@ -197,10 +217,7 @@ class _Builder:
                 else:
                     flush(cmd.start)
                 title = self.clean(arg[0])
-                norm_title = " ".join(_REF_LABEL_RE.sub(" ", title).casefold().split()).strip(
-                    ".:*-–— "
-                )
-                if norm_title in _REFERENCES:
+                if _normalize_reference_heading(title) in _REFERENCES:
                     ref_rank, ref_start = rank, arg[1]
                 else:
                     while headings[-1][1] >= rank:
