@@ -411,9 +411,18 @@ def test_unclosed_constructs_and_fancyvrb_do_not_swallow_bibliography(prefix):
     [
         r"\section{\label{sec:References}References}",
         r"\subsubsection{References.\label{bibby}}",
+        r"\section*{{References}}",
+        r"\section*{\MakeUppercase{References}}",
+        r"\section{5. References}",
     ],
 )
 def test_reference_headings_with_labels_or_punctuation_are_excluded(heading):
     nodes, blocks = build(heading + "\nRef item.\n")
     assert all(n.kind != "heading" for n in nodes)
     assert blocks == ["Ref item."]
+
+
+def test_non_reference_headings_containing_references_are_kept():
+    nodes, blocks = build(r"\section{Cross-References}" + "\nBody text.\n")
+    assert [n.content for n in nodes if n.kind == "heading"] == ["Cross-References"]
+    assert blocks == []
