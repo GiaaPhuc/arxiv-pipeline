@@ -17,7 +17,7 @@ import logging
 import sys
 from pathlib import Path
 
-from matching import export_hf, pipeline
+from matching import export_hf, pipeline, plots
 
 logger = logging.getLogger("run_matching")
 
@@ -90,6 +90,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--verify-hf", action="store_true", help="verify HF output via datasets.load_dataset"
     )
+    p.add_argument(
+        "--plot-figures",
+        action="store_true",
+        help="generate 300-DPI Poster PNG figures from evaluation_results.json",
+    )
+    p.add_argument("--figures-dir", type=Path, default=None, help="default: <out-dir>/figures")
     p.add_argument(
         "--dry-run",
         action="store_true",
@@ -186,6 +192,12 @@ def main(argv: list[str] | None = None) -> int:
         summary["hf_out_dir"] = str(hf_out)
         if args.verify_hf:
             summary["hf_verified_counts"] = export_hf.verify_hf_dataset(hf_out)
+
+    if args.plot_figures:
+        eval_json_path = Path(summary["evaluation_path"])
+        figs_out = args.figures_dir or (eval_json_path.parent / "figures")
+        fig_paths = plots.generate_all_poster_figures(eval_json_path, figs_out)
+        summary["poster_figures"] = {k: str(v) for k, v in fig_paths.items()}
 
     print(json.dumps(summary, indent=2))
     return 0

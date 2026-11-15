@@ -14,6 +14,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from matching_fixtures import (
@@ -28,7 +29,7 @@ from rapidfuzz import fuzz
 
 import run_matching
 from matching import pipeline
-from matching.export_hf import PREDICTIONS_SCHEMA
+from matching.export_hf import PREDICTIONS_SCHEMA, TABLE_SPECS
 from matching.features import extract_paper_features
 from matching.models import (
     FEATURE_COLUMNS,
@@ -579,3 +580,193 @@ def test_run_matching_pipeline_preserves_versioned_groundtruth_and_matches_label
     matched = [r for r in pred_rows if r["arxivid"] == train_pid and r["citationkey"] == target_key]
     assert len(matched) == 1
     assert matched[0]["groundtrutharxivid"] == versioned_gt
+
+
+def test_run_matching_cli_default_stages_with_plots_and_hf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify full A+B+C+D+E default stages + --export-hf --verify-hf --plot-figures via CLI."""
+    data_dir = tmp_path / "data"
+    m1_stats = data_dir / "stats"
+    m2_parsed = data_dir / "parsed"
+    gt_dir = data_dir / "groundtruth" / "range_0"
+    m1_stats.mkdir(parents=True, exist_ok=True)
+    for sub in ("elements", "hierarchy", "bibtex"):
+        (m2_parsed / sub).mkdir(parents=True, exist_ok=True)
+    gt_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "hf_cache"))
+
+    # Build 8 qualified papers in range 0 (5 manual x 20 queries, 3 auto x 20 queries).
+    tables: dict[str, list[dict[str, Any]]] = {
+        name: [] for name in TABLE_SPECS if name != "predictions"
+    }
+    manual_records: list[dict[str, Any]] = []
+    papers = [f"2408.{11045 + i:05d}" for i in range(8)]
+    ref_catalog = [
+        ("2301.10000", "Attention Is All You Need", ["Vaswani, Ashish"], 2017),
+        ("2301.10001", "BERT Pre-training of Transformers", ["Devlin, Jacob"], 2018),
+        ("2301.10002", "Deep Residual Learning for Images", ["He, Kaiming"], 2015),
+        ("2301.10003", "Graph Attention Networks", ["Velickovic, Petar"], 2017),
+        ("2301.10004", "Retrieval Augmented Generation", ["Lewis, Patrick"], 2020),
+        ("2301.10005", "Denoising Diffusion Models", ["Ho, Jonathan"], 2020),
+    ]
+
+    for p_idx, pid in enumerate(papers):
+        tables["papers"].append(
+            {
+                "arxiv_id": pid,
+                "title": f"Study {pid}",
+                "authors": ["Alice Author"],
+                "submission_date": "2024-08-01",
+                "revised_dates": [],
+                "venue": None,
+            }
+        )
+        root_id = f"{pid}#root"
+        h1_id = f"{pid}#h1"
+        s1_id = f"{pid}#s1"
+        tables["elements"].extend(
+            [
+                {"elementid": root_id, "arxivid": pid, "kind": "document", "content": "root"},
+                {
+                    "elementid": h1_id,
+                    "arxivid": pid,
+                    "kind": "heading",
+                    "content": "1 Introduction",
+                },
+                {
+                    "elementid": s1_id,
+                    "arxivid": pid,
+                    "kind": "sentence",
+                    "content": "We build on \\cite{q00,q01,q02} and \\cite{q03,q04,q05,q06}.",
+                },
+            ]
+        )
+        tables["hierarchy"].extend(
+            [
+                {"arxivid": pid, "version": 1, "elementid": h1_id, "parentid": root_id},
+                {"arxivid": pid, "version": 1, "elementid": s1_id, "parentid": h1_id},
+            ]
+        )
+        for ref_id, title, authors, yr in ref_catalog:
+            tables["references"].append(
+                {
+                    "arxiv_id": pid,
+                    "ref_arxiv_id": ref_id,
+                    "ref_title": title,
+                    "ref_authors": authors,
+                    "ref_submission_date": f"{yr}-05-01",
+                    "ref_s2_id": None,
+                }
+            )
+        for q_idx in range(20):
+            ckey = f"q{q_idx:02d}"
+            if q_idx < 6:
+                ref_id, title, authors, yr = ref_catalog[q_idx]
+                tables["bibtex"].append(
+                    {
+                        "arxivid": pid,
+                        "citationkey": ckey,
+                        "entrytype": "inproceedings",
+                        "title": title,
+                        "authors": authors,
+                        "year": yr,
+                        "doi": "",
+                        "journal": "",
+                        "url": f"https://arxiv.org/abs/{ref_id}" if q_idx < 3 else "",
+                    }
+                )
+                gt_target: str | None = f"{ref_id}v1"
+            else:
+                tables["bibtex"].append(
+                    {
+                        "arxivid": pid,
+                        "citationkey": ckey,
+                        "entrytype": "book",
+                        "title": f"Unmatched Textbook Monograph {q_idx}",
+                        "authors": ["Knuth, Donald"],
+                        "year": 1990 + (q_idx % 10),
+                        "doi": "",
+                        "journal": "Press",
+                        "url": "",
+                    }
+                )
+                gt_target = None
+            if p_idx < 5:
+                manual_records.append(
+                    {
+                        "arxivid": pid,
+                        "citationkey": ckey,
+                        "groundtrutharxivid": gt_target,
+                        "source": AnnotationSource.MANUAL.value,
+                        "partition": Partition.TRAIN.value,
+                    }
+                )
+
+    for name, (_, schema) in TABLE_SPECS.items():
+        if name == "predictions":
+            continue
+        dest = (
+            m1_stats / f"{name}.parquet"
+            if name in {"papers", "references"}
+            else m2_parsed / name / "part-00000.parquet"
+        )
+        pq.write_table(pa.Table.from_pylist(tables[name], schema=schema), dest)
+
+    (gt_dir / "manual_annotations.json").write_text(
+        json.dumps(manual_records, indent=2), encoding="utf-8"
+    )
+
+    hf_out = tmp_path / "hf_e2e"
+    figs_out = tmp_path / "figures_e2e"
+    rc = run_matching.main(
+        [
+            "--data-dir",
+            str(data_dir),
+            "--range-index",
+            "0",
+            "--ranges",
+            "src/id_ranges.csv",
+            "--auto-fraction",
+            "1.0",
+            "--export-hf",
+            "--hf-out-dir",
+            str(hf_out),
+            "--verify-hf",
+            "--plot-figures",
+            "--figures-dir",
+            str(figs_out),
+        ]
+    )
+    assert rc == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["hf_verified_counts"]["predictions"] == 160
+
+    eval_json = json.loads(Path(summary["evaluation_path"]).read_text(encoding="utf-8"))
+    assert set(eval_json["models"]) == {
+        "Title Fuzzy",
+        "TF-IDF Cosine",
+        "Logistic Regression",
+        "LightGBM LambdaMART",
+    }
+    assert set(eval_json["ablation"]) == {"18 Features (No M2)", "21 Features (+ M2 AST)"}
+    assert len(eval_json["feature_importance_gain"]) == 21
+    assert eval_json["ranker_metadata"]["model"] == "lambdamart"
+
+    out_dir = Path(summary["evaluation_path"]).parent
+    assert (out_dir / "ranker_metadata.json").is_file()
+
+    expected_figs = {
+        "model_comparison": figs_out / "model_comparison.png",
+        "ablation_feature_importance": figs_out / "ablation_feature_importance.png",
+        "audit_and_error_breakdown": figs_out / "audit_and_error_breakdown.png",
+    }
+    for key, fig_path in expected_figs.items():
+        assert Path(summary["poster_figures"][key]) == fig_path
+        data_bytes = fig_path.read_bytes()
+        assert data_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+        assert b"pHYs" in data_bytes
+        assert b"IEND" in data_bytes
+        assert len(data_bytes) > 4096

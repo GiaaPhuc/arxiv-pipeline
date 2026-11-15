@@ -151,11 +151,11 @@ stages.ranker_factory = lambda: MatchingRanker(include_m2=False)
 
 ## Giới hạn và việc tiếp theo
 
-- Unit test dùng nguồn tổng hợp; 5 test tích hợp dùng `ranker_factory` thật (B/C/E là stage giả sẵn có trong test của A), và 1 test E2E đã nối thật đầu ra `MatchingRanker.predict_rows` vào `evaluate_mrr5` + `generate_all_poster_figures` của E sau khi merge `main` (PR #34). Chưa chạy end-to-end đủ B/C/D/E vì B/C chưa merge vào `main`.
+- Unit test dùng nguồn tổng hợp; 5 test tích hợp dùng `ranker_factory` thật (B/C/E là stage giả sẵn có trong test của A), và 1 test E2E đã nối thật đầu ra `MatchingRanker.predict_rows` vào `evaluate_mrr5` + `generate_all_poster_figures` của E sau khi merge `main` (PR #34). Đến 16/11, PR #35 (D), PR #37/#38 (B) và PR #36/#39 (C) đều đã merge lên `main` (`668a436`), kiểm thông E2E đủ 5 module thật qua `default_matching_stages()` và `run_matching.py --export-hf --verify-hf --plot-figures` (`pipeline.py` tự động xuất `models`, `ablation` và `feature_importance_gain` khi dùng `MatchingRanker`).
 - **MRR@5 dữ liệu thật: NOT EVALUATED**. Chưa xác nhận mục tiêu 0,85 hoặc thời gian
   train dưới 15 giây trên dải 5.000 ID.
-- LightGBM 4.7 phát `6` cảnh báo `eval_set` deprecated khi chạy test M3-D; vẫn dùng API này để tương thích dependency tối thiểu LightGBM 4.3 mà repo khai báo. Không tắt cảnh báo.
-- 15/11: Đã merge `main` (PR #34 `M3-E`: `evaluation.py`, `hierarchy_features.py`, `plots.py`) vào nhánh `m3/d-ranker`; rà soát và vá `_has_ranking_pair` (bổ sung kiểm tra `all_positive`), `fit_model` từ chối model ngoài `"logistic"`/`"lambdamart"`, `predict_rows` hỗ trợ partition `Enum`/`str` và chặn `None`, đồng thời xác minh handoff với `evaluate_mrr5` + `generate_all_poster_figures`. Sau khi E review PR này và B/C merge `main`, chạy smoke test end-to-end với đủ module B/C/D/E.
+- LightGBM 4.7 phát `6` cảnh báo `eval_set` deprecated khi chạy test M3-D (và thêm ở test tích hợp C/A dùng LambdaMART); vẫn dùng API này để tương thích dependency tối thiểu LightGBM 4.3 mà repo khai báo. Không tắt cảnh báo.
+- 15–16/11: Đã merge `main` (PR #34 `M3-E`: `evaluation.py`, `hierarchy_features.py`, `plots.py`, tiếp theo là PR #35 D, PR #37/#38 B và PR #36/#39 C); đồng thời rà soát nối thẳng `MatchingRanker.export_metadata`, bảng so sánh 4 mô hình và ablation 18 vs 21 vào `evaluation_results.json` ngay trong `run_matching_pipeline` và cờ `--plot-figures` của `src/run_matching.py`.
 - 16–20/11: xác nhận range-index D, gán nhãn và dùng splits chính thức; đánh giá
   Manual/Auto/Overall, ablation 18/21, benchmark CPU, xuất hình từ `poster_payload.json`,
   nộp Hugging Face cá nhân.

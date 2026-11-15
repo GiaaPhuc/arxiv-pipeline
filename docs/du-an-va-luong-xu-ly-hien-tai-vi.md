@@ -1,7 +1,7 @@
-# arxiv-pipeline — Kiến trúc Kỹ thuật & Luồng Xử lý Toàn diện (Milestone 1 & Milestone 2)
+# arxiv-pipeline — Kiến trúc Kỹ thuật & Luồng Xử lý Toàn diện (Milestone 1, 2 & 3)
 
-> **Mục đích tài liệu:** Trình bày toàn diện kiến trúc, nguyên lý vận hành, luồng xử lý end-to-end, hợp đồng dữ liệu và cơ chế kiểm toán của hệ thống **`arxiv-pipeline`**, phản ánh **chính xác 100% theo mã nguồn đang chạy** (`v3.13.0` & `M2 Phase 0/C`).
-> Tài liệu được phân tách rõ ràng thành hai cấu phần độc lập: **Phần I (Milestone 1 — Thu thập Dữ liệu)** và **Phần II (Milestone 2 — Phân tích Cú pháp & Chuẩn hóa)**.
+> **Mục đích tài liệu:** Trình bày toàn diện kiến trúc, nguyên lý vận hành, luồng xử lý end-to-end, hợp đồng dữ liệu và cơ chế kiểm toán của hệ thống **`arxiv-pipeline`**, phản ánh **chính xác 100% theo mã nguồn đang chạy trên `main`** (M1 `v3.14.0`, M2 Parser sạch 10.000 bài thật, M3 Matching + HF hợp nhất đủ 5 vai A–E).
+> Tài liệu gồm ba cấu phần liên hoàn: **Phần I (Milestone 1 — Thu thập Dữ liệu)**, **Phần II (Milestone 2 — Phân tích Cú pháp & Chuẩn hóa)** và **Phần III (Milestone 3 — Khớp Tài liệu Tham khảo & Đóng gói Hugging Face)**.
 
 ---
 
@@ -22,9 +22,14 @@
   - [2.4. Chuỗi Xử lý Chi tiết 5 Giai đoạn (Stages C, B, D)](#24-chuỗi-xử-lý-chi-tiết-5-giai-đoạn-stages-c-b-d)
   - [2.5. Bộ Quy tắc Kiểm toán & 8 Bất biến Nghiệm thu (`src/validate_m2.py`)](#25-bộ-quy-tắc-kiểm-toán--8-bất-biến-nghiệm-thu-srcvalidatem2py)
   - [2.6. Hướng dẫn Lệnh Vận hành Milestone 2](#26-hướng-dẫn-lệnh-vận-hành-milestone-2)
+- [Phần III: Milestone 3 — Khớp Tài liệu Tham khảo (`src/matching/` & `src/run_matching.py`)](#phần-iii-milestone-3--khớp-tài-liệu-tham-khảo-srcmatching--srcrun_matchingpy)
+  - [3.0.1. Hợp đồng Dữ liệu, Tiền xử lý & 21 Đặc trưng](#301-hợp-đồng-dữ-liệu--21-đặc-trưng-srcmatchingmodelspy--featurespy)
+  - [3.0.2. Luồng Điều phối 6 Bước, Ranker & Nhãn (`pipeline.py`, `ranker.py`, `labelling.py`)](#302-luồng-điều-phối-6-bước-srcmatchingpipelinepy--srcrun_matchingpy)
+  - [3.0.3. Đóng gói & Kiểm tra Dataset Hugging Face (`src/matching/export_hf.py`)](#303-đóng-gói--kiểm-tra-dataset-hugging-face-srcmatchingexport_hfpy)
+  - [3.0.4. Đặc trưng AST M2, Đánh giá `MRR@5` & Biểu đồ Poster (`hierarchy_features.py`, `evaluation.py`, `plots.py`)](#304-đặc-trưng-ast-m2-đánh-giá-mrr5--biểu-đồ-poster-hierarchy_featurespy-evaluationpy-plotspy)
 - [Phần Chung: Đồng bộ hóa, Ma trận Trách nhiệm & Báo cáo](#phần-chung-đồng-bộ-hóa-ma-trận-trách-nhiệm--báo-cáo)
   - [3.1. Ma trận Phân công Vai trò (A–E)](#31-ma-trận-phân-công-vai-trò-ae)
-  - [3.2. Bộ Kiểm thử Chất lượng Toàn diện (398/398 Passed)](#32-bộ-kiểm-thử-chất-lượng-toàn-diện-398398-passed)
+  - [3.2. Bộ Kiểm thử Chất lượng Toàn diện (765/765 Passed)](#32-bộ-kiểm-thử-chất-lượng-toàn-diện-765765-passed)
   - [3.3. Điểm nhấn Kỹ thuật cho Báo cáo Jupyter Book](#33-điểm-nhấn-kỹ-thuật-cho-báo-cáo-jupyter-book)
 
 ---
@@ -527,7 +532,7 @@ python src/validate_m2.py --data-dir data --parsed-dir data/parsed
 
 # Phần III: Milestone 3 — Khớp Tài liệu Tham khảo (`src/matching/` & `src/run_matching.py`)
 
-Milestone 3 ánh xạ từng entry BibTeX trong từng bài báo (chỉ giữ bài thuộc phạm vi phân tích M2) về đúng arXiv ID tham khảo ứng viên thu thập từ Semantic Scholar M1 mà **không dùng LLM hoặc mô hình pretrained**. Hiện phần hạ tầng và điều phối do Leader **A (Phúc)** (`M3-A0..A3`) đã code-complete; các module thành phần của B/C/D/E kết nối qua `MatchingStages` trong `src/matching/pipeline.py`.
+Milestone 3 ánh xạ từng entry BibTeX trong từng bài báo (chỉ giữ bài thuộc phạm vi phân tích M2) về đúng arXiv ID tham khảo ứng viên thu thập từ Semantic Scholar M1 mà **không dùng LLM hoặc mô hình pretrained**. Toàn bộ mã nguồn của cả 5 vai **A (Phúc)**, **B (Sơn)**, **C (Quỳnh)**, **D (Thụ)** và **E (Triệu)** đã được hợp nhất hoàn chỉnh lên `main` (`668a436` + rà soát tích hợp cuối) và kết nối qua `MatchingStages` trong `src/matching/pipeline.py`.
 
 ### 3.0.1. Hợp đồng Dữ liệu & 21 Đặc trưng (`src/matching/models.py` & `features.py`)
 
@@ -537,22 +542,12 @@ Milestone 3 ánh xạ từng entry BibTeX trong từng bài báo (chỉ giữ b�
   2. Gọi `tfidf_matrix_fn` một lần cho cả bài, gọi `pair_feature_fn` trên các cặp ứng viên sau blocking và `hierarchy_feature_fn` trên `PaperCitationIndex` (mặc định trả `(0, -1, 0)` khi không có AST).
   3. Tính 3 đặc trưng tương đối trong từng query: `title_sim_rank_in_query`, `title_sim_diff_from_max` và `title_sim_margin_to_top2`.
 
-#### Bản sửa M3-B do C đóng góp (16/11, chờ review)
+#### Chi tiết M3-B — Tiền xử lý & 15 Đặc trưng Cặp (`cleaner.py` & `lexical_features.py` — Owner B, PR #37 & #38 đã merge)
 
-- Adapter B trả trực tiếp `AuthorTokens`, `PrecleanedBib`, `PrecleanedRef` từ contract
-  chung; giữ `count` riêng với tập họ, giữ ID tham khảo gốc có version trong nhãn.
-- Tiền xử lý giữ chuỗi tiền tố họ (van der/de la/al-...), lọc placeholder et al./others
-  và collaboration; các ký tự Latin đặc biệt như ø/ß/ł được fold giống lệnh TeX.
-- `compute_pair_features` trả plain dict 15 tên chuẩn, không dùng alias chỉ tồn tại
-  qua `.get()`. Đếm tác giả dựa vào `AuthorTokens.count`; thiếu metadata vẫn dùng
-  `year_diff=999`, `year_missing=1`, `author_count_diff=99` theo kế hoạch.
-- TF-IDF dùng char n-gram 3–5 trên tiêu đề nội bộ từng bài, không dùng nhãn/fit chung
-  nhiều bài. Trường hợp không có n-gram hợp lệ trả ma trận 0; fallback NumPy dùng cùng
-  n-gram và IDF. Các mẫu `transformer`/`transformers`, tên Unicode/TeX và họ ghép có
-  regression tests. Không thay contract hoặc mô hình D/E.
-- Bản thử trên nhánh riêng `m3/c-b-review-fixes` + C đạt 760 tests, 10 review probes;
-  B có 47 tests, C có 32. Đây là bản sửa riêng chờ review, không phải kết quả của PR #37
-  hiện tại và không phải đánh giá dữ liệu thật. Chờ review độc lập và ghép vào nhánh `m3-B`.
+- Adapter B trả trực tiếp `AuthorTokens`, `PrecleanedBib`, `PrecleanedRef` từ contract chung; giữ `count` riêng với tập họ, giữ ID tham khảo gốc có version trong nhãn.
+- Tiền xử lý giữ chuỗi tiền tố họ (`van der`/`de la`/`al-...`), lọc placeholder `et al.`/`others` và collaboration; các ký tự Latin đặc biệt như `ø`/`ß`/`ł` được fold giống lệnh TeX.
+- `compute_pair_features` trả plain dict 15 tên chuẩn `FEATURE_COLUMNS[:15]`, không dùng alias chỉ tồn tại qua `.get()`. Đếm tác giả dựa vào `AuthorTokens.count`; thiếu metadata vẫn dùng `year_diff=999`, `year_missing=1`, `author_count_diff=99`.
+- TF-IDF dùng `char_wb` n-gram 3–5 trên tiêu đề nội bộ từng bài, không dùng nhãn/fit chung nhiều bài. Trường hợp không có n-gram hợp lệ trả ma trận 0; fallback NumPy dùng cùng n-gram và IDF. B đạt **47 tests** offline.
 
 ### 3.0.2. Luồng Điều phối 6 Bước (`src/matching/pipeline.py` & `src/run_matching.py`)
 
@@ -563,26 +558,22 @@ Milestone 3 ánh xạ từng entry BibTeX trong từng bài báo (chỉ giữ b�
 3. **Nhãn tay, Auto-Matcher & Split cấp bài báo:** Nạp `manual_annotations.json` (nếu có), chọn ngẫu nhiên xác định (`select_auto_paper_ids`, mặc định `auto_fraction = 0.10`, `seed = 42`) trên tập bài không nằm trong manual để chạy `run_auto_matcher` và đối kiểm `audit_auto_matcher`; phân chia `train`/`valid`/`test` cấp bài báo qua `create_dataset_splits` và lưu `groundtruth/<slice>/splits.json` cùng `auto_annotations.parquet`.
 4. **Trích AST & 21 đặc trưng:** Chỉ nạp `elements` và `hierarchy` cho các bài thuộc `splits`, dựng `PaperCitationIndex`, rồi trích `MatchFeatures` qua `extract_paper_features`.
 5. **Huấn luyện & Sinh Top-5:** Gán nhãn nhị phân `0/1` theo `base_arxiv_id(gt_id) == base_arxiv_id(ref_arxiv_id)`, huấn luyện `MatchingRanker`, khử trùng và đệm `None` đủ 5 cột `cand1..cand5` (bài có 0 ứng viên ra 5 `None`; giữ nguyên văn `groundtrutharxivid` gồm cả hậu tố phiên bản như `1706.03762v2` khi ghi `predictions.parquet` theo `PREDICTIONS_SCHEMA`).
-6. **Đánh giá `MRR@5`:** Gọi `evaluate_mrr5` cho tập `test` và `valid`, ghi nguyên tử `evaluation_results.json` và `matching_summary.json`.
+6. **Đánh giá `MRR@5`, So sánh 4 Mô hình & Ablation M2:** Gọi `evaluate_mrr5` cho tập `test` và `valid`; khi chạy với `MatchingRanker` thật, `_collect_ranker_eval_artifacts` tự động xuất `ranker_metadata.json`, đánh giá đồng bộ 4 cấu hình (`Title Fuzzy`, `TF-IDF Cosine`, `Logistic Regression`, `LightGBM LambdaMART`) cùng cặp ablation M2 (`18 Features (No M2)` vs `21 Features (+ M2 AST)`), và ghi đầy đủ `"models"`, `"ablation"`, `"feature_importance_gain"`, `"ranker_metadata"` vào `evaluation_results.json` cùng `matching_summary.json`. CLI `src/run_matching.py` hỗ trợ thêm `--plot-figures` (và `--figures-dir`) để sinh trực tiếp 3 ảnh Poster 300 DPI.
 
-**Chi tiết bước 5 — M3-D (14–15/11):** `MatchingRanker()` mặc định LambdaMART 21 cột;
+**Chi tiết bước 5 — M3-D (PR #35 đã merge):** `MatchingRanker()` mặc định LambdaMART 21 cột (`n_estimators=100`, `learning_rate=0.05`, `num_leaves=15`, `min_child_samples=1`, `eval_at=[1, 3, 5]`);
 `include_m2=False` bỏ đúng 3 cột M2 để chạy ablation 18 cột. `train_ranker.py` gom
 nhóm theo `(arxivid, citationkey)` trước khi dựng ma trận/group sizes; Manual có
-trọng số 3, Auto 1; `fit_model` từ chối loại mô hình ngoài `"logistic"`/`"lambdamart"`. LambdaMART bỏ nhóm toàn âm, chỉ early stop trên Valid-Manual có
+trọng số **3.0**, Auto **1.0**; `fit_model` từ chối loại mô hình ngoài `"logistic"`/`"lambdamart"`. LambdaMART bỏ nhóm toàn âm, chỉ early stop trên Valid-Manual có
 ít nhất một truy vấn chứa cả nhãn dương và âm; thiếu tập này dùng số cây cố định. Train/Valid trùng bài bị từ chối.
 Ba baseline dùng `model="fuzzy"`, `"tfidf"`, `"logistic"`; scaler của Logistic chỉ
 fit Train. Hậu xử lý chung ưu tiên anchor arXiv/DOI, điểm giảm dần và thứ tự gốc
 khi bằng điểm, khử ID trùng rồi đệm `None`. `predict_rows` nhận partition `Enum` hoặc `str` (chặn `None`) để bàn giao cho `evaluate_mrr5` của E, và
 `export_metadata` ghi thời gian fit, cấu hình, cột và gain importance vào
-`data/matching/range_<k>/`; dữ liệu/artifact không commit. Đã kiểm 5 cấu hình qua
-`ranker_factory` (B/C giả lập) và handoff E2E với `evaluate_mrr5` + `generate_all_poster_figures` của E sau khi merge PR #34; chưa đánh giá dữ liệu thật. Chi tiết tại
-[`d-ranker-handoff.md`](reports/m3/d-ranker-handoff.md).
+`data/matching/range_<k>/ranker_metadata.json`; dữ liệu/artifact không commit. Đã kiểm đủ **52 tests** phần D và tích hợp `default_matching_stages()`; chưa đánh giá trên corpus thật 5.000 ID. Chi tiết tại [`d-ranker-handoff.md`](reports/m3/d-ranker-handoff.md).
 
-#### Chi tiết bước 3 — M3-C: nhãn, kiểm toán và chia tập
+#### Chi tiết bước 3 — M3-C: nhãn, kiểm toán và chia tập (PR #36 & #39 đã merge)
 
-`labelling.py` và `auto_matcher.py` thuộc C (Quỳnh), reviewer B (Sơn). Nhánh
-`m3/c-labelling-review-fixes` đã gộp `main` (có M3-B PR #37 & #38) nên kiểm thử đủ
-A+B+C+D+E thật; chưa có nhãn thật 5 bài hoặc đo chất lượng trên dữ liệu thật.
+`labelling.py` và `auto_matcher.py` thuộc C (Quỳnh), reviewer B (Sơn), đã hợp nhất vào `main` (`668a436`) kèm **36 tests** offline (bao gồm kiểm thử tích hợp thực đủ 5 module A+B+C+D+E qua `default_matching_stages()`); chưa có nhãn thật 5 bài hoặc đo chất lượng trên dữ liệu thật.
 
 - **Manual:** CLI yêu cầu `--range-index 0..4`; không chỉ định bài thì liệt kê các
   bài trong dải có >=20 mục BibTeX, >=5 ứng viên arXiv. `--paper-ids` chuẩn hóa qua
@@ -672,9 +663,23 @@ module B thì báo lỗi, không tạo nhãn giả.
 # Kiểm tra nhanh đầu vào cho dải 0 (không chạy ML)
 python src/run_matching.py --data-dir data --range-index 0 --dry-run
 
-# Chạy toàn bộ pipeline M3 + xuất & xác thực bộ Dataset Hugging Face cho dải 0
-python src/run_matching.py --data-dir data --range-index 0 --export-hf --verify-hf
+# Chạy toàn bộ pipeline M3 + xuất & xác thực HF + sinh 3 hình Poster 300 DPI cho dải 0
+python src/run_matching.py --data-dir data --range-index 0 --export-hf --verify-hf --plot-figures
 ```
+
+### 3.0.4. Đặc trưng AST M2, Đánh giá `MRR@5` & Biểu đồ Poster (`hierarchy_features.py`, `evaluation.py`, `plots.py`)
+
+Phần tích hợp chiều sâu cây tài liệu M2, đánh giá metric và trực quan hóa poster thuộc **E (Triệu)** (PR #34 đã merge lên `main`):
+
+1. **Chỉ mục Trích dẫn AST M2 (`hierarchy_features.py` — Task M3-E1):**
+   - `build_paper_citation_index(elements, hierarchy, version_strategy="latest")` chọn phiên bản cao nhất (`max(version)`) khi bài có nhiều phiên bản, duyệt cây DOM $O(|E| + |H|)$ một lượt theo thứ tự đọc tiền tự (pre-order) từ gốc `#root<v>`, bỏ qua các khối literal `\begin{verbatim|Verbatim|lstlisting|minted}` và `\verb|...|`.
+   - Nhận diện đầy đủ họ lệnh trích dẫn khớp chuẩn `validate_m2.py` (`\cite`, `\citet`, `\citep`, `\citealt`, `\citealp`, `\citeauthor`, `\citeyear`, `\parencite`, `\textcite`, `\autocite`, dạng `*` và `[]`) qua `_CITE_CMD_RE`.
+   - Ánh xạ tiêu đề `heading` tổ tiên thành mã `first_cite_section_type` (`-1` thiếu AST / không xuất hiện trong thân bài, `0` Introduction/Abstract/Overview, `1` Related Work/Background, `2` Method/Model/Experiments/Evaluation, `3` Conclusion/Discussion/Appendix/Acknowledgements/Other), đếm `cite_frequency` và độ sâu `first_cite_section_depth` (có fallback an toàn `(0, -1, 0)` và tìm khóa không phân biệt hoa/thường).
+2. **Đánh giá `MRR@5` Hai Mẫu số (`evaluation.py` — Task M3-E2):**
+   - `evaluate_mrr5(predictions, ground_truth=None, query_sources=None, partition="test")` lọc đúng partition mục tiêu, chuẩn hóa so khớp trên `base_arxiv_id` cho cả dự đoán và nhãn, trả về `[overall, manual, auto]`.
+   - Tính đồng thời **`mrr_at_5_all`** (chia cho tổng $|Q|$ — mọi truy vấn không có đáp án `None` đóng góp `0.0`), **`mrr_at_5_matchable`** (chỉ chia cho số truy vấn khớp được `groundtrutharxivid != None`), kèm `hit_at_1`, `hit_at_3`, `hit_at_5`, `mean_average_precision`, `null_detection_f1` và đếm phân bố thứ hạng (`rank1_count`, `rank2_5_count`, `miss_count`).
+3. **Sinh 3 Biểu đồ Poster A2 300 DPI (`plots.py` — Task M3-E3):**
+   - `generate_all_poster_figures` (và CLI `PYTHONPATH=src python -m matching.plots --input <evaluation_results.json> --out-dir docs/poster/figures`) đọc JSON kết quả (đơn dải hoặc tổng hợp) và xuất 3 ảnh PNG 300 DPI không chữ đè: `model_comparison.png` (4 mô hình across `MRR@5_matchable` & `Hit@1/3/5`), `ablation_feature_importance.png` (18 vs 21 đặc trưng M2 + Top-10 Gain highlight amber cho 3 đặc trưng M2), và `audit_and_error_breakdown.png` (P/R/F1 của Auto-Matcher + phân rã kết quả Top-1 / Rank 2–5 / Miss). Tự động dùng fallback pure-stdlib RGB PNG (`640x360`, chunk `pHYs` 300 DPI) khi chạy trong môi trường CI tối giản không cài `matplotlib`.
 
 ---
 
@@ -686,15 +691,15 @@ Quy định phân công theo `CONTRIBUTING.md` và tiến độ thực tế qua 
 
 | Vai | Thành viên | Trách nhiệm chính M1 | Trách nhiệm chính M2 | Trách nhiệm chính M3 | Reviewer | Trạng thái |
 | :---: | :--- | :--- | :--- | :--- | :---: | :---: |
-| **A** | **Gia Phúc (Leader)** | Điều phối pipeline, mạng HTTP, manifest, metrics, crawler operator. | Khóa hợp đồng `models.py`, điều phối `pipeline.py`, CLI `run_parse.py`, profiler. | Khóa `matching/models.py`, `features.py`, `pipeline.py`, `run_matching.py`, `export_hf.py`, `matching_fixtures.py`. | **E** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Đã chạy 10k bài (chờ 15k ID & Colab)<br>✅ M3 Mã phần A (`M3-A0..A3`) |
-| **B** | **Thành viên B** | Xử lý dải ID, khám phá Atom API, tích hợp Semantic Scholar. | Làm sạch văn bản (`cleaner.py`), chuẩn hóa toán (`math_normalizer.py`), tách câu (`sentence_splitter.py`). | Tiền xử lý (`cleaner.py`), 15 đặc trưng lexical + TF-IDF (`lexical_features.py`). | **C** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test xong, đạt kiểm định 10k bài (chờ báo cáo Book)<br>✅ M3 Đã merge PR #37 & #38 vào `main` |
-| **C** | **Trường Quỳnh** | Fixture tổng hợp, tải và giải nén source TeX/bib/bbl. | Gom nguồn (`gathering.py`), dựng cây cấp bậc (`hierarchy.py`). | Auto-matcher + audit (`auto_matcher.py`), chia tập train/valid/test (`labelling.py`). | **B** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test xong, đạt kiểm định 10k bài (chờ báo cáo Book)<br>🟡 M3 PR #36 + nhánh `m3/c-labelling-review-fixes` (36 test C + tích hợp A–E); chưa nhãn thật |
-| **D** | **Thành viên D** | Xuất dữ liệu Parquet/CSV, đối soát corpus, notebook số liệu. | Trích tham khảo (`bib_extractor.py`), khử trùng lặp (`dedup.py`), xuất Parquet (`export_m2.py`). | Mô hình xếp hạng (`ranker.py`), thí nghiệm LightGBM vs GBDT/RF (`train_ranker.py`). | **B** | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test/báo cáo D xong, kiểm định 10k bài (chờ Book)<br>✅ M3 Mã & 52 test phần D xong (đã gộp PR #34, chờ E review PR) |
-| **E** | **Thành viên E** | Xác thực corpus (`validate_corpus.py`), xây dựng Jupyter Book. | Kiểm toán 8 bất biến (`validate_m2.py`), viết notebook thống kê M2 trên sách. | Đặc trưng AST (`hierarchy_features.py`), đánh giá `MRR@5` (`evaluation.py`), hình poster (`plots.py`). | **C** | ✅ M1 Hoàn tất<br>🟡 M2 Validator `PASS` 10k bài (chờ notebook Book)<br>✅ M3 Đã merge PR #34 (`hierarchy_features.py`, `evaluation.py`, `plots.py`) |
+| **A** | **Gia Phúc (Leader)** | Điều phối pipeline, mạng HTTP, manifest, metrics, crawler operator. | Khóa hợp đồng `models.py`, điều phối `pipeline.py`, CLI `run_parse.py`, profiler. | Khóa `matching/models.py`, `features.py`, `pipeline.py`, `run_matching.py`, `export_hf.py`, `matching_fixtures.py`, `README.md`. | **E** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Đã chạy 10k bài (chờ 15k ID & Colab)<br>✅ M3 Mã & tích hợp A (`M3-A0..A3`) |
+| **B** | **Sơn** | Xử lý dải ID, khám phá Atom API, tích hợp Semantic Scholar. | Làm sạch văn bản (`cleaner.py`), chuẩn hóa toán (`math_normalizer.py`), tách câu (`sentence_splitter.py`). | Tiền xử lý (`cleaner.py`), 15 đặc trưng lexical + TF-IDF (`lexical_features.py`). | **C** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test xong, đạt kiểm định 10k bài (chờ Book)<br>✅ M3 Đã merge PR #37 & #38 lên `main` |
+| **C** | **Trường Quỳnh** | Fixture tổng hợp, tải và giải nén source TeX/bib/bbl. | Gom nguồn (`gathering.py`), dựng cây cấp bậc (`hierarchy.py`). | CLI gán nhãn & splits (`labelling.py`), Auto-matcher + audit (`auto_matcher.py`). | **B** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test xong, đạt kiểm định 10k bài (chờ Book)<br>✅ M3 Đã merge PR #36 & #39 lên `main` |
+| **D** | **Thụ** | Xuất dữ liệu Parquet/CSV, đối soát corpus, notebook số liệu. | Trích tham khảo (`bib_extractor.py`), khử trùng lặp (`dedup.py`), xuất Parquet (`export_m2.py`). | Mô hình xếp hạng (`ranker.py`), huấn luyện có trọng số & ablation (`train_ranker.py`). | **E** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test/báo cáo D xong, kiểm định 10k bài (chờ Book)<br>✅ M3 Đã merge PR #35 lên `main` |
+| **E** | **Triệu** | Xác thực corpus (`validate_corpus.py`), xây dựng Jupyter Book. | Kiểm toán 8 bất biến (`validate_m2.py`), viết notebook thống kê M2 trên sách. | Đặc trưng AST (`hierarchy_features.py`), đánh giá `MRR@5` (`evaluation.py`), hình poster (`plots.py`). | **D / A** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Validator `PASS` 10k bài (chờ notebook Book)<br>✅ M3 Đã merge PR #34 lên `main` |
 
 ---
 
-### 3.2. Bộ Kiểm thử Chất lượng Toàn diện (764/764 Passed)
+### 3.2. Bộ Kiểm thử Chất lượng Toàn diện (765/765 Passed)
 
 Toàn bộ kho mã nguồn tuân thủ nguyên tắc cách ly mạng tuyệt đối: **100% unit tests chạy trên fixture tổng hợp hoặc mock `responses`, không bao giờ gọi mạng thật**.
 
@@ -703,9 +708,9 @@ Toàn bộ kho mã nguồn tuân thủ nguyên tắc cách ly mạng tuyệt đ�
 ruff check . && ruff format --check . && pytest -q
 ```
 
-- **Kết quả kiểm thử trên nhánh `m3/c-labelling-review-fixes` (16/11):** **764 passed**, 0 failed/skipped, **8** cảnh báo `LGBMDeprecationWarning` về `eval_set` (2 ở test tích hợp C dùng pipeline/`default_matching_stages` + 6 ở `test_ranker.py`). Đây là kiểm thử tổng hợp, không thay cho đo chất lượng nhãn/corpus thật.
-  - Bao phủ toàn bộ **M1** (crawler/discovery/source/s2/export/checkpoint), **M2** (`gathering`, `hierarchy`, `cleaner`, `math_normalizer`, `sentence_splitter`, `bib_extractor`, `dedup`, `export_m2`, `pipeline`, `validate_m2` và kiểm thử tích hợp E2E), **M3 phần A** (`src/tests/test_matching_pipeline.py`, `src/tests/test_export_hf.py`: contract 21 cột, Stage-1 blocking & 3 query-relative features, E2E slice, export đa shard ZSTD & `--verify-hf`), **M3 phần B** (`src/tests/test_matching_cleaner.py`, `src/tests/test_lexical_features.py`: **47 passed**), **M3 phần C** (`src/tests/test_labelling.py`: **36 passed** cho manual/auto/audit/kappa/splits/CLI và tích hợp thực 5 module `default_matching_stages()`), **M3 phần D** (`src/tests/test_ranker.py`: **52 passed** gồm unit/validation, `ranker_factory` và E2E với `evaluate_mrr5`/`plots`), và **M3 phần E** (`src/tests/test_hierarchy_features.py`, `src/tests/test_evaluation.py`).
-- **Kiểm tra chuẩn phong cách mã:** `ruff check .` sạch (`All checks passed!`); `ruff format --check .` báo **108 files already formatted**. Windows dùng `HF_HOME` trong `.venv/hf`, `TEMP`/`TMP` trong `.venv`, basetemp mới/ngắn (như `.venv/b3`) để tránh quyền cache và giới hạn độ dài đường dẫn.
+- **Kết quả kiểm thử trên `main` (16/11):** **765 passed**, 0 failed/skipped (kèm cảnh báo `LGBMDeprecationWarning` về `eval_set` để giữ tương thích LightGBM `>=4.3`). Đây là kiểm thử tổng hợp, không thay cho đo chất lượng nhãn/corpus thật ở Phase 3A.
+  - Bao phủ toàn bộ **M1** (crawler/discovery/source/s2/export/checkpoint), **M2** (`gathering`, `hierarchy`, `cleaner`, `math_normalizer`, `sentence_splitter`, `bib_extractor`, `dedup`, `export_m2`, `pipeline`, `validate_m2` và kiểm thử tích hợp E2E), và **163 tests M3**: **phần A** (`src/tests/test_matching_pipeline.py` **9** tests, `src/tests/test_export_hf.py` **4** tests: contract 21 cột, Stage-1 blocking & 3 query-relative features, E2E CLI `--export-hf --verify-hf --plot-figures`, export đa shard ZSTD), **phần B** (`src/tests/test_matching_cleaner.py`, `src/tests/test_lexical_features.py`: **47 passed**), **phần C** (`src/tests/test_labelling.py`: **36 passed** cho manual/auto/audit/kappa/splits/CLI và tích hợp thực 5 module `default_matching_stages()`), **phần D** (`src/tests/test_ranker.py`: **52 passed** gồm unit/validation, `ranker_factory` và E2E với `evaluate_mrr5`/`plots`), và **phần E** (`src/tests/test_hierarchy_features.py` **9** tests, `src/tests/test_evaluation.py` **6** tests).
+- **Kiểm tra chuẩn phong cách mã:** `ruff check .` sạch (`All checks passed!`); `ruff format --check .` báo **108 files already formatted**. Windows dùng `HF_HOME` trong `.venv/hf`, `TEMP`/`TMP` và basetemp ngắn trong `.venv/m2c-temp/` để tránh quyền cache và giới hạn độ dài đường dẫn.
 
 ---
 
@@ -727,7 +732,7 @@ Khi tổng hợp dữ liệu đưa vào báo cáo và poster, nhóm tập trung 
 
 ---
 
-*Tài liệu kỹ thuật được rà soát, tái cấu trúc và đồng bộ hóa chính xác 100% với mã nguồn `arxiv-pipeline` ngày **14/11/2026**.*
+*Tài liệu kỹ thuật được rà soát, tái cấu trúc và đồng bộ hóa chính xác 100% với mã nguồn `arxiv-pipeline` ngày **16/11/2026**.*
 
 
 ## Tích hợp M2, Tối ưu & Kiểm định Corpus Thật (14/11/2026)
