@@ -312,3 +312,80 @@ def test_integration_with_extract_paper_features(monkeypatch: pytest.MonkeyPatch
     assert mul_feats[0].cite_frequency == 0
     assert mul_feats[0].first_cite_section_type == SECTION_NONE
     assert mul_feats[0].first_cite_section_depth == 0
+
+
+def test_classify_heading_priority_and_appendix_subheadings() -> None:
+    assert classify_heading_section_type("4. Results and Discussion") == SECTION_METHOD_EXPERIMENT
+    assert classify_heading_section_type("5. Discussion") == SECTION_CONCLUSION_OTHER
+    assert (
+        classify_heading_section_type("6. Limitations and Future Work") == SECTION_CONCLUSION_OTHER
+    )
+    assert classify_heading_section_type("Summary and Conclusion") == SECTION_CONCLUSION_OTHER
+    assert classify_heading_section_type("Appendix A: Proofs") == SECTION_CONCLUSION_OTHER
+    assert classify_heading_section_type("A.1 Experimental Setup") == SECTION_METHOD_EXPERIMENT
+
+
+def test_minted_and_multiline_verb_literal_handling() -> None:
+    arxiv_id = "2408.11045"
+    elements = [
+        ElementRow("2408-11045#doc", arxiv_id, "document", ""),
+        ElementRow("2408-11045#h1", arxiv_id, "heading", "1. Introduction"),
+        ElementRow(
+            "2408-11045#s1",
+            arxiv_id,
+            "sentence",
+            (
+                "\\begin{minted}[linenos]{latex}\\cite{minted_key}\\end{minted} "
+                "See \\verb|unclosed_on_line1\nReal body cites \\cite{real_key}."
+            ),
+        ),
+    ]
+    hierarchy = [
+        HierarchyRow(arxiv_id, 1, "2408-11045#h1", "2408-11045#doc"),
+        HierarchyRow(arxiv_id, 1, "2408-11045#s1", "2408-11045#h1"),
+    ]
+    idx = build_paper_citation_index(elements, hierarchy)
+    assert extract_hierarchy_features("minted_key", idx)["cite_frequency"] == 0
+    real = extract_hierarchy_features("real_key", idx)
+    assert real["cite_frequency"] == 1
+    assert real["first_cite_section_type"] == SECTION_INTRO_ABSTRACT
+
+
+def test_dag_shared_node_uses_first_preorder_visit_depth_and_section() -> None:
+    arxiv_id = "2408.11045"
+    elements = [
+        ElementRow("doc", arxiv_id, "document", ""),
+        ElementRow("h_method", arxiv_id, "heading", "3. Methodology"),
+        ElementRow("s_shared", arxiv_id, "sentence", "Used in \\cite{shared2024}."),
+    ]
+    # doc visits h_method before s_shared, and h_method also links to s_shared.
+    hierarchy = [
+        HierarchyRow(arxiv_id, 1, "h_method", "doc"),
+        HierarchyRow(arxiv_id, 1, "s_shared", "doc"),
+        HierarchyRow(arxiv_id, 1, "s_shared", "h_method"),
+    ]
+    idx = build_paper_citation_index(elements, hierarchy)
+    feats = extract_hierarchy_features("shared2024", idx)
+    assert feats["cite_frequency"] == 1
+    assert feats["first_cite_section_type"] == SECTION_METHOD_EXPERIMENT
+    assert feats["first_cite_section_depth"] == 2
+
+
+def test_extract_hierarchy_features_casefold_fallback() -> None:
+    arxiv_id = "2408.11045"
+    elements = [
+        ElementRow("doc", arxiv_id, "document", ""),
+        ElementRow("h1", arxiv_id, "heading", "1. Introduction"),
+        ElementRow("s1", arxiv_id, "sentence", "As in \\cite{Vaswani2017Attention}."),
+    ]
+    hierarchy = [
+        HierarchyRow(arxiv_id, 1, "h1", "doc"),
+        HierarchyRow(arxiv_id, 1, "s1", "h1"),
+    ]
+    idx = build_paper_citation_index(elements, hierarchy)
+    feats = extract_hierarchy_features("vaswani2017attention", idx)
+    assert feats == {
+        "cite_frequency": 1,
+        "first_cite_section_type": SECTION_INTRO_ABSTRACT,
+        "first_cite_section_depth": 2,
+    }

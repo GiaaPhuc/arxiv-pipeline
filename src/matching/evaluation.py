@@ -190,14 +190,11 @@ def evaluate_mrr5(
     """Evaluate Top-5 predictions and return ``[overall, manual, auto]`` metric slices."""
     part_label = (partition or "test").strip()
 
-    # Filter to the target partition when predictions contain multiple partitions.
-    if (
-        part_label
-        and part_label.lower() != "all"
-        and any(r.partition == part_label for r in predictions)
-        and any(r.partition != part_label for r in predictions)
-    ):
-        target_rows = [r for r in predictions if r.partition == part_label]
+    # Filter to the target partition whenever rows carry partition labels (so asking for
+    # "test" on a "valid"-only slice does not silently report valid metrics as test).
+    has_partition_labels = any(bool((r.partition or "").strip()) for r in predictions)
+    if part_label and part_label.lower() != "all" and has_partition_labels:
+        target_rows = [r for r in predictions if (r.partition or "").strip() == part_label]
     else:
         target_rows = list(predictions)
 

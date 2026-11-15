@@ -21,16 +21,16 @@ _CITE_CMD_RE = re.compile(
     r"(?:\s*\[[^\]]*\]){0,2}\s*\{([^{}]*)\}"
 )
 _LITERAL_SPAN_RE = re.compile(
-    r"\\begin\s*\{\s*(?:verbatim|Verbatim|lstlisting)\*?\s*\}.*?"
-    r"\\end\s*\{\s*(?:verbatim|Verbatim|lstlisting)\*?\s*\}"
-    r"|\\verb\*?([^A-Za-z0-9\s\n]).*?\1",
+    r"\\begin\s*\{\s*(?P<env>verbatim|Verbatim|lstlisting|minted)\*?\s*\}.*?"
+    r"\\end\s*\{\s*(?P=env)\*?\s*\}"
+    r"|\\verb\*?(?P<vdelim>[^A-Za-z0-9\s\n])[^\n]*?(?P=vdelim)",
     re.DOTALL,
 )
 _CMD_WRAPPER_RE = re.compile(r"\\[A-Za-z]+\*?\s*\{([^{}]*)\}")
 _LABEL_CMD_RE = re.compile(r"\\label\s*\{[^{}]*\}")
 _LEADING_SEC_NUM_RE = re.compile(
     r"^(?:(?:section|subsection|chapter|part)\s+)?"
-    r"(?:\d+(?:\.\d+)*|[ivxlcdm]+|[a-z])[\.\)\s:-]+",
+    r"(?:\d+(?:\.\d+)*|[ivxlcdm]+|[a-z](?:\.\d+)*)[\.\)\s:-]+",
     re.IGNORECASE,
 )
 
@@ -104,15 +104,11 @@ _TYPE_2_KEYWORDS: tuple[str, ...] = (
     "empirical",
     "case study",
 )
-_TYPE_3_KEYWORDS: tuple[str, ...] = (
+_STRONG_TYPE_3_KEYWORDS: tuple[str, ...] = (
     "conclusion",
     "conclusions",
     "concluding",
-    "discussion",
-    "discussions",
     "future work",
-    "limitation",
-    "limitations",
     "appendix",
     "appendices",
     "supplementary",
@@ -121,6 +117,12 @@ _TYPE_3_KEYWORDS: tuple[str, ...] = (
     "acknowledgement",
     "acknowledgements",
     "summary and conclusion",
+)
+_WEAK_TYPE_3_KEYWORDS: tuple[str, ...] = (
+    "discussion",
+    "discussions",
+    "limitation",
+    "limitations",
 )
 
 
@@ -144,8 +146,8 @@ def classify_heading_section_type(title: str) -> int | None:
     if not norm:
         return None
 
-    # Check Conclusion/Appendix before generic keywords so "Summary and Conclusion" -> 3.
-    for kw in _TYPE_3_KEYWORDS:
+    # Explicit closing/back-matter headings override body keywords (e.g., "Summary and Conclusion").
+    for kw in _STRONG_TYPE_3_KEYWORDS:
         if re.search(rf"\b{re.escape(kw)}\b", norm):
             return SECTION_CONCLUSION_OTHER
     for kw in _TYPE_0_KEYWORDS:
@@ -157,6 +159,11 @@ def classify_heading_section_type(title: str) -> int | None:
     for kw in _TYPE_2_KEYWORDS:
         if re.search(rf"\b{re.escape(kw)}\b", norm):
             return SECTION_METHOD_EXPERIMENT
+    # Fallback closing headings (e.g., standalone "Discussion" or "Limitations") after body types,
+    # so headings like "4. Results and Discussion" stay classified as 2 (Method/Experiment).
+    for kw in _WEAK_TYPE_3_KEYWORDS:
+        if re.search(rf"\b{re.escape(kw)}\b", norm):
+            return SECTION_CONCLUSION_OTHER
     return None
 
 
@@ -164,11 +171,14 @@ def _extract_cite_keys_in_order(text: str) -> list[str]:
     """Extract all citation keys referenced in ``text`` in left-to-right occurrence order."""
     if not text or "\\" not in text:
         return []
-    non_literal = (
-        _LITERAL_SPAN_RE.sub(" ", text)
-        if ("\\verb" in text or "verbatim" in text or "Verbatim" in text or "lstlisting" in text)
-        else text
+    has_literal = (
+        "\\verb" in text
+        or "verbatim" in text
+        or "Verbatim" in text
+        or "lstlisting" in text
+        or "minted" in text
     )
+    non_literal = _LITERAL_SPAN_RE.sub(" ", text) if has_literal else text
     keys: list[str] = []
     for match in _CITE_CMD_RE.finditer(non_literal):
         for raw_key in match.group(1).split(","):
@@ -260,36 +270,33 @@ def build_paper_citation_index(
     order: list[str] = []
 
     # Use iterative DFS (preserving child order in hier_v) so document reading order is exact.
+    # Depth and section inheritance are bound on pop (actual first pre-order visit) so shared
+    # DAG nodes do not inherit depth/section from a deferred later-branch edge pushed earlier.
     visited: set[str] = set()
     for root_id in roots:
-        depth_of[root_id] = 0
-        section_of[root_id] = SECTION_CONCLUSION_OTHER
-        stack: list[str] = [root_id]
+        if root_id in visited:
+            continue
+        stack: list[tuple[str, int, int]] = [(root_id, 0, SECTION_CONCLUSION_OTHER)]
         while stack:
-            curr = stack.pop()
+            curr, curr_depth, curr_sec = stack.pop()
             if curr in visited:
                 continue
             visited.add(curr)
             order.append(curr)
 
-            curr_depth = depth_of.get(curr, 0)
-            curr_sec = section_of.get(curr, SECTION_CONCLUSION_OTHER)
             curr_elem = elem_by_id.get(curr)
             if curr_elem is not None and curr_elem.kind == "heading":
                 explicit_sec = classify_heading_section_type(curr_elem.content)
                 if explicit_sec is not None:
                     curr_sec = explicit_sec
-                elif curr_sec == SECTION_CONCLUSION_OTHER:
-                    curr_sec = SECTION_CONCLUSION_OTHER
-                section_of[curr] = curr_sec
+
+            depth_of[curr] = curr_depth
+            section_of[curr] = curr_sec
 
             children = children_of.get(curr, [])
             for child_id in reversed(children):
-                if child_id not in depth_of:
-                    depth_of[child_id] = curr_depth + 1
-                    section_of[child_id] = curr_sec
                 if child_id not in visited:
-                    stack.append(child_id)
+                    stack.append((child_id, curr_depth + 1, curr_sec))
 
     # Scan scannable nodes in document order to avoid double-counting container aggregates
     # (in M2 hierarchy.py, paragraph/list/item aggregate their child sentences' text).
@@ -348,6 +355,12 @@ def extract_hierarchy_features(
             "first_cite_section_depth": 0,
         }
     stats = index.by_key.get(citation_key)
+    if stats is None and citation_key:
+        target_cf = citation_key.strip().casefold()
+        for existing_key, existing_stats in index.by_key.items():
+            if existing_key.strip().casefold() == target_cf:
+                stats = existing_stats
+                break
     if stats is None:
         return {
             "cite_frequency": 0,

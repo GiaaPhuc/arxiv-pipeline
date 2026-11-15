@@ -17,7 +17,11 @@ from matching_fixtures import sample_prediction_rows
 
 from matching.evaluation import evaluate_mrr5
 from matching.models import AnnotationSource, PredictionRow
-from matching.plots import generate_all_poster_figures
+from matching.plots import (
+    _parse_ablation_payload,
+    _parse_importance_payload,
+    generate_all_poster_figures,
+)
 from matching.plots import main as plots_main
 
 
@@ -211,12 +215,60 @@ def test_evaluate_mrr5_empty_and_all_negative_slices() -> None:
     assert null_res.mrr_at_5_matchable == 0.0
 
 
+def test_evaluate_mrr5_partition_filtering_does_not_leak_other_partitions() -> None:
+    valid_only = [
+        PredictionRow(
+            arxivid="2408.11045",
+            partition="valid",
+            citationkey="k1",
+            groundtrutharxivid="1706.03762",
+            cand1="1706.03762",
+        )
+    ]
+    res_test = evaluate_mrr5(valid_only, partition="test")[0]
+    assert res_test.partition == "test"
+    assert res_test.num_queries == 0
+    assert res_test.mrr_at_5_matchable == 0.0
+
+    # Rows without explicit partition labels still evaluate under the requested label.
+    untagged = [
+        PredictionRow(
+            arxivid="2408.11045",
+            partition="",
+            citationkey="k1",
+            groundtrutharxivid="1706.03762",
+            cand1="1706.03762",
+        )
+    ]
+    res_untagged = evaluate_mrr5(untagged, partition="test")[0]
+    assert res_untagged.num_queries == 1
+    assert res_untagged.mrr_at_5_matchable == 1.0
+
+
 def test_poster_plots_generation_and_cli(tmp_path: Path) -> None:
     metrics = evaluate_mrr5(sample_prediction_rows(), partition="test")
+    test_overall = asdict(metrics[0])
     payload = {
         "range": "range_0",
         "audit_auto_matcher": {"precision": 0.988, "recall": 0.924, "f1": 0.955},
         "test": [asdict(m) for m in metrics],
+        "models": {
+            "TF-IDF Baseline": {
+                "mrr_at_5_matchable": 0.78,
+                "hit_at_1": 0.70,
+                "hit_at_3": 0.84,
+                "hit_at_5": 0.90,
+            },
+            "LightGBM Ranker": [test_overall],
+        },
+        "ablation": {
+            "18 Features": {"MRR@5 (Matchable)": 0.85, "Hit@1": 0.80, "Hit@3": 0.91},
+            "21 Features (+ M2 AST)": [test_overall],
+        },
+        "feature_importance_gain": {
+            "title_token_sort_ratio": 300.0,
+            "cite_frequency": 100.0,
+        },
     }
     json_path = tmp_path / "evaluation_results.json"
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -239,3 +291,53 @@ def test_poster_plots_generation_and_cli(tmp_path: Path) -> None:
     assert (cli_dir / "model_comparison.png").is_file()
     assert (cli_dir / "ablation_feature_importance.png").is_file()
     assert (cli_dir / "audit_and_error_breakdown.png").is_file()
+
+
+def test_poster_plots_partial_payload_and_fallback_edge_cases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed_imp = _parse_importance_payload(
+        {"feature_importance_gain": {"title_token_sort_ratio": 300.0, "cite_frequency": 100.0}}
+    )
+    assert dict(parsed_imp) == pytest.approx(
+        {"title_token_sort_ratio": 75.0, "cite_frequency": 25.0}
+    )
+
+    zero_imp = _parse_importance_payload({"feature_importance_gain": {"a": 0.0, "b": 0.0}})
+    assert dict(zero_imp) == {"a": 0.0, "b": 0.0}
+
+    abl_norm, abl_metrics = _parse_ablation_payload({"bad": "ignored", "empty": {}})
+    assert abl_norm == {}
+    assert abl_metrics == []
+
+    # Test partial payload with real 0.0 metrics (must not fabricate baselines or clamp 0.0)
+    partial_payload = {
+        "audit_auto_matcher": {"precision": 0.0, "recall": 0.0, "f1": 0.0},
+        "test": [
+            {
+                "partition": "test",
+                "subset": "overall",
+                "mrr_at_5_matchable": 0.0,
+                "hit_at_1": 0.0,
+                "hit_at_3": 0.0,
+                "hit_at_5": 0.0,
+                "extra": {"rank1_count": 0.0, "rank2_5_count": 0.0, "miss_count": 0.0},
+            }
+        ],
+        "feature_importance": {"a": 0.0, "b": 0.0},
+    }
+    out_real_or_fb = tmp_path / "partial"
+    paths_real = generate_all_poster_figures(partial_payload, out_real_or_fb, dpi=120)
+    for fig_path in paths_real.values():
+        assert fig_path.is_file()
+        assert fig_path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+    # Explicitly exercise pure-stdlib fallback PNG writer even when matplotlib is installed.
+    monkeypatch.setattr("matching.plots._load_plt", lambda: None)
+    fb_dir = tmp_path / "fallback"
+    fb_paths = generate_all_poster_figures({}, fb_dir, dpi=0)
+    for fig_path in fb_paths.values():
+        raw = fig_path.read_bytes()
+        assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+        assert len(raw) > 500
