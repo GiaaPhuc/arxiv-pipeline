@@ -1,18 +1,19 @@
 """Milestone 3 / Role B: deterministic offline entity normalization.
 
-The local ``Precleaned*`` structures are an explicit adapter contract proposed
-for the group's matching stage; compatible with both Role B unit tests and
-``src/matching/models.py`` / ``src/matching/features.py``. No network calls and
-no ground-truth labels are read here.
+Owner: B (Sơn) | Reviewer: C (Quỳnh) | Task: M3-B1
+Done when: normalization and adapters return the locked matching.models types,
+handle compound surnames/Unicode/TeX consistently, and pass offline regression tests.
+No network calls and no ground-truth labels are read here.
 """
 
 from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
 from typing import Any
 from urllib.parse import unquote
+
+from matching.models import AuthorTokens, PrecleanedBib, PrecleanedRef
 
 # Common TeX accents including braced and unbraced forms; nested syntax is
 # handled by a small scanner, not a global regex that discards arguments.
@@ -179,6 +180,26 @@ def decode_latex(text: str | None) -> str:
 
 
 def _ascii_fold(text: str) -> str:
+    # NFKD does not decompose these Latin letters; match the TeX symbol table.
+    text = text.translate(
+        str.maketrans(
+            {
+                "ø": "o",
+                "Ø": "O",
+                "ß": "ss",
+                "ẞ": "SS",
+                "ł": "l",
+                "Ł": "L",
+                "æ": "ae",
+                "Æ": "AE",
+                "œ": "oe",
+                "Œ": "OE",
+                "ı": "i",
+                "đ": "d",
+                "Đ": "D",
+            }
+        )
+    )
     text = unicodedata.normalize("NFKD", text)
     without_marks = "".join(ch for ch in text if not unicodedata.combining(ch))
     return without_marks.encode("ascii", "ignore").decode()
@@ -199,53 +220,58 @@ def _authors_list(value: Any) -> list[str]:
     return [str(x).strip() for x in value if x is not None and str(x).strip()]
 
 
-@dataclass(frozen=True)
-class AuthorTokens:
-    surnames: tuple[str, ...]
-    first_initials: tuple[str, ...]
-    full_names: tuple[str, ...]
-
-    @property
-    def first_surname(self) -> str:
-        return self.surnames[0] if self.surnames else ""
-
-    @property
-    def first_initial(self) -> str:
-        return self.first_initials[0] if self.first_initials else ""
-
-    @property
-    def surname_initials(self) -> frozenset[tuple[str, str]]:
-        return frozenset(
-            (s, i) for s, i in zip(self.surnames, self.first_initials, strict=False) if s and i
-        )
-
-    @property
-    def count(self) -> int:
-        return len(self.surnames)
+_SURNAME_PARTICLES = frozenset(
+    {
+        "van",
+        "von",
+        "der",
+        "den",
+        "de",
+        "del",
+        "di",
+        "da",
+        "al",
+        "la",
+        "le",
+        "du",
+        "mac",
+        "mc",
+    }
+)
 
 
 def extract_author_tokens(authors: list[str]) -> AuthorTokens:
-    """Handle 'Surname, Given' and 'Given M. Surname'; keep input order."""
+    """Normalize names into the shared contract, preserving compound surnames."""
     surnames: list[str] = []
     initials: list[str] = []
-    normalized: list[str] = []
     for name in _authors_list(authors):
         decoded = _ascii_fold(decode_latex(name)).lower()
+        decoded = re.sub(r"\bet\s+al\.?\s*$", "", decoded).strip(" ,")
+        normalized = clean_title(decoded)
+        if normalized in {"et al", "others", "and others"} or "collaboration" in normalized.split():
+            continue
         if "," in decoded:
             last, first = decoded.split(",", 1)
-            last_words = clean_title(last).split()
+            surname = clean_title(last)
             first_words = clean_title(first).split()
-            surname = " ".join(last_words)
         else:
-            words = clean_title(decoded).split()
-            surname = words[-1] if words else ""
-            first_words = words[:-1]
+            words = normalized.split()
+            start = len(words) - 1
+            while start > 0 and words[start - 1] in _SURNAME_PARTICLES:
+                start -= 1
+            surname = " ".join(words[start:]) if words else ""
+            first_words = words[:start]
         if not surname:
             continue
         surnames.append(surname)
         initials.append(first_words[0][0] if first_words else "")
-        normalized.append(clean_title(decoded))
-    return AuthorTokens(tuple(surnames), tuple(initials), tuple(normalized))
+    return AuthorTokens(
+        surnames=frozenset(surnames),
+        surname_initials=frozenset((s, i) for s, i in zip(surnames, initials, strict=True) if i),
+        first_surname=surnames[0] if surnames else None,
+        first_initial=(initials[0] or None) if initials else None,
+        count=len(surnames),
+    )
 
 
 def normalize_arxiv_id(raw_id: str | None) -> str | None:
@@ -290,70 +316,6 @@ def _get(obj: Any, *names: str, default: Any = None) -> Any:
     return default
 
 
-@dataclass(frozen=True)
-class PrecleanedBib:
-    citation_key: str
-    title: str
-    authors: AuthorTokens
-    year: int | None
-    doi: str
-    arxiv_id: str | None
-    source_title: str = ""
-    arxivid: str = ""
-
-    @property
-    def citationkey(self) -> str:
-        return self.citation_key
-
-    @property
-    def clean_title(self) -> str:
-        return self.title
-
-    @property
-    def title_tokens_nostop(self) -> tuple[str, ...]:
-        return tuple(w for w in self.title.split() if w not in _STOPWORDS)
-
-    @property
-    def norm_doi(self) -> str | None:
-        return self.doi or None
-
-    @property
-    def extracted_arxiv_id(self) -> str | None:
-        return self.arxiv_id
-
-
-@dataclass(frozen=True)
-class PrecleanedRef:
-    title: str
-    authors: AuthorTokens
-    year: int | None
-    doi: str
-    arxiv_id: str | None
-    citing_arxivid: str
-    source_title: str = ""
-    raw_ref_arxiv_id: str = ""
-
-    @property
-    def arxivid(self) -> str:
-        return self.citing_arxivid
-
-    @property
-    def norm_arxiv_id(self) -> str:
-        return self.arxiv_id or ""
-
-    @property
-    def clean_title(self) -> str:
-        return self.title
-
-    @property
-    def title_tokens_nostop(self) -> tuple[str, ...]:
-        return tuple(w for w in self.title.split() if w not in _STOPWORDS)
-
-    @property
-    def norm_doi(self) -> str | None:
-        return self.doi or None
-
-
 def _arxiv_from_bib(row: Any) -> str | None:
     # Check explicit reference fields first (url, eprint, arxiv_id, doi, journal).
     for key in ("arxiv_id", "eprint", "url"):
@@ -380,15 +342,16 @@ def preclean_bibtex(row: Any) -> PrecleanedBib:
     citing_id = normalize_arxiv_id(_get(row, "arxivid")) or str(
         _get(row, "arxivid", default="") or ""
     )
+    cleaned = clean_title(title)
     return PrecleanedBib(
-        citation_key=str(_get(row, "citationkey", "citation_key", default="") or ""),
-        title=clean_title(title),
+        arxivid=citing_id,
+        citationkey=str(_get(row, "citationkey", "citation_key", default="") or ""),
+        clean_title=cleaned,
+        title_tokens_nostop=tuple(w for w in cleaned.split() if w not in _STOPWORDS),
         authors=extract_author_tokens(_authors_list(_get(row, "authors"))),
         year=_year(_get(row, "year")),
-        doi=normalize_doi(_get(row, "doi")),
-        arxiv_id=_arxiv_from_bib(row),
-        source_title=title,
-        arxivid=citing_id,
+        norm_doi=normalize_doi(_get(row, "doi")) or None,
+        extracted_arxiv_id=_arxiv_from_bib(row),
     )
 
 
@@ -402,13 +365,14 @@ def preclean_reference(
     title = str(_get(row, "ref_title", "title", default="") or "")
     raw_ref_id = str(_get(row, "ref_arxiv_id", "arxivid", "arxiv_id", default="") or "")
     norm_ref_id = normalize_arxiv_id(raw_ref_id)
+    cleaned = clean_title(title)
     return PrecleanedRef(
-        title=clean_title(title),
+        arxivid=normalize_arxiv_id(citing_arxivid) or citing_arxivid,
+        norm_arxiv_id=norm_ref_id or "",
+        clean_title=cleaned,
+        title_tokens_nostop=tuple(w for w in cleaned.split() if w not in _STOPWORDS),
         authors=extract_author_tokens(_authors_list(_get(row, "ref_authors", "authors"))),
         year=_year(_get(row, "ref_submission_date", "year", "publicationDate")),
-        doi=normalize_doi(s2_doi or _get(row, "doi")),
-        arxiv_id=norm_ref_id,
-        citing_arxivid=normalize_arxiv_id(citing_arxivid) or citing_arxivid,
-        source_title=title,
+        norm_doi=normalize_doi(s2_doi or _get(row, "doi")) or None,
         raw_ref_arxiv_id=raw_ref_id or (norm_ref_id or ""),
     )
