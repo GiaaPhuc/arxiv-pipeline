@@ -1,4 +1,8 @@
-"""Role B offline cleaner tests."""
+"""Role B offline cleaner and shared-contract regression tests.
+
+Owner: B (Sơn) | Reviewer: C (Quỳnh) | Task: M3-B4
+Done when: raw TeX/Unicode names and identifiers normalize into the shared models.
+"""
 
 import pytest
 
@@ -11,6 +15,8 @@ from matching.cleaner import (
     preclean_bibtex,
     preclean_reference,
 )
+from matching.models import AuthorTokens, PrecleanedBib, PrecleanedRef
+from parsing.models import BibtexRow
 
 
 @pytest.mark.parametrize(
@@ -42,12 +48,13 @@ def test_titles(raw, out):
 
 def test_authors():
     a = extract_author_tokens(["Einstein, Albert", "Alan M. Turing", r"Fran\c{c}ois, Jean"])
-    assert a.surnames == ("einstein", "turing", "francois")
-    assert a.first_initials == ("a", "a", "j")
-    assert extract_author_tokens([]).surnames == ()
-    assert extract_author_tokens("Ada Lovelace and Grace Hopper").surnames == (
-        "lovelace",
-        "hopper",
+    assert isinstance(a, AuthorTokens)
+    assert a.surnames == frozenset({"einstein", "turing", "francois"})
+    assert a.surname_initials == frozenset({("einstein", "a"), ("turing", "a"), ("francois", "j")})
+    assert (a.first_surname, a.first_initial, a.count) == ("einstein", "a", 3)
+    assert extract_author_tokens([]).surnames == frozenset()
+    assert extract_author_tokens("Ada Lovelace and Grace Hopper").surnames == frozenset(
+        {"lovelace", "hopper"}
     )
 
 
@@ -93,14 +100,77 @@ def test_adapters():
         citing_arxivid="2408.01045",
         s2_doi="10.1000/a",
     )
-    assert (bib.title, bib.year, bib.doi) == (ref.title, ref.year, ref.doi)
-    assert bib.arxiv_id == ref.arxiv_id == "2408.11111"
+    assert isinstance(bib, PrecleanedBib) and isinstance(ref, PrecleanedRef)
+    assert (bib.clean_title, bib.year, bib.norm_doi) == (ref.clean_title, ref.year, ref.norm_doi)
+    assert bib.extracted_arxiv_id == ref.norm_arxiv_id == "2408.11111"
     assert bib.authors.surnames == ref.authors.surnames
-    assert ref.citing_arxivid == "2408.01045"
+    assert ref.arxivid == "2408.01045"
+    assert ref.raw_ref_arxiv_id == "2408.11111v2"
 
 
 def test_empty_missing():
     b = preclean_bibtex({"citationkey": "y", "title": None, "authors": [], "year": None})
     r = preclean_reference({}, citing_arxivid="other")
-    assert b.title == r.title == ""
+    assert b.clean_title == r.clean_title == ""
     assert b.year is None and r.year is None
+
+
+@pytest.mark.parametrize(
+    ("given", "comma", "surname"),
+    [
+        ("Johannes van der Waals", "van der Waals, Johannes", "van der waals"),
+        ("Ludwig van Beethoven", "van Beethoven, Ludwig", "van beethoven"),
+        ("Jane de la Cruz", "de la Cruz, Jane", "de la cruz"),
+        ("Abu al-Biruni", "al-Biruni, Abu", "al biruni"),
+    ],
+)
+def test_compound_surnames_match_across_formats(given, comma, surname):
+    a, b = extract_author_tokens([given]), extract_author_tokens([comma])
+    assert a.first_surname == b.first_surname == surname
+    assert a.first_initial == b.first_initial
+
+
+def test_noise_authors_and_repeated_surnames():
+    a = extract_author_tokens(
+        ["Alice Smith", "Bob Smith", "et al.", "others", "and others", "ATLAS Collaboration"]
+    )
+    assert a.count == 2 and a.surnames == frozenset({"smith"})
+    assert a.surname_initials == frozenset({("smith", "a"), ("smith", "b")})
+    assert extract_author_tokens([]).first_surname is None
+    suffix = extract_author_tokens(["Jane Doe et al."])
+    assert suffix.first_surname == "doe" and suffix.count == 1
+
+
+@pytest.mark.parametrize(
+    ("unicode_name", "tex_name"),
+    [
+        ("Søren", r"S{\o}ren"),
+        ("Straße", r"Stra{\ss}e"),
+        ("Łukasz", r"{\L}ukasz"),
+        ("Ægir", r"{\AE}gir"),
+        ("Œuvre", r"{\OE}uvre"),
+        ("ı", r"{\i}"),
+    ],
+)
+def test_unicode_and_tex_fold_identically(unicode_name, tex_name):
+    assert clean_title(unicode_name) == clean_title(tex_name)
+
+
+def test_real_row_uses_shared_model_and_content_tokens():
+    row = BibtexRow(
+        "2408.11045",
+        "q",
+        "article",
+        "The Physics of Fields",
+        ["Jane Doe"],
+        2024,
+        "",
+        "",
+        "https://arxiv.org/abs/2301.10000v2",
+    )
+    b = preclean_bibtex(row)
+    assert isinstance(b, PrecleanedBib)
+    assert isinstance(b.authors, AuthorTokens)
+    assert b.citationkey == "q" and b.arxivid == row.arxivid
+    assert b.title_tokens_nostop == ("physics", "fields")
+    assert b.extracted_arxiv_id == "2301.10000"

@@ -537,6 +537,23 @@ Milestone 3 ánh xạ từng entry BibTeX trong từng bài báo (chỉ giữ b�
   2. Gọi `tfidf_matrix_fn` một lần cho cả bài, gọi `pair_feature_fn` trên các cặp ứng viên sau blocking và `hierarchy_feature_fn` trên `PaperCitationIndex` (mặc định trả `(0, -1, 0)` khi không có AST).
   3. Tính 3 đặc trưng tương đối trong từng query: `title_sim_rank_in_query`, `title_sim_diff_from_max` và `title_sim_margin_to_top2`.
 
+#### Bản sửa M3-B do C đóng góp (16/11, chờ review)
+
+- Adapter B trả trực tiếp `AuthorTokens`, `PrecleanedBib`, `PrecleanedRef` từ contract
+  chung; giữ `count` riêng với tập họ, giữ ID tham khảo gốc có version trong nhãn.
+- Tiền xử lý giữ chuỗi tiền tố họ (van der/de la/al-...), lọc placeholder et al./others
+  và collaboration; các ký tự Latin đặc biệt như ø/ß/ł được fold giống lệnh TeX.
+- `compute_pair_features` trả plain dict 15 tên chuẩn, không dùng alias chỉ tồn tại
+  qua `.get()`. Đếm tác giả dựa vào `AuthorTokens.count`; thiếu metadata vẫn dùng
+  `year_diff=999`, `year_missing=1`, `author_count_diff=99` theo kế hoạch.
+- TF-IDF dùng char n-gram 3–5 trên tiêu đề nội bộ từng bài, không dùng nhãn/fit chung
+  nhiều bài. Trường hợp không có n-gram hợp lệ trả ma trận 0; fallback NumPy dùng cùng
+  n-gram và IDF. Các mẫu `transformer`/`transformers`, tên Unicode/TeX và họ ghép có
+  regression tests. Không thay contract hoặc mô hình D/E.
+- Bản thử trên nhánh riêng `m3/c-b-review-fixes` + C đạt 760 tests, 10 review probes;
+  B có 47 tests, C có 32. Đây là bản sửa riêng chờ review, không phải kết quả của PR #37
+  hiện tại và không phải đánh giá dữ liệu thật. Chờ review độc lập và ghép vào nhánh `m3-B`.
+
 ### 3.0.2. Luồng Điều phối 6 Bước (`src/matching/pipeline.py` & `src/run_matching.py`)
 
 `run_matching_pipeline(...)` lọc dữ liệu theo dải `--range-index <0..4>` (hoặc `all` cho toàn bộ 25.000 ID trong `src/id_ranges.csv`) và điều phối tuần tự:
@@ -585,14 +602,14 @@ Quy định phân công theo `CONTRIBUTING.md` và tiến độ thực tế qua 
 | Vai | Thành viên | Trách nhiệm chính M1 | Trách nhiệm chính M2 | Trách nhiệm chính M3 | Reviewer | Trạng thái |
 | :---: | :--- | :--- | :--- | :--- | :---: | :---: |
 | **A** | **Gia Phúc (Leader)** | Điều phối pipeline, mạng HTTP, manifest, metrics, crawler operator. | Khóa hợp đồng `models.py`, điều phối `pipeline.py`, CLI `run_parse.py`, profiler. | Khóa `matching/models.py`, `features.py`, `pipeline.py`, `run_matching.py`, `export_hf.py`, `matching_fixtures.py`. | **E** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Đã chạy 10k bài (chờ 15k ID & Colab)<br>✅ M3 Mã phần A (`M3-A0..A3`) |
-| **B** | **Thành viên B** | Xử lý dải ID, khám phá Atom API, tích hợp Semantic Scholar. | Làm sạch văn bản (`cleaner.py`), chuẩn hóa toán (`math_normalizer.py`), tách câu (`sentence_splitter.py`). | Tiền xử lý (`cleaner.py`), 14 đặc trưng lexical + TF-IDF (`lexical_features.py`). | **D** | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test xong, đạt kiểm định 10k bài (chờ báo cáo Book)<br>⬜ M3 Chờ PR |
+| **B** | **Thành viên B** | Xử lý dải ID, khám phá Atom API, tích hợp Semantic Scholar. | Làm sạch văn bản (`cleaner.py`), chuẩn hóa toán (`math_normalizer.py`), tách câu (`sentence_splitter.py`). | Tiền xử lý (`cleaner.py`), 15 đặc trưng lexical + TF-IDF (`lexical_features.py`). | **C** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test xong, đạt kiểm định 10k bài (chờ báo cáo Book)<br>🟡 PR #37 và bản sửa C riêng chờ review độc lập |
 | **C** | **Trường Quỳnh** | Fixture tổng hợp, tải và giải nén source TeX/bib/bbl. | Gom nguồn (`gathering.py`), dựng cây cấp bậc (`hierarchy.py`). | Auto-matcher + audit (`auto_matcher.py`), chia tập train/valid/test (`labelling.py`). | **A** / **E** | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test xong, đạt kiểm định 10k bài (chờ báo cáo Book)<br>⬜ M3 Chờ PR |
 | **D** | **Thành viên D** | Xuất dữ liệu Parquet/CSV, đối soát corpus, notebook số liệu. | Trích tham khảo (`bib_extractor.py`), khử trùng lặp (`dedup.py`), xuất Parquet (`export_m2.py`). | Mô hình xếp hạng (`ranker.py`), thí nghiệm LightGBM vs GBDT/RF (`train_ranker.py`). | **B** | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test/báo cáo D xong, kiểm định 10k bài (chờ Book)<br>✅ M3 Mã & 52 test phần D xong (đã gộp PR #34, chờ E review PR) |
 | **E** | **Thành viên E** | Xác thực corpus (`validate_corpus.py`), xây dựng Jupyter Book. | Kiểm toán 8 bất biến (`validate_m2.py`), viết notebook thống kê M2 trên sách. | Đặc trưng AST (`hierarchy_features.py`), đánh giá `MRR@5` (`evaluation.py`), hình poster (`plots.py`). | **C** | ✅ M1 Hoàn tất<br>🟡 M2 Validator `PASS` 10k bài (chờ notebook Book)<br>✅ M3 Đã merge PR #34 (`hierarchy_features.py`, `evaluation.py`, `plots.py`) |
 
 ---
 
-### 3.2. Bộ Kiểm thử Chất lượng Toàn diện (681/681 Passed)
+### 3.2. Bộ Kiểm thử Chất lượng Toàn diện (728/728 Passed)
 
 Toàn bộ kho mã nguồn tuân thủ nguyên tắc cách ly mạng tuyệt đối: **100% unit tests chạy trên fixture tổng hợp hoặc mock `responses`, không bao giờ gọi mạng thật**.
 
@@ -601,9 +618,9 @@ Toàn bộ kho mã nguồn tuân thủ nguyên tắc cách ly mạng tuyệt đ�
 ruff check . && ruff format --check . && pytest -q
 ```
 
-- **Kết quả kiểm thử:** **681 passed** trên Windows `.venv` (6 cảnh báo `LGBMDeprecationWarning` trên `eval_set` của LightGBM 4.7 khi chạy M3-D):
+- **Kết quả kiểm thử bản sửa B riêng (16/11):** **728 passed** (54,49 s), gồm **47 tests B**, 6 cảnh báo LightGBM `eval_set` deprecated. Full trong sandbox từng gặp WinError 5 ở crawler rename (727 passed/1 failed); ca riêng đạt và full ngoài sandbox đạt, không thay crawler hoặc bỏ test. Các module C không nằm trong snapshot này.
   - Bao phủ toàn bộ **M1** (crawler/discovery/source/s2/export/checkpoint), **M2** (`gathering`, `hierarchy`, `cleaner`, `math_normalizer`, `sentence_splitter`, `bib_extractor`, `dedup`, `export_m2`, `pipeline`, `validate_m2` và kiểm thử tích hợp E2E), **M3 phần A** (`src/tests/test_matching_pipeline.py`, `src/tests/test_export_hf.py`: contract 21 cột, Stage-1 blocking & 3 query-relative features, E2E slice, export đa shard ZSTD & `--verify-hf`), **M3 phần D** (`src/tests/test_ranker.py`: **52 passed** gồm unit/validation, `ranker_factory` và E2E với `evaluate_mrr5`/`plots`), và **M3 phần E** (`src/tests/test_hierarchy_features.py`, `src/tests/test_evaluation.py`).
-- **Kiểm tra chuẩn phong cách mã:** `ruff check .` (`All checks passed!`) và `ruff format --check .` (`101 files already formatted`) sạch 100%.
+- **Kiểm tra chuẩn phong cách mã:** `ruff check .` sạch; `ruff format .` báo **105 files left unchanged**. Tests dùng dữ liệu tổng hợp/offline; cache HF và TEMP/TMP nằm trong workspace, basetemp mới/ngắn.
 
 ---
 

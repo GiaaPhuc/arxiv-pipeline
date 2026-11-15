@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **15/11/2026, 21:45 (Asia/Saigon)** — Đã gộp `main` (PR #34 `M3-E`: `hierarchy_features.py`, `evaluation.py`, `plots.py`) vào nhánh `m3/d-ranker`, rà soát và hoàn thiện `M3-D` (`_has_ranking_pair`, kiểm tra `kind` trong `fit_model`, `predict_rows` nhận `str`/Enum và chặn `None`, thêm test E2E với `evaluate_mrr5`/`generate_all_poster_figures`): `test_ranker.py` **52 passed**, toàn suite `.venv` **681 passed**, Ruff sạch (**101** file); chưa đánh giá MRR@5 trên dữ liệu thật 5.000 ID.
+> Cập nhật lần cuối: **16/11/2026, 00:22 (Asia/Saigon)** — Quỳnh đóng góp bản sửa M3-B trên nhánh riêng `m3/c-b-review-fixes`, nền PR #37 `c7d1f02`; giữ contract chung, bổ sung 15 regression tests. Chờ review độc lập và ghép vào `m3-B`; chưa sửa/merge nhánh Sơn.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -16,6 +16,14 @@
 - Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. Hiện đang hoàn thiện dữ liệu **Milestone 1** (thu thập 25k ID) và hoàn thiện các trụ cột **Milestone 2** (Phase 0 đã xong; B và C đã hoàn thiện module cốt lõi; D và E đang phối hợp ghép nối). Ở **Milestone 3** (Code-Complete trước **16/11**, nộp Dataset HF **5.000 ID** trước **20/11**, Poster A2 dọc chung **27/11**), Leader **A (Phúc)** đã hoàn thành phần mã `M3-A0..A3` trên nhánh làm việc cục bộ; đang chờ PR các module B/C/D/E theo kế hoạch tại [`docs/plans/m3/milestone3-implementation-plan-vi.md`](./docs/plans/m3/milestone3-implementation-plan-vi.md).
 - Nộp Milestone 1 qua Moodle: link repo mã công khai + link Jupyter Book (repo sách riêng, GitHub Pages). **Không nộp dữ liệu** ở mốc này. Viết bằng tiếng Việt. Không nộp trễ.
 - Khi nộp, repo mã chỉ được chứa mã (`.py` / `.ipynb`), `requirements.txt` và `README.md`. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md`, `plans/`, `project requirements/` đang ở trong repo để làm việc — xử lý lúc đóng băng (R6, T5.3 trong Phase 2).
+
+### M3-B — sửa sau review của C (16/11)
+
+- Quỳnh đóng góp sửa trên nhánh riêng `m3/c-b-review-fixes`, dựa trên PR #37 `c7d1f02`; Sơn vẫn là owner B. Đề nghị Phúc/Triệu review độc lập và ghép vào nhánh `m3-B` trước khi PR #37 vào main.
+- Adapter dùng trực tiếp dataclass chung; plain dict có đúng 15 khóa `FEATURE_COLUMNS[:15]`; `author_count_diff` dùng count thật. Giữ họ ghép, bỏ placeholder/rác tác giả, fold Unicode/TeX nhất quán; TF-IDF char n-gram 3–5 theo kế hoạch, fit nội bộ từng bài, có kiểm tra empty vocabulary và fallback cùng cấu hình.
+- B có 47 tests (thêm 15 regression cases). Không đổi `matching/models.py`, caller A hoặc mã C/D/E. Chưa đo chất lượng trên dữ liệu thật; không đồng nhất tests với precision/kappa/coverage thực tế.
+- Snapshot B riêng, không chứa C: **728 passed (54,49 s)**, gồm 47 tests B, 6 cảnh báo LightGBM; Ruff check/format sạch (105 file). Lượt full trong sandbox có 727 passed/1 WinError 5 ở crawler rename; chạy ca riêng đạt, chạy full ngoài sandbox đạt 728. Không sửa crawler hoặc bỏ test.
+- Bản thử ghép ngoài commit với C từ PR #36 đã sửa fixture import đạt 760 tests và 10 probes review/tích hợp (synthetic/offline); 7 cảnh báo LightGBM. Commit B không chứa ba tệp C được copy để thử.
 
 ### M3-D — Ranker và kiểm thử tích hợp (15/11)
 
@@ -71,7 +79,7 @@
 
 ### Việc đang làm — **Phase 2 / chuẩn bị Phase 3 (M3)**
 
-- **M3 (Phase 0 & phần A):** `M3-A0..A3` đã xong (toàn suite offline hiện tại **614 passed**); đang chờ PR của B (`cleaner`, `lexical_features`), C (`auto_matcher`, `labelling`), D (`ranker`, `train_ranker`: đã code + test trên `m3/d-ranker`, chờ review) và E (`hierarchy_features`, `evaluation`, `plots`) trước 16/11; hoàn thiện `README.md` cuối ở Phase 3A sau khi chạy 5.000 ID và có link HF.
+- **M3:** A/D/E có trên main; B PR #37 và C PR #36 đang mở. Quỳnh đóng góp bản sửa B riêng để Phúc/Triệu review trước khi ghép vào `m3-B`; bản sửa không chứa module/test C. Nhãn thật và HF cá nhân làm sau khi chốt code.
 - **M2 (hoàn thiện & kiểm định 10.000 bài thật):** pipeline M2 đã chạy sạch **10.000/10.000 bài** cục bộ (`0` lỗi) và `validate_m2.py` đạt **`PASS`**; còn lại chạy bổ sung 15.000 ID còn thiếu khi có dữ liệu, đo benchmark Colab và ghép notebook/báo cáo vào repo `arxiv-book/m2/*`.
 - **Go/no-go:** Pilot 30 ID ✅. V̄ pilot **~1,9** phiên bản/bài → ~**47.500** request `/src/`; chỉ chờ 3 s/arXiv ≈ **~40 h** (+ tải/trích). Wall pilot (27–28/10, gồm S2 429 trước batch) cỡ **~2 h** cho 30 ID → nhân tuyến tính **~7 ngày** wall nếu S2 vẫn nghẽn; với batch + key ổn định kỳ vọng **~2–3 ngày** một máy (R1 — cần đo lại sau vài trăm ID đầu T4.1).
 - **T4.1 (A):** `python src/run_crawl.py --ranges src/id_ranges.csv` trên máy chính; sao lưu định kỳ `data/` + `manifest.sqlite`.
@@ -191,7 +199,7 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | M3-A1 | `src/matching/features.py` (`extract_paper_features`, Stage-1 blocking $n>50$, 3 query-relative features) | A (Phúc) | < 16/11 | ✅ 3 tests feature & blocking pass offline |
 | M3-A2 | `src/matching/pipeline.py` (`MatchingStages`, S2 raw DOI hints, predictions/eval) + `src/run_matching.py` CLI | A (Phúc) | < 16/11 | ✅ 4 tests pipeline/CLI (`--dry-run`, zero-cand, versioned GT) pass với mock stages |
 | M3-A3 | `src/matching/export_hf.py` (6 bảng ZSTD shards, YAML `README.md`, `verify_hf_dataset`) | A (Phúc) | < 16/11 | ✅ 4 tests export/verify (gồm shard rỗng & E2E CLI `--export-hf --verify-hf`) pass |
-| M3-B | `cleaner.py`, `lexical_features.py` + unit tests | B | < 16/11 | ⬜ Chờ PR |
+| M3-B | `cleaner.py`, `lexical_features.py` + unit tests | B | < 16/11 | 🟡 PR #37 gốc ở `c7d1f02`; bản sửa C trên nhánh riêng có 47 tests B, chờ review độc lập/ghép vào `m3-B`. Chưa đánh giá dữ liệu thật |
 | M3-C | `auto_matcher.py`, `labelling.py` + unit tests | C | < 16/11 | ⬜ Chờ PR |
 | M3-D | `ranker.py`, `train_ranker.py` + unit tests | D | < 16/11 | ✅ Code + **52 passed** (unit/validation, `ranker_factory` & E2E với `evaluate_mrr5`/`plots`); đã gộp PR #34, chờ E review PR |
 | M3-E | `hierarchy_features.py`, `evaluation.py`, `plots.py` + unit tests | E | < 16/11 | ✅ Đã merge PR #34 (`m3/e-hierarchy-eval-plots`): `hierarchy_features.py`, `evaluation.py`, `plots.py` + unit tests |
