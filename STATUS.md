@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **14/11/2026, 17:37 (Asia/Saigon)** — vá `hierarchy.py` (`_normalize_reference_heading`) cho heading References/Bibliography còn `{}` / macro bọc / đánh số mục như `{References}` (`2408.05882`) khớp `validate_m2.py`, sau khi 8 bài `.bib` ở `b7921d8` đã qua trên Colab; toàn suite **614 passed**, Ruff sạch.
+> Cập nhật lần cuối: **15/11/2026, 20:55 (Asia/Saigon)** — hoàn thiện PR #34 (`m3/e-hierarchy-eval-plots`, M3-E: `hierarchy_features.py`, `evaluation.py`, `plots.py` + unit tests): sửa duyệt DAG pre-order, `minted`/single-line `\verb`, ưu tiên heading `Results and Discussion`, fallback case-insensitive citation key, lọc partition nghiêm ngặt ở `evaluate_mrr5`, bỏ toàn bộ số liệu fallback bịa trong `plots.py` (hỗ trợ `feature_importance_gain` + sửa đè chữ/legend); toàn suite `.venv` **629 passed**, 15/15 test M3-E pass với Matplotlib 3.10.7, Ruff sạch.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -187,7 +187,7 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | M3-B | `cleaner.py`, `lexical_features.py` + unit tests | B | < 16/11 | ⬜ Chờ PR |
 | M3-C | `auto_matcher.py`, `labelling.py` + unit tests | C | < 16/11 | ⬜ Chờ PR |
 | M3-D | `ranker.py`, `train_ranker.py` + unit tests | D | < 16/11 | ⬜ Chờ PR |
-| M3-E | `hierarchy_features.py`, `evaluation.py`, `plots.py` + unit tests | E | < 16/11 | ⬜ Chờ PR |
+| M3-E | `hierarchy_features.py`, `evaluation.py`, `plots.py` + unit tests | E | < 16/11 | 🟡 PR #34 (`m3/e-hierarchy-eval-plots`) đã hoàn thiện, chờ merge; **629 passed** (`.venv`), 15/15 test M3-E pass với Matplotlib 3.10.7, Ruff sạch |
 | M3-3A | Chạy thật `--range-index <0..4> --export-hf --verify-hf`, cập nhật `README.md`, nộp HF & Poster A2 | Cả nhóm | 16–27/11 | ⬜ Chờ đủ dữ liệu M1/M2 & merge B–E |
 
 ---
