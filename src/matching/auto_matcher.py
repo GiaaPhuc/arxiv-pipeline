@@ -28,33 +28,42 @@ def _match(bib: PrecleanedBib, candidates: list[PrecleanedRef]) -> tuple[str | N
         if ref.arxivid == bib.arxivid and ref.norm_arxiv_id and ref.raw_ref_arxiv_id:
             unique.setdefault(base_arxiv_id(ref.norm_arxiv_id), ref)
     refs = list(unique.values())
+    if not refs:
+        return None, 0, 0.0
     for tier in (3, 2, 1):
         hits: list[tuple[PrecleanedRef, float]] = []
-        for ref in refs:
-            score = fuzz.token_sort_ratio(bib.clean_title, ref.clean_title) / 100.0
-            if tier == 3:
-                accepted = bool(bib.extracted_arxiv_id) and (
-                    base_arxiv_id(bib.extracted_arxiv_id) == base_arxiv_id(ref.norm_arxiv_id)
-                )
-            elif tier == 2:
-                accepted = bool(bib.norm_doi and ref.norm_doi == bib.norm_doi)
-            else:
-                if not bib.clean_title or not ref.clean_title:
+        if tier == 3:
+            if not bib.extracted_arxiv_id:
+                continue
+            target_arxiv = base_arxiv_id(bib.extracted_arxiv_id)
+            for ref in refs:
+                if base_arxiv_id(ref.norm_arxiv_id) == target_arxiv:
+                    score = fuzz.token_sort_ratio(bib.clean_title, ref.clean_title) / 100.0
+                    hits.append((ref, score))
+        elif tier == 2:
+            if not bib.norm_doi:
+                continue
+            for ref in refs:
+                if ref.norm_doi == bib.norm_doi:
+                    score = fuzz.token_sort_ratio(bib.clean_title, ref.clean_title) / 100.0
+                    hits.append((ref, score))
+        else:
+            if not bib.clean_title or not bib.authors.first_surname:
+                continue
+            for ref in refs:
+                if not ref.clean_title or ref.authors.first_surname != bib.authors.first_surname:
                     continue
                 length_ratio = min(len(bib.clean_title), len(ref.clean_title)) / max(
                     len(bib.clean_title), len(ref.clean_title)
                 )
+                if length_ratio < 0.70:
+                    continue
                 known_years = bib.year is not None and ref.year is not None
-                year_ok = not known_years or abs(bib.year - ref.year) <= 1
-                accepted = (
-                    length_ratio >= 0.70
-                    and bool(bib.authors.first_surname)
-                    and bib.authors.first_surname == ref.authors.first_surname
-                    and year_ok
-                    and score >= (0.94 if known_years else 0.97)
-                )
-            if accepted:
-                hits.append((ref, score))
+                if known_years and abs(bib.year - ref.year) > 1:
+                    continue
+                score = fuzz.token_sort_ratio(bib.clean_title, ref.clean_title) / 100.0
+                if score >= (0.94 if known_years else 0.97):
+                    hits.append((ref, score))
         if not hits:
             continue
         if tier == 1:
@@ -85,7 +94,7 @@ def run_auto_matcher(
     """
     queries = []
     for pid in sorted(set(paper_ids)):
-        bibs = sorted(bib_by_paper[pid], key=lambda b: b.citationkey)
+        bibs = sorted(bib_by_paper.get(pid, []), key=lambda b: b.citationkey)
         if len({b.citationkey for b in bibs}) != len(bibs) or any(b.arxivid != pid for b in bibs):
             raise ValueError(f"Duplicate or foreign BibTeX query in {pid}")
         matches = {b.citationkey: _match(b, refs_by_paper.get(pid, [])) for b in bibs}

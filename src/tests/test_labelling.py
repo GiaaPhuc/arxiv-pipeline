@@ -8,6 +8,7 @@ Synthetic labels are not evidence of real annotation quality or coverage.
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import sys
 from dataclasses import asdict, replace
@@ -504,3 +505,202 @@ def test_missing_cleaner_is_reported_without_fake_labels(workspace, monkeypatch,
     )
     assert result == 2 and not out.exists()
     assert "cleaner" in capsys.readouterr().err
+
+
+def test_auto_skips_missing_paper_and_unneeded_fuzzy_calls(monkeypatch):
+    assert auto_matcher.run_auto_matcher(["2408.11045"], {}, {}) == []
+    bib_base, refs = sample_precleaned_bibs(), sample_precleaned_refs()
+    calls = 0
+
+    def spy_ratio(a, b):
+        nonlocal calls
+        calls += 1
+        return 100.0
+
+    monkeypatch.setattr(auto_matcher.fuzz, "token_sort_ratio", spy_ratio)
+    empty_title = replace(bib_base[0], extracted_arxiv_id=None, norm_doi=None, clean_title="")
+    assert auto_matcher.heuristic_match(empty_title, refs) is None
+    assert calls == 0
+    assert auto_matcher.heuristic_match(bib_base[0], refs) == "1706.03762"
+    assert calls == 1
+
+
+def test_manual_cli_versioned_paper_id_and_pool_readiness(workspace, monkeypatch, capsys):
+    data, gt, _ = workspace
+    pre_rows = [
+        asdict(
+            LabeledQuery(
+                f"2408.{11046 + i:05d}",
+                f"q{j:02d}",
+                None,
+                AnnotationSource.MANUAL,
+                Partition.TRAIN,
+            )
+        )
+        for i in range(4)
+        for j in range(20)
+    ]
+    out_not_ready = gt / "all_negative_5.json"
+    labelling._write_json(out_not_ready, pre_rows)
+    answers = iter(["0"] * 20)
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    assert (
+        labelling.main(
+            [
+                "--range-index",
+                "0",
+                "--data-dir",
+                str(data),
+                "--paper-ids",
+                "2408.11045v2",
+                "--out-path",
+                str(out_not_ready),
+            ]
+        )
+        == 0
+    )
+    not_ready = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert not_ready["papers"] == 5 and not_ready["queries"] == 100
+    assert not_ready["complete"] is True
+    assert not_ready["qualified_eval_papers"] == 0
+    assert not_ready["manual_pool_ready"] is False
+    saved = load_manual_annotations(out_not_ready)
+    assert all("v" not in q.arxivid for q in saved)
+    assert labelling._read_manual(out_not_ready) == saved
+
+    versioned_json = gt / "versioned_pid.json"
+    versioned_json.write_text(
+        json.dumps(
+            [
+                {
+                    "arxivid": "2408.11045v3",
+                    "citationkey": "q00",
+                    "groundtrutharxivid": None,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert labelling._read_manual(versioned_json)[0].arxivid == "2408.11045"
+
+    assert (
+        labelling.main(
+            [
+                "--range-index",
+                "0",
+                "--data-dir",
+                str(data),
+                "--paper-ids",
+                "2408.11045v2",
+            ]
+        )
+        == 0
+    )
+    ready = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert ready["qualified_eval_papers"] == 5
+    assert ready["manual_pool_ready"] is True
+
+
+def test_manual_cli_compare_path_and_coverage_warning(workspace, caplog, capsys):
+    data, gt, _ = workspace
+    primary = json.loads((gt / "manual_annotations.json").read_text(encoding="utf-8"))
+    blind_rows = [dict(row) for row in primary if row["arxivid"] == "2408.11045"]
+    blind_path = gt / "blind.json"
+    labelling._write_json(blind_path, blind_rows)
+    assert (
+        labelling.main(
+            [
+                "--range-index",
+                "0",
+                "--data-dir",
+                str(data),
+                "--compare-path",
+                str(blind_path),
+            ]
+        )
+        == 0
+    )
+    exact_out = json.loads(capsys.readouterr().out)
+    assert exact_out["kappa"] == pytest.approx(1.0)
+    assert exact_out["meets_target_095"] is True
+
+    blind_rows[0]["groundtrutharxivid"] = None
+    labelling._write_json(blind_path, blind_rows)
+
+    assert (
+        labelling.main(
+            [
+                "--range-index",
+                "0",
+                "--data-dir",
+                str(data),
+                "--compare-path",
+                str(blind_path),
+            ]
+        )
+        == 0
+    )
+    kappa_out = json.loads(capsys.readouterr().out)
+    assert kappa_out["n_queries"] == 20
+    assert kappa_out["kappa"] == pytest.approx(33 / 37)
+    assert kappa_out["meets_target_095"] is False
+    assert json.loads((gt / "kappa.json").read_text(encoding="utf-8")) == kappa_out
+
+    assert (
+        labelling.main(
+            [
+                "--range-index",
+                "0",
+                "--data-dir",
+                str(data),
+                "--compare-path",
+                str(gt / "missing.json"),
+            ]
+        )
+        == 2
+    )
+    assert "Missing comparison" in capsys.readouterr().err
+
+    assert (
+        labelling.main(
+            [
+                "--range-index",
+                "0",
+                "--data-dir",
+                str(data),
+                "--paper-ids",
+                "2408.11045",
+                "--compare-path",
+                str(blind_path),
+            ]
+        )
+        == 2
+    )
+    assert "Cannot combine" in capsys.readouterr().err
+
+    with caplog.at_level(logging.WARNING):
+        assert (
+            auto_matcher.main(
+                ["--range-index", "0", "--data-dir", str(data), "--auto-fraction", "1"]
+            )
+            == 0
+        )
+    assert "assigned_coverage" in caplog.text
+
+
+def test_pipeline_with_default_matching_stages(workspace):
+    from matching.pipeline import default_matching_stages, run_matching_pipeline
+
+    data, _, _ = workspace
+    summary = run_matching_pipeline(
+        data,
+        range_index=0,
+        auto_fraction=1,
+        stages=default_matching_stages(),
+    )
+    rows = pq.read_table(summary["predictions_path"]).to_pylist()
+    assert len(rows) == 160
+    assert summary["audit_auto_matcher"]["precision"] == pytest.approx(1.0)
+    overall = next(m for m in summary["test_metrics"] if m["subset"] == "overall")
+    assert overall["mrr_at_5_matchable"] == pytest.approx(1.0)
+    assert overall["mrr_at_5_all"] == pytest.approx(0.3)

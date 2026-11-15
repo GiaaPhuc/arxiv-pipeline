@@ -30,6 +30,8 @@ from crawler.manifest import atomic_write
 from matching.export_hf import base_arxiv_id, discover_table_files, resolve_range_selection
 from matching.models import AnnotationSource, LabeledQuery, Partition, PrecleanedBib, PrecleanedRef
 
+logger = logging.getLogger(__name__)
+
 
 def _validate_labels(
     queries: list[LabeledQuery],
@@ -66,9 +68,12 @@ def _read_manual(path: Path) -> list[LabeledQuery]:
             or not {"arxivid", "citationkey", "groundtrutharxivid"} <= item.keys()
         ):
             raise ValueError("Each manual annotation needs an explicit groundtrutharxivid")
+        raw_pid = item["arxivid"]
+        if not isinstance(raw_pid, str) or not raw_pid.strip():
+            raise ValueError("Annotation keys must be nonempty strings")
         rows.append(
             LabeledQuery(
-                item["arxivid"],
+                base_arxiv_id(raw_pid),
                 item["citationkey"],
                 item["groundtrutharxivid"],
                 AnnotationSource(item.get("source", "manual")),
@@ -305,6 +310,7 @@ def _annotation_cli(argv: list[str] | None, *, auto: bool) -> int:
     else:
         parser.add_argument("--paper-ids", nargs="+")
         parser.add_argument("--out-path", type=Path)
+        parser.add_argument("--compare-path", type=Path)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
     try:
@@ -318,6 +324,34 @@ def _annotation_cli(argv: list[str] | None, *, auto: bool) -> int:
 
         selection = resolve_range_selection(args.range_index, args.ranges)
         gt_dir = args.groundtruth_dir or args.data_dir / "groundtruth" / f"range_{args.range_index}"
+        if not auto and args.compare_path is not None:
+            if args.paper_ids:
+                raise ValueError("Cannot combine --compare-path with --paper-ids")
+            primary_path = args.out_path or gt_dir / "manual_annotations.json"
+            if not primary_path.is_file():
+                raise FileNotFoundError(f"Missing primary manual annotations: {primary_path}")
+            if not args.compare_path.is_file():
+                raise FileNotFoundError(
+                    f"Missing comparison manual annotations: {args.compare_path}"
+                )
+            rows_a = _read_manual(primary_path)
+            rows_b = _read_manual(args.compare_path)
+            if any(q.arxivid not in selection.target_ids for q in [*rows_a, *rows_b]):
+                raise ValueError("Manual file contains papers outside selected range")
+            map_a = {(q.arxivid, q.citationkey): q.groundtrutharxivid for q in rows_a}
+            map_b = {(q.arxivid, q.citationkey): q.groundtrutharxivid for q in rows_b}
+            shared_keys = sorted(map_a.keys() & map_b.keys())
+            labels_a = {k: map_a[k] for k in shared_keys}
+            labels_b = {k: map_b[k] for k in shared_keys}
+            kappa = compute_cohens_kappa(labels_a, labels_b)
+            payload = {
+                "kappa": kappa,
+                "n_queries": len(shared_keys),
+                "meets_target_095": kappa >= 0.95,
+            }
+            _write_json(gt_dir / "kappa.json", payload)
+            print(json.dumps(payload, indent=2))
+            return 0
         raw_bibs = _iter_matching_rows(
             discover_table_files(args.m2_parsed_dir or args.data_dir / "parsed", "bibtex"),
             "arxivid",
@@ -345,26 +379,39 @@ def _annotation_cli(argv: list[str] | None, *, auto: bool) -> int:
                 )
             )
             return 0
-        if not auto and any(p not in eligible_manual for p in args.paper_ids):
+        paper_ids = [base_arxiv_id(p) for p in args.paper_ids] if not auto else []
+        if not auto and any(p not in eligible_manual for p in paper_ids):
             raise ValueError(
                 "Selected manual papers must be in range with >=20 BibTeX and >=5 refs"
             )
         bibs, refs, context = _preclean_cli_inputs(raw_bibs, raw_refs, args.data_dir)
         if not auto:
             path = args.out_path or gt_dir / "manual_annotations.json"
-            rows = _manual_labeling(args.paper_ids, bibs, refs, path, context)
-            labeled = Counter(q.arxivid for q in rows)
+            rows = _manual_labeling(paper_ids, bibs, refs, path, context)
+            by_paper: dict[str, list[LabeledQuery]] = defaultdict(list)
+            for q in rows:
+                by_paper[q.arxivid].append(q)
+            labeled = {p: len(qs) for p, qs in by_paper.items()}
             complete = bool(labeled) and all(labeled[p] == counts[p] for p in labeled)
+            qualified_eval_papers = sum(
+                len(qs) == counts[p]
+                and len(qs) >= 20
+                and sum(q.groundtrutharxivid is not None for q in qs) >= 3
+                and sum(q.groundtrutharxivid is None for q in qs) >= 3
+                for p, qs in by_paper.items()
+            )
             print(
                 json.dumps(
                     {
                         "queries": len(rows),
                         "papers": len(labeled),
                         "complete": complete,
+                        "qualified_eval_papers": qualified_eval_papers,
                         "manual_pool_ready": complete
                         and len(labeled) >= 5
                         and all(n >= 20 for n in labeled.values())
-                        and len(rows) >= 100,
+                        and len(rows) >= 100
+                        and qualified_eval_papers >= 2,
                     }
                 )
             )
@@ -393,6 +440,14 @@ def _annotation_cli(argv: list[str] | None, *, auto: bool) -> int:
             "assigned_coverage": len(selected) / assigned_nonmanual if assigned_nonmanual else 0.0,
         }
         _write_json(gt_dir / "coverage.json", coverage)
+        if coverage["assigned_coverage"] < 0.10:
+            logger.warning(
+                "assigned_coverage %.4f < 0.10 (%s/%s non-manual IDs in range); "
+                "increase --auto-fraction if 10%% of the assigned slice is required",
+                coverage["assigned_coverage"],
+                len(selected),
+                assigned_nonmanual,
+            )
         print(json.dumps({"audit": audit, "coverage": coverage}, indent=2))
         return 0
     except (OSError, ValueError, ImportError, KeyError) as exc:
