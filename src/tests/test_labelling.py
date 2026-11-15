@@ -334,13 +334,13 @@ def workspace(tmp_path):
 
 
 def install_synthetic_b(monkeypatch, stages):
-    monkeypatch.setitem(
-        sys.modules,
-        "matching.cleaner",
-        SimpleNamespace(
-            preclean_bibtex=stages.preclean_bibtex, preclean_reference=stages.preclean_reference
-        ),
+    import matching
+
+    cleaner = SimpleNamespace(
+        preclean_bibtex=stages.preclean_bibtex, preclean_reference=stages.preclean_reference
     )
+    monkeypatch.setitem(sys.modules, "matching.cleaner", cleaner)
+    monkeypatch.setattr(matching, "cleaner", cleaner, raising=False)
 
 
 def test_manual_cli_listing_and_raw_display(workspace, monkeypatch, capsys):
@@ -484,7 +484,10 @@ def test_invalid_manual_json_and_empty_kappa_label(tmp_path):
 
 
 def test_missing_cleaner_is_reported_without_fake_labels(workspace, monkeypatch, capsys):
+    import matching
+
     data, gt, _ = workspace
+    monkeypatch.delattr(matching, "cleaner", raising=False)
     monkeypatch.setitem(sys.modules, "matching.cleaner", None)
     out = gt / "must-not-exist.json"
     result = labelling.main(
