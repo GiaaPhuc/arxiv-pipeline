@@ -548,17 +548,17 @@ Milestone 3 ánh xạ từng entry BibTeX trong từng bài báo (chỉ giữ b�
 5. **Huấn luyện & Sinh Top-5:** Gán nhãn nhị phân `0/1` theo `base_arxiv_id(gt_id) == base_arxiv_id(ref_arxiv_id)`, huấn luyện `MatchingRanker`, khử trùng và đệm `None` đủ 5 cột `cand1..cand5` (bài có 0 ứng viên ra 5 `None`; giữ nguyên văn `groundtrutharxivid` gồm cả hậu tố phiên bản như `1706.03762v2` khi ghi `predictions.parquet` theo `PREDICTIONS_SCHEMA`).
 6. **Đánh giá `MRR@5`:** Gọi `evaluate_mrr5` cho tập `test` và `valid`, ghi nguyên tử `evaluation_results.json` và `matching_summary.json`.
 
-**Chi tiết bước 5 — M3-D (14/11):** `MatchingRanker()` mặc định LambdaMART 21 cột;
+**Chi tiết bước 5 — M3-D (14–15/11):** `MatchingRanker()` mặc định LambdaMART 21 cột;
 `include_m2=False` bỏ đúng 3 cột M2 để chạy ablation 18 cột. `train_ranker.py` gom
 nhóm theo `(arxivid, citationkey)` trước khi dựng ma trận/group sizes; Manual có
-trọng số 3, Auto 1. LambdaMART bỏ nhóm toàn âm, chỉ early stop trên Valid-Manual có
-nhãn dương; thiếu tập này dùng số cây cố định. Train/Valid trùng bài bị từ chối.
+trọng số 3, Auto 1; `fit_model` từ chối loại mô hình ngoài `"logistic"`/`"lambdamart"`. LambdaMART bỏ nhóm toàn âm, chỉ early stop trên Valid-Manual có
+ít nhất một truy vấn chứa cả nhãn dương và âm; thiếu tập này dùng số cây cố định. Train/Valid trùng bài bị từ chối.
 Ba baseline dùng `model="fuzzy"`, `"tfidf"`, `"logistic"`; scaler của Logistic chỉ
 fit Train. Hậu xử lý chung ưu tiên anchor arXiv/DOI, điểm giảm dần và thứ tự gốc
-khi bằng điểm, khử ID trùng rồi đệm `None`. Có `predict_rows` cho evaluator E và
+khi bằng điểm, khử ID trùng rồi đệm `None`. `predict_rows` nhận partition `Enum` hoặc `str` (chặn `None`) để bàn giao cho `evaluate_mrr5` của E, và
 `export_metadata` ghi thời gian fit, cấu hình, cột và gain importance vào
 `data/matching/range_<k>/`; dữ liệu/artifact không commit. Đã kiểm 5 cấu hình qua
-`ranker_factory` với B/C/E giả lập; chưa đánh giá dữ liệu thật. Chi tiết tại
+`ranker_factory` (B/C giả lập) và handoff E2E với `evaluate_mrr5` + `generate_all_poster_figures` của E sau khi merge PR #34; chưa đánh giá dữ liệu thật. Chi tiết tại
 [`d-ranker-handoff.md`](reports/m3/d-ranker-handoff.md).
 
 ### 3.0.3. Đóng gói & Kiểm tra Dataset Hugging Face (`src/matching/export_hf.py`)
@@ -587,12 +587,12 @@ Quy định phân công theo `CONTRIBUTING.md` và tiến độ thực tế qua 
 | **A** | **Gia Phúc (Leader)** | Điều phối pipeline, mạng HTTP, manifest, metrics, crawler operator. | Khóa hợp đồng `models.py`, điều phối `pipeline.py`, CLI `run_parse.py`, profiler. | Khóa `matching/models.py`, `features.py`, `pipeline.py`, `run_matching.py`, `export_hf.py`, `matching_fixtures.py`. | **E** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Đã chạy 10k bài (chờ 15k ID & Colab)<br>✅ M3 Mã phần A (`M3-A0..A3`) |
 | **B** | **Thành viên B** | Xử lý dải ID, khám phá Atom API, tích hợp Semantic Scholar. | Làm sạch văn bản (`cleaner.py`), chuẩn hóa toán (`math_normalizer.py`), tách câu (`sentence_splitter.py`). | Tiền xử lý (`cleaner.py`), 14 đặc trưng lexical + TF-IDF (`lexical_features.py`). | **D** | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test xong, đạt kiểm định 10k bài (chờ báo cáo Book)<br>⬜ M3 Chờ PR |
 | **C** | **Trường Quỳnh** | Fixture tổng hợp, tải và giải nén source TeX/bib/bbl. | Gom nguồn (`gathering.py`), dựng cây cấp bậc (`hierarchy.py`). | Auto-matcher + audit (`auto_matcher.py`), chia tập train/valid/test (`labelling.py`). | **A** / **E** | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test xong, đạt kiểm định 10k bài (chờ báo cáo Book)<br>⬜ M3 Chờ PR |
-| **D** | **Thành viên D** | Xuất dữ liệu Parquet/CSV, đối soát corpus, notebook số liệu. | Trích tham khảo (`bib_extractor.py`), khử trùng lặp (`dedup.py`), xuất Parquet (`export_m2.py`). | Mô hình xếp hạng (`ranker.py`), thí nghiệm LightGBM vs GBDT/RF (`train_ranker.py`). | **B** | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test/báo cáo D xong, kiểm định 10k bài (chờ Book)<br>⬜ M3 Chờ PR |
-| **E** | **Thành viên E** | Xác thực corpus (`validate_corpus.py`), xây dựng Jupyter Book. | Kiểm toán 8 bất biến (`validate_m2.py`), viết notebook thống kê M2 trên sách. | Đặc trưng AST (`hierarchy_features.py`), đánh giá `MRR@5` (`evaluation.py`), hình poster (`plots.py`). | **C** | ✅ M1 Hoàn tất<br>🟡 M2 Validator `PASS` 10k bài (chờ notebook Book)<br>⬜ M3 Chờ PR |
+| **D** | **Thành viên D** | Xuất dữ liệu Parquet/CSV, đối soát corpus, notebook số liệu. | Trích tham khảo (`bib_extractor.py`), khử trùng lặp (`dedup.py`), xuất Parquet (`export_m2.py`). | Mô hình xếp hạng (`ranker.py`), thí nghiệm LightGBM vs GBDT/RF (`train_ranker.py`). | **B** | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test/báo cáo D xong, kiểm định 10k bài (chờ Book)<br>✅ M3 Mã & 52 test phần D xong (đã gộp PR #34, chờ E review PR) |
+| **E** | **Thành viên E** | Xác thực corpus (`validate_corpus.py`), xây dựng Jupyter Book. | Kiểm toán 8 bất biến (`validate_m2.py`), viết notebook thống kê M2 trên sách. | Đặc trưng AST (`hierarchy_features.py`), đánh giá `MRR@5` (`evaluation.py`), hình poster (`plots.py`). | **C** | ✅ M1 Hoàn tất<br>🟡 M2 Validator `PASS` 10k bài (chờ notebook Book)<br>✅ M3 Đã merge PR #34 (`hierarchy_features.py`, `evaluation.py`, `plots.py`) |
 
 ---
 
-### 3.2. Bộ Kiểm thử Chất lượng Toàn diện (608/608 Passed)
+### 3.2. Bộ Kiểm thử Chất lượng Toàn diện (681/681 Passed)
 
 Toàn bộ kho mã nguồn tuân thủ nguyên tắc cách ly mạng tuyệt đối: **100% unit tests chạy trên fixture tổng hợp hoặc mock `responses`, không bao giờ gọi mạng thật**.
 
@@ -601,9 +601,9 @@ Toàn bộ kho mã nguồn tuân thủ nguyên tắc cách ly mạng tuyệt đ�
 ruff check . && ruff format --check . && pytest -q
 ```
 
-- **Kết quả kiểm thử:** **608 passed** (61.46s trên Windows `.venv`):
-  - Bao phủ toàn bộ **M1** (crawler/discovery/source/s2/export/checkpoint), **M2** (`gathering`, `hierarchy`, `cleaner`, `math_normalizer`, `sentence_splitter`, `bib_extractor`, `dedup`, `export_m2`, `pipeline`, `validate_m2` và kiểm thử tích hợp E2E) và **M3 phần A** (`src/tests/test_matching_pipeline.py`, `src/tests/test_export_hf.py`: contract 21 cột, Stage-1 blocking & 3 query-relative features, E2E slice, export đa shard ZSTD & `--verify-hf`).
-- **Kiểm tra chuẩn phong cách mã:** `ruff check .` (`All checks passed!`) và `ruff format --check .` (`92 files already formatted`) sạch 100%.
+- **Kết quả kiểm thử:** **681 passed** trên Windows `.venv` (6 cảnh báo `LGBMDeprecationWarning` trên `eval_set` của LightGBM 4.7 khi chạy M3-D):
+  - Bao phủ toàn bộ **M1** (crawler/discovery/source/s2/export/checkpoint), **M2** (`gathering`, `hierarchy`, `cleaner`, `math_normalizer`, `sentence_splitter`, `bib_extractor`, `dedup`, `export_m2`, `pipeline`, `validate_m2` và kiểm thử tích hợp E2E), **M3 phần A** (`src/tests/test_matching_pipeline.py`, `src/tests/test_export_hf.py`: contract 21 cột, Stage-1 blocking & 3 query-relative features, E2E slice, export đa shard ZSTD & `--verify-hf`), **M3 phần D** (`src/tests/test_ranker.py`: **52 passed** gồm unit/validation, `ranker_factory` và E2E với `evaluate_mrr5`/`plots`), và **M3 phần E** (`src/tests/test_hierarchy_features.py`, `src/tests/test_evaluation.py`).
+- **Kiểm tra chuẩn phong cách mã:** `ruff check .` (`All checks passed!`) và `ruff format --check .` (`101 files already formatted`) sạch 100%.
 
 ---
 

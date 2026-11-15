@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **14/11/2026, 20:57 (Asia/Saigon)** — M3-D: 3 baseline, LambdaMART 21/18, Top-5 và bàn giao E; **661 passed**, Ruff sạch; chưa đánh giá MRR trên dữ liệu thật.
+> Cập nhật lần cuối: **15/11/2026, 21:45 (Asia/Saigon)** — Đã gộp `main` (PR #34 `M3-E`: `hierarchy_features.py`, `evaluation.py`, `plots.py`) vào nhánh `m3/d-ranker`, rà soát và hoàn thiện `M3-D` (`_has_ranking_pair`, kiểm tra `kind` trong `fit_model`, `predict_rows` nhận `str`/Enum và chặn `None`, thêm test E2E với `evaluate_mrr5`/`generate_all_poster_figures`): `test_ranker.py` **52 passed**, toàn suite `.venv` **681 passed**, Ruff sạch (**101** file); chưa đánh giá MRR@5 trên dữ liệu thật 5.000 ID.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -17,12 +17,12 @@
 - Nộp Milestone 1 qua Moodle: link repo mã công khai + link Jupyter Book (repo sách riêng, GitHub Pages). **Không nộp dữ liệu** ở mốc này. Viết bằng tiếng Việt. Không nộp trễ.
 - Khi nộp, repo mã chỉ được chứa mã (`.py` / `.ipynb`), `requirements.txt` và `README.md`. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md`, `plans/`, `project requirements/` đang ở trong repo để làm việc — xử lý lúc đóng băng (R6, T5.3 trong Phase 2).
 
-### M3-D — Ranker và kiểm thử tích hợp (14/11)
+### M3-D — Ranker và kiểm thử tích hợp (15/11)
 
-- `train_ranker.py`: gom nhóm `(arxivid, citationkey)`, căn nhãn/trọng số, 21/18 cột; Fuzzy, TF-IDF, StandardScaler + LogisticRegression, LambdaMART; Manual=3/Auto=1. LambdaMART bỏ nhóm toàn âm, early stopping chỉ Valid-Manual có dương; thiếu valid phù hợp thì dùng số cây cố định. Dữ liệu thiếu nhãn/nguồn, không hữu hạn hoặc Train không học được báo lỗi rõ.
-- `ranker.py`: đúng giao diện `RankerProtocol`; Train/Valid tách theo bài; anchor arXiv/DOI trước, điểm giảm dần, bằng điểm giữ thứ tự gốc, dedup ID và đệm `None`. Có `predict_rows` cho E, JSON thời gian fit/cấu hình/thứ tự cột/gain importance; không đổi ground truth/splits.
-- Kiểm chứng: **47 passed** phần D (**42** unit/handoff + **5** tích hợp), gồm LightGBM fit/predict thật và tác động trọng số. Toàn repo **661 passed (14,63 s)**, không fail/skip; `ruff check .` và `ruff format .` sạch. 4 cảnh báo LightGBM 4.7 deprecate `eval_set` (giữ API tương thích >=4.3). Lượt đầu gặp cache HF chỉ đọc và socket multiprocessing bị sandbox chặn; chạy lại offline với cache `/tmp` và quyền socket cục bộ đạt.
-- Tích hợp dùng ranker thật qua `ranker_factory`, B/C/E giả lập bằng fixture A. Chờ E review và ghép các module thật; chưa đo MRR@5, benchmark CPU hay chạy dải 5.000 ID. `NullQueryDetector` tùy chọn chưa làm. Hướng dẫn: [`d-ranker-handoff.md`](docs/reports/m3/d-ranker-handoff.md).
+- `train_ranker.py`: gom nhóm `(arxivid, citationkey)`, căn nhãn/trọng số, 21/18 cột; Fuzzy, TF-IDF, StandardScaler + LogisticRegression, LambdaMART; Manual=3/Auto=1. LambdaMART bỏ nhóm toàn âm, early stopping chỉ bật khi Valid-Manual có ít nhất một truy vấn chứa cả nhãn dương và âm (`_has_ranking_pair`); thiếu valid phù hợp thì dùng số cây cố định. `fit_model` chỉ nhận `"logistic"`/`"lambdamart"`. Dữ liệu thiếu nhãn/nguồn, không hữu hạn hoặc Train không học được báo lỗi rõ.
+- `ranker.py`: đúng giao diện `RankerProtocol`; Train/Valid tách theo bài; anchor arXiv/DOI trước, điểm giảm dần, bằng điểm giữ thứ tự gốc, dedup ID và đệm `None`. `predict_rows` hỗ trợ partition dạng `Enum` hoặc `str` (từ chối `None`), xuất JSON thời gian fit/cấu hình/thứ tự cột/gain importance; không đổi ground truth/splits.
+- Kiểm chứng: **52 passed** phần D (unit/validation, tích hợp `ranker_factory`, và handoff E2E thật với `evaluate_mrr5` + `generate_all_poster_figures` của E sau khi merge `main` PR #34). Toàn repo **681 passed**, không fail/skip; `ruff check .` sạch và `ruff format --check .` chuẩn **101** file. `6` cảnh báo LightGBM 4.7 deprecate `eval_set` (giữ API tương thích `>=4.3`).
+- Tích hợp pipeline dùng ranker thật qua `ranker_factory` với B/C giả lập bằng fixture A; handoff đầu ra đã kiểm với module thật của E. Chờ E review PR để merge `main` và ghép B/C; chưa đo MRR@5, benchmark CPU hay chạy dải 5.000 ID. `NullQueryDetector` tùy chọn chưa làm. Hướng dẫn: [`d-ranker-handoff.md`](docs/reports/m3/d-ranker-handoff.md).
 
 ### M2 — Hoàn thiện, tối ưu và kiểm định trên 10.000 bài thật (14/11)
 
@@ -193,8 +193,8 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | M3-A3 | `src/matching/export_hf.py` (6 bảng ZSTD shards, YAML `README.md`, `verify_hf_dataset`) | A (Phúc) | < 16/11 | ✅ 4 tests export/verify (gồm shard rỗng & E2E CLI `--export-hf --verify-hf`) pass |
 | M3-B | `cleaner.py`, `lexical_features.py` + unit tests | B | < 16/11 | ⬜ Chờ PR |
 | M3-C | `auto_matcher.py`, `labelling.py` + unit tests | C | < 16/11 | ⬜ Chờ PR |
-| M3-D | `ranker.py`, `train_ranker.py` + unit tests | D | < 16/11 | ✅ Code + 47 tests (42 unit/handoff, 5 tích hợp); chờ E review, chưa đánh giá thật |
-| M3-E | `hierarchy_features.py`, `evaluation.py`, `plots.py` + unit tests | E | < 16/11 | ⬜ Chờ PR |
+| M3-D | `ranker.py`, `train_ranker.py` + unit tests | D | < 16/11 | ✅ Code + **52 passed** (unit/validation, `ranker_factory` & E2E với `evaluate_mrr5`/`plots`); đã gộp PR #34, chờ E review PR |
+| M3-E | `hierarchy_features.py`, `evaluation.py`, `plots.py` + unit tests | E | < 16/11 | ✅ Đã merge PR #34 (`m3/e-hierarchy-eval-plots`): `hierarchy_features.py`, `evaluation.py`, `plots.py` + unit tests |
 | M3-3A | Chạy thật `--range-index <0..4> --export-hf --verify-hf`, cập nhật `README.md`, nộp HF & Poster A2 | Cả nhóm | 16–27/11 | ⬜ Chờ đủ dữ liệu M1/M2 & merge B–E |
 
 ---
@@ -212,7 +212,7 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | R6 | Đề chỉ cho phép mã + `requirements.txt` + `README.md` trong repo nộp. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md` là file làm việc | TB | Gỡ ở T5.3, hoặc hỏi giảng viên trước khi nộp | Leader |
 | R7 | Bảo vệ `main` / quyền thành viên — Phase 0 đóng; kiểm tra lại trước đóng băng nộp | Thấp | Leader rà soát T5.3 | Leader |
 | R9 | (Đã xử lý khâu tích hợp B/C/D/`.bbl` và xác minh 10.000 bài thật: `0` lỗi, `validate_m2` `PASS`). Hiện chỉ còn 15.000/25.000 ID chưa có trên máy cục bộ và notebook báo cáo trên `arxiv-book/m2/*` | Thấp | Bổ sung 15.000 ID khi sẵn sàng rồi chạy `run_parse.py --resume` + `validate_m2.py`, và điền số liệu vào `arxiv-book/m2/*` | A, E |
-| R10 | M3: Các module B/C/D/E chưa merge nên `default_matching_stages()` mới kiểm thử qua `MatchingStages` giả; `datasets 5.2.0` lỗi `BatchSize must be greater than 0` nếu đọc file Parquet rỗng có 1 row group 0 dòng | TB | Giữ chữ ký khớp `MatchingStages`; `export_hf.py` ghi shard rỗng bằng `pq.ParquetWriter.close()` (0 row groups) và `verify_hf_dataset` luôn kiểm tra schema PyArrow trước | A, B, C, D, E |
+| R10 | M3: Các module B/C chưa merge và D đang chờ PR (E đã merge qua PR #34) nên `default_matching_stages()` mới kiểm thử qua `MatchingStages` giả; `datasets 5.2.0` lỗi `BatchSize must be greater than 0` nếu đọc file Parquet rỗng có 1 row group 0 dòng | TB | Giữ chữ ký khớp `MatchingStages`; `export_hf.py` ghi shard rỗng bằng `pq.ParquetWriter.close()` (0 row groups) và `verify_hf_dataset` luôn kiểm tra schema PyArrow trước | A, B, C, D, E |
 
 ---
 

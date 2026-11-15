@@ -43,8 +43,9 @@ Owner: **D — Thụ** · Reviewer: **E — Triệu** · Nhánh: `m3/d-ranker` �
    dương vẫn được giữ nhưng không sinh cặp học. Train phải có ít nhất một nhóm chứa
    cả dương và âm. Logistic dùng cả nhóm toàn âm nhưng yêu cầu Train có đủ hai lớp.
 5. `StandardScaler` chỉ fit Train. Train/Valid trùng **bài** bị từ chối. LambdaMART
-   chỉ early stop trên Valid-Manual có nhãn dương; thiếu tập này thì chạy số cây cố
-   định (`n_estimators=100` mặc định). Caller chịu trách nhiệm không đưa Test vào Train/Valid.
+   chỉ early stop trên Valid-Manual có ít nhất một nhóm chứa cả dương và âm; nếu
+   thiếu (kể cả khi chỉ có nhóm 1 ứng viên dương) thì chạy số cây cố định
+   (`n_estimators=100` mặc định). Caller chịu trách nhiệm không đưa Test vào Train/Valid.
 6. arXiv/DOI có cùng tầng ưu tiên; trong từng tầng sắp điểm giảm dần, bằng điểm giữ
    vị trí gốc. Dedup sau sắp xếp, giữ occurrence có ưu tiên cao nhất; đệm `None`.
    Không sửa ID. ID rỗng, query bị trộn, feature/score không hữu hạn đều báo `ValueError`.
@@ -55,8 +56,8 @@ Owner: **D — Thụ** · Reviewer: **E — Triệu** · Nhánh: `m3/d-ranker` �
 
 Dùng lại các biến đã được pipeline chia theo bài: `train_features`, `train_labels`,
 `valid_features`, `valid_labels`, `test_features`, `test_queries`, `query_sources`.
-Không gọi lại hàm chia tập cho từng mô hình. Đoạn dưới chạy khi evaluator E đã merge;
-không thay evaluator bằng công thức khác.
+Không gọi lại hàm chia tập cho từng mô hình. Đoạn dưới dùng evaluator và biểu đồ
+của E (đã merge vào `main` qua PR #34); không thay evaluator bằng công thức khác.
 
 ```python
 import json
@@ -66,8 +67,9 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from matching.evaluation import evaluate_mrr5  # chờ module E
+from matching.evaluation import evaluate_mrr5
 from matching.export_hf import PREDICTIONS_SCHEMA
+from matching.plots import generate_all_poster_figures
 from matching.ranker import MatchingRanker
 
 out_dir = Path("data/matching/range_0")  # đổi đúng range-index của D sau khi xác nhận
@@ -79,6 +81,8 @@ configs = [
     ("lambdamart_21", "lambdamart", True),
     ("lambdamart_18", "lambdamart", False),
 ]
+eval_by_name: dict[str, list[dict]] = {}
+gain_21: dict[str, float] = {}
 for name, model, include_m2 in configs:
     ranker = MatchingRanker(model, include_m2=include_m2)
     ranker.train(
@@ -90,6 +94,10 @@ for name, model, include_m2 in configs:
     )
     predictions = ranker.predict_rows(test_features, test_queries)
     metrics = evaluate_mrr5(predictions, query_sources=query_sources, partition="test")
+    serialized_metrics = [asdict(metric) for metric in metrics]
+    eval_by_name[name] = serialized_metrics
+    if name == "lambdamart_21":
+        gain_21 = ranker.metadata_["feature_importance_gain"]
     pq.write_table(
         pa.Table.from_pylist([asdict(row) for row in predictions], schema=PREDICTIONS_SCHEMA),
         out_dir / f"{name}_predictions.parquet",
@@ -97,18 +105,39 @@ for name, model, include_m2 in configs:
     )
     ranker.export_metadata(out_dir / f"{name}_metadata.json")
     (out_dir / f"{name}_evaluation.json").write_text(
-        json.dumps([asdict(metric) for metric in metrics], indent=2),
+        json.dumps(serialized_metrics, indent=2),
         encoding="utf-8",
     )
     # Tùy chọn lưu model LambdaMART, cùng metadata để giữ thứ tự cột:
     if model == "lambdamart":
         ranker.model_.booster_.save_model(str(out_dir / f"{name}_model.txt"))
+
+# Payload tổng hợp cho matching.plots.generate_all_poster_figures (thêm audit_auto_matcher nếu có):
+poster_payload = {
+    "models": {
+        "fuzzy": eval_by_name["fuzzy"],
+        "tfidf": eval_by_name["tfidf"],
+        "logistic": eval_by_name["logistic"],
+        "lambdamart": eval_by_name["lambdamart_21"],
+    },
+    "ablation": {
+        "18 Features (No M2)": eval_by_name["lambdamart_18"],
+        "21 Features (+ M2 AST)": eval_by_name["lambdamart_21"],
+    },
+    "feature_importance_gain": gain_21,
+    "test": eval_by_name["lambdamart_21"],
+}
+(out_dir / "poster_payload.json").write_text(
+    json.dumps(poster_payload, indent=2),
+    encoding="utf-8",
+)
+generate_all_poster_figures(poster_payload, out_dir / "figures")
 ```
 
 Giữ riêng file dự đoán của từng cấu hình, không ghi đè `predictions.parquet` chính.
 Mọi artifact nằm trong `data/` đã gitignore. `range_0` chỉ là ví dụ, chưa xác nhận
 range-index cá nhân D. Metadata luôn ghi trạng thái mặc định `NOT EVALUATED` cho
-đánh giá thật; số đo thật lưu riêng trong `*_evaluation.json` do E tính.
+đánh giá thật; số đo thật lưu riêng trong `*_evaluation.json` và `poster_payload.json`.
 
 Để dùng cấu hình khác trong orchestrator qua Python:
 
@@ -122,39 +151,32 @@ stages.ranker_factory = lambda: MatchingRanker(include_m2=False)
 
 ## Giới hạn và việc tiếp theo
 
-- Unit test dùng nguồn tổng hợp; 5 test tích hợp dùng ranker thật, B/C/E là các stage
-  giả sẵn có trong test của A. Chưa chạy end-to-end với toàn bộ module thật.
+- Unit test dùng nguồn tổng hợp; 5 test tích hợp dùng `ranker_factory` thật (B/C/E là stage giả sẵn có trong test của A), và 1 test E2E đã nối thật đầu ra `MatchingRanker.predict_rows` vào `evaluate_mrr5` + `generate_all_poster_figures` của E sau khi merge `main` (PR #34). Chưa chạy end-to-end đủ B/C/D/E vì B/C chưa merge vào `main`.
 - **MRR@5 dữ liệu thật: NOT EVALUATED**. Chưa xác nhận mục tiêu 0,85 hoặc thời gian
   train dưới 15 giây trên dải 5.000 ID.
-- LightGBM 4.7 phát cảnh báo `eval_set` deprecated; vẫn dùng API này để tương thích
-  dependency tối thiểu LightGBM 4.3 mà repo khai báo. Không tắt cảnh báo.
-- 15/11: E review, merge module còn thiếu và smoke test end-to-end.
+- LightGBM 4.7 phát `6` cảnh báo `eval_set` deprecated khi chạy test M3-D; vẫn dùng API này để tương thích dependency tối thiểu LightGBM 4.3 mà repo khai báo. Không tắt cảnh báo.
+- 15/11: Đã merge `main` (PR #34 `M3-E`: `evaluation.py`, `hierarchy_features.py`, `plots.py`) vào nhánh `m3/d-ranker`; rà soát và vá `_has_ranking_pair` (bổ sung kiểm tra `all_positive`), `fit_model` từ chối model ngoài `"logistic"`/`"lambdamart"`, `predict_rows` hỗ trợ partition `Enum`/`str` và chặn `None`, đồng thời xác minh handoff với `evaluate_mrr5` + `generate_all_poster_figures`. Sau khi E review PR này và B/C merge `main`, chạy smoke test end-to-end với đủ module B/C/D/E.
 - 16–20/11: xác nhận range-index D, gán nhãn và dùng splits chính thức; đánh giá
-  Manual/Auto/Overall, ablation 18/21, benchmark CPU, nộp Hugging Face cá nhân.
+  Manual/Auto/Overall, ablation 18/21, benchmark CPU, xuất hình từ `poster_payload.json`,
+  nộp Hugging Face cá nhân.
 - `NullQueryDetector` chưa triển khai vì là tùy chọn.
 
-## Kết quả kiểm chứng 14/11/2026
+## Kết quả kiểm chứng 15/11/2026
 
 | Bộ kiểm | Passed | Failed | Skipped |
 | --- | ---: | ---: | ---: |
-| D unit/handoff | 42 | 0 | 0 |
+| D unit/validation | 46 | 0 | 0 |
 | D tích hợp `ranker_factory` | 5 | 0 | 0 |
-| Toàn repository | 661 | 0 | 0 |
+| D handoff E2E (`evaluate_mrr5` + `plots`) | 1 | 0 | 0 |
+| Toàn repository | 681 | 0 | 0 |
 
-Môi trường tạm `/tmp/m3-d-venv`: Python 3.14, LightGBM 4.7.0,
-scikit-learn 1.9.1, Ruff 0.17.1; dùng requirements-ci của repo, không sửa dependency.
-
-Lệnh đã chạy:
+Môi trường Windows `.venv` của repo (sau khi merge `main` PR #34 và sửa review):
 
 ```sh
-/tmp/m3-d-venv/bin/ruff check .
-/tmp/m3-d-venv/bin/ruff format .
-/tmp/m3-d-venv/bin/python -m pytest src/tests/test_ranker.py -q
-HF_HOME=/tmp/m3-d-hf HF_DATASETS_CACHE=/tmp/m3-d-hf/datasets HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 /tmp/m3-d-venv/bin/python -m pytest -q
+ruff check .
+ruff format --check .
+pytest src/tests/test_ranker.py -q
+pytest -q
 ```
 
-47 test D đạt trong 2,71 giây; toàn repo 661 test đạt trong 14,63 giây.
-Ruff check sạch, format không đổi 95 file. Có 4 cảnh báo deprecation LightGBM đã
-mô tả ở trên. Full suite cần quyền socket cục bộ cho test multiprocessing; cache HF
-phải được đặt trước khi import datasets. Lượt đầu sandbox chặn hai điều kiện này;
-không sửa code M2/HF hoặc bỏ test để vượt kiểm tra.
+Ruff check sạch, `ruff format --check .` đạt **101** file, không còn test fail hay skip. Có 6 cảnh báo `LGBMDeprecationWarning` trên `eval_set` như mô tả ở trên (không ảnh hưởng kết quả). (Ghi chú môi trường Linux sandbox ngày 14/11: cần quyền socket cục bộ cho test multiprocessing và trỏ `HF_HOME` / `HF_DATASETS_CACHE` ra thư mục ghi được khi chạy offline.)

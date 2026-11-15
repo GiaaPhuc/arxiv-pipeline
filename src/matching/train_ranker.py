@@ -108,6 +108,16 @@ def prepare_training_data(
     )
 
 
+def _has_ranking_pair(data: TrainingData) -> bool:
+    """Return True if at least one query group contains both positive and negative labels."""
+    offset = 0
+    for size in data.groups:
+        if len(np.unique(data.y[offset : offset + size])) == 2:
+            return True
+        offset += size
+    return False
+
+
 def fit_model(
     kind: ModelKind,
     train: TrainingData,
@@ -118,6 +128,8 @@ def fit_model(
     early_stopping_rounds: int,
 ) -> tuple[Pipeline | lgb.LGBMRanker, dict]:
     """Fit train only; validation is used exclusively for LambdaMART early stopping."""
+    if kind not in ("logistic", "lambdamart"):
+        raise ValueError(f"Unsupported trainable model kind: {kind}")
     if not len(train.y) or len(np.unique(train.y)) != 2:
         raise ValueError("Training requires nonempty data with both positive and negative labels")
     for data in (train, valid):
@@ -126,7 +138,7 @@ def fit_model(
         if sum(data.groups) != len(data.y) or any(n <= 0 for n in data.groups):
             raise ValueError("Invalid query group sizes")
     start = perf_counter()
-    use_valid = kind == "lambdamart" and valid is not None and bool(len(valid.y))
+    use_valid = kind == "lambdamart" and valid is not None and _has_ranking_pair(valid)
     if kind == "logistic":
         model = Pipeline(
             [
@@ -138,12 +150,7 @@ def fit_model(
         config = model.named_steps["classifier"].get_params()
     else:
         # A singleton-positive query is retained but contributes no ranking pairs.
-        offset = 0
-        has_pair = False
-        for size in train.groups:
-            has_pair |= len(np.unique(train.y[offset : offset + size])) == 2
-            offset += size
-        if not has_pair:
+        if not _has_ranking_pair(train):
             raise ValueError(
                 "LambdaMART requires at least one query with positive and negative candidates"
             )

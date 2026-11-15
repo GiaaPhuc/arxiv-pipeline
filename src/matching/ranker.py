@@ -173,12 +173,15 @@ class MatchingRanker:
             grouped[(f.arxivid, f.citationkey)].append(f)
         rows = []
         for q in queries:
+            raw_partition = getattr(q.partition, "value", q.partition)
+            if raw_partition is None:
+                raise ValueError("LabeledQuery partition cannot be None")
             candidates = self.predict_top5_for_query(grouped[(q.arxivid, q.citationkey)])
             rows.append(
                 PredictionRow(
                     arxivid=q.arxivid,
                     citationkey=q.citationkey,
-                    partition=q.partition.value,
+                    partition=str(raw_partition),
                     groundtrutharxivid=q.groundtrutharxivid,
                     **dict(
                         zip(("cand1", "cand2", "cand3", "cand4", "cand5"), candidates, strict=True)
