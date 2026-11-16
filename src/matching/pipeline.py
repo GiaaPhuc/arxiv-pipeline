@@ -282,6 +282,145 @@ def _normalize_top5_candidates(raw_cands: list[str | None]) -> list[str | None]:
     return out
 
 
+def _build_prediction_rows(
+    ranker: RankerProtocol,
+    ordered_queries: list[LabeledQuery],
+    features_by_query: dict[tuple[str, str], list[MatchFeatures]],
+) -> list[PredictionRow]:
+    """Run ranker Top-5 inference for each query and normalize deduplicated candidates."""
+    rows: list[PredictionRow] = []
+    for q in ordered_queries:
+        q_feats = features_by_query.get((q.arxivid, q.citationkey), [])
+        raw_top5 = ranker.predict_top5_for_query(q_feats) if q_feats else []
+        cands = _normalize_top5_candidates(raw_top5)
+        rows.append(
+            PredictionRow(
+                arxivid=q.arxivid,
+                partition=q.partition.value,
+                citationkey=q.citationkey,
+                groundtrutharxivid=q.groundtrutharxivid,
+                cand1=cands[0],
+                cand2=cands[1],
+                cand3=cands[2],
+                cand4=cands[3],
+                cand5=cands[4],
+            )
+        )
+    return rows
+
+
+def _collect_ranker_eval_artifacts(
+    ranker: RankerProtocol,
+    *,
+    out_root: Path,
+    train_feats: list[MatchFeatures],
+    train_labels: dict[tuple[str, str, str], int],
+    valid_feats: list[MatchFeatures],
+    valid_labels: dict[tuple[str, str, str], int],
+    query_sources: dict[tuple[str, str], AnnotationSource],
+    test_queries: list[LabeledQuery],
+    features_by_query: dict[tuple[str, str], list[MatchFeatures]],
+    ground_truth: dict[tuple[str, str], str | None],
+    test_metrics: list[EvaluationMetrics],
+    evaluate_mrr5_fn: Callable[..., list[EvaluationMetrics]],
+) -> dict[str, Any]:
+    """Export primary ranker metadata and evaluate 4-model comparison & M2 ablation."""
+    from matching.ranker import MatchingRanker
+    from matching.train_ranker import ModelKind
+
+    artifacts: dict[str, Any] = {}
+    if not isinstance(ranker, MatchingRanker):
+        meta = getattr(ranker, "metadata_", None)
+        if isinstance(meta, dict) and meta:
+            artifacts["ranker_metadata"] = meta
+            if isinstance(meta.get("feature_importance_gain"), dict):
+                artifacts["feature_importance_gain"] = meta["feature_importance_gain"]
+        return artifacts
+
+    if ranker.metadata_:
+        ranker.export_metadata(out_root / "ranker_metadata.json")
+        artifacts["ranker_metadata"] = ranker.metadata_
+        if isinstance(ranker.metadata_.get("feature_importance_gain"), dict):
+            artifacts["feature_importance_gain"] = ranker.metadata_["feature_importance_gain"]
+
+    if not test_queries or not train_feats:
+        return artifacts
+
+    primary_test_dicts = [asdict(m) for m in test_metrics]
+    cached_evals: dict[tuple[ModelKind, bool], list[dict[str, Any]]] = {
+        (ranker.model_kind, ranker.include_m2): primary_test_dicts
+    }
+    cached_gains: dict[tuple[ModelKind, bool], dict[str, float]] = {}
+    if isinstance(ranker.metadata_.get("feature_importance_gain"), dict):
+        cached_gains[(ranker.model_kind, ranker.include_m2)] = ranker.metadata_[
+            "feature_importance_gain"
+        ]
+
+    def _fit_and_eval(m_kind: ModelKind, inc_m2: bool) -> list[dict[str, Any]] | None:
+        cache_key = (m_kind, inc_m2)
+        if cache_key in cached_evals:
+            return cached_evals[cache_key]
+        aux = MatchingRanker(
+            model=m_kind,
+            include_m2=inc_m2,
+            n_estimators=ranker.n_estimators,
+            random_state=ranker.random_state,
+            early_stopping_rounds=ranker.early_stopping_rounds,
+        )
+        try:
+            aux.train(
+                train_feats,
+                train_labels,
+                query_sources,
+                valid_features=valid_feats or None,
+                valid_labels=valid_labels or None,
+            )
+        except ValueError as exc:
+            logger.warning("skipping auxiliary %s (include_m2=%s) eval: %s", m_kind, inc_m2, exc)
+            return None
+        aux_preds = _build_prediction_rows(aux, test_queries, features_by_query)
+        aux_metrics = evaluate_mrr5_fn(
+            aux_preds, ground_truth, query_sources, partition=Partition.TEST.value
+        )
+        serialized = [asdict(m) for m in aux_metrics]
+        cached_evals[cache_key] = serialized
+        if isinstance(aux.metadata_.get("feature_importance_gain"), dict):
+            cached_gains[cache_key] = aux.metadata_["feature_importance_gain"]
+        return serialized
+
+    comparison_specs: tuple[tuple[str, ModelKind, bool], ...] = (
+        ("Title Fuzzy", "fuzzy", True),
+        ("TF-IDF Cosine", "tfidf", True),
+        ("Logistic Regression", "logistic", True),
+        ("LightGBM LambdaMART", "lambdamart", True),
+    )
+    models_eval: dict[str, list[dict[str, Any]]] = {}
+    for display_name, m_kind, inc_m2 in comparison_specs:
+        res = _fit_and_eval(m_kind, inc_m2)
+        if res is not None:
+            models_eval[display_name] = res
+    if models_eval:
+        artifacts["models"] = models_eval
+
+    ablation_kind: ModelKind = (
+        ranker.model_kind if ranker.model_kind in ("logistic", "lambdamart") else "lambdamart"
+    )
+    ablation_eval: dict[str, list[dict[str, Any]]] = {}
+    res_18 = _fit_and_eval(ablation_kind, False)
+    res_21 = _fit_and_eval(ablation_kind, True)
+    if res_18 is not None:
+        ablation_eval["18 Features (No M2)"] = res_18
+    if res_21 is not None:
+        ablation_eval["21 Features (+ M2 AST)"] = res_21
+    if ablation_eval:
+        artifacts["ablation"] = ablation_eval
+
+    if "feature_importance_gain" not in artifacts and ("lambdamart", True) in cached_gains:
+        artifacts["feature_importance_gain"] = cached_gains[("lambdamart", True)]
+
+    return artifacts
+
+
 def _write_predictions_parquet(rows: list[PredictionRow], out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pylist = [
@@ -613,34 +752,18 @@ def run_matching_pipeline(
         valid_labels=valid_labels or None,
     )
 
-    prediction_rows: list[PredictionRow] = []
     ordered_queries = sorted(
         labeled_queries,
         key=lambda q: (q.partition.value, q.arxivid, q.citationkey),
     )
-    for q in ordered_queries:
-        q_feats = features_by_query.get((q.arxivid, q.citationkey), [])
-        raw_top5 = ranker.predict_top5_for_query(q_feats) if q_feats else []
-        cands = _normalize_top5_candidates(raw_top5)
-        prediction_rows.append(
-            PredictionRow(
-                arxivid=q.arxivid,
-                partition=q.partition.value,
-                citationkey=q.citationkey,
-                groundtrutharxivid=q.groundtrutharxivid,
-                cand1=cands[0],
-                cand2=cands[1],
-                cand3=cands[2],
-                cand4=cands[3],
-                cand5=cands[4],
-            )
-        )
+    prediction_rows = _build_prediction_rows(ranker, ordered_queries, features_by_query)
 
     out_root.mkdir(parents=True, exist_ok=True)
     predictions_file = out_root / "predictions.parquet"
     _write_predictions_parquet(prediction_rows, predictions_file)
 
     # 6. Evaluate MRR@5 on test (and valid) slices.
+    test_queries = [q for q in ordered_queries if q.partition == Partition.TEST]
     test_preds = [r for r in prediction_rows if r.partition == Partition.TEST.value]
     valid_preds = [r for r in prediction_rows if r.partition == Partition.VALID.value]
     test_metrics = (
@@ -658,13 +781,30 @@ def run_matching_pipeline(
         else []
     )
 
-    eval_payload = {
+    eval_payload: dict[str, Any] = {
         "range": selection.label,
         "audit_auto_matcher": audit_metrics,
         "test": [asdict(m) for m in test_metrics],
         "valid": [asdict(m) for m in valid_metrics],
     }
-    with atomic_write(out_root / "evaluation_results.json") as tmp:
+    eval_payload.update(
+        _collect_ranker_eval_artifacts(
+            ranker,
+            out_root=out_root,
+            train_feats=train_feats,
+            train_labels=train_labels,
+            valid_feats=valid_feats,
+            valid_labels=valid_labels,
+            query_sources=query_sources,
+            test_queries=test_queries,
+            features_by_query=features_by_query,
+            ground_truth=ground_truth,
+            test_metrics=test_metrics,
+            evaluate_mrr5_fn=active_stages.evaluate_mrr5,
+        )
+    )
+    evaluation_file = out_root / "evaluation_results.json"
+    with atomic_write(evaluation_file) as tmp:
         tmp.write_text(json.dumps(eval_payload, indent=2), encoding="utf-8")
 
     elapsed = round(time.perf_counter() - t_start, 3)
@@ -679,6 +819,7 @@ def run_matching_pipeline(
         "n_predictions": len(prediction_rows),
         "n_features": len(all_features),
         "predictions_path": str(predictions_file),
+        "evaluation_path": str(evaluation_file),
         "audit_auto_matcher": audit_metrics,
         "test_metrics": [asdict(m) for m in test_metrics],
         "elapsed_seconds": elapsed,

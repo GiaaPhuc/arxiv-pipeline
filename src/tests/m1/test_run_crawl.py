@@ -10,7 +10,7 @@ import pytest
 import run_crawl
 from crawler import ids, pipeline
 
-RANGES = Path(__file__).resolve().parents[1] / "id_ranges.csv"
+RANGES = Path(__file__).resolve().parents[2] / "id_ranges.csv"
 
 
 @pytest.fixture(autouse=True)

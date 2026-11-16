@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from validate_corpus import validate
+from crawler.validate_corpus import validate
 
 
 def write_json(path: Path, data: object) -> None:
@@ -118,5 +118,5 @@ def test_validate_reports_kept_bytes_over_raw(valid_corpus: Path) -> None:
 def test_validate_does_not_import_export_module() -> None:
     export_name = "crawler.export"
     export_was_loaded = export_name in sys.modules
-    importlib.import_module("validate_corpus")
+    importlib.import_module("crawler.validate_corpus")
     assert export_name not in sys.modules or export_was_loaded

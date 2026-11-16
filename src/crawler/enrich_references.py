@@ -2,7 +2,7 @@
 
 Can be run offline on an existing corpus without network calls::
 
-    python src/enrich_references.py --data-dir data
+    python src/crawler/enrich_references.py --data-dir data
 """
 
 from __future__ import annotations
@@ -11,11 +11,18 @@ import argparse
 import gzip
 import json
 import logging
+import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from crawler.manifest import atomic_write
-from crawler.s2 import extract_local_references
+if not __package__:
+    _here = Path(__file__).resolve()
+    sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != _here.parent]
+    if not any(Path(p or ".").resolve() == _here.parents[1] for p in sys.path):
+        sys.path.insert(0, str(_here.parents[1]))
+
+from crawler.manifest import atomic_write  # noqa: E402
+from crawler.s2 import extract_local_references  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("enrich_references")
@@ -118,6 +125,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    import sys
-
     sys.exit(main())

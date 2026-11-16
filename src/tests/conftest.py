@@ -10,12 +10,17 @@ from __future__ import annotations
 
 import gzip
 import io
+import sys
 import tarfile
 import zipfile
 from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
+
+_M3_TEST_DIR = str(Path(__file__).resolve().parent / "m3")
+if _M3_TEST_DIR not in sys.path:
+    sys.path.insert(0, _M3_TEST_DIR)
 
 
 @pytest.fixture

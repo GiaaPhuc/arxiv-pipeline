@@ -656,7 +656,7 @@ def test_inflight_stream_retries_mid_tar_network_drop_instead_of_marking_corrupt
 
 
 def test_tar_gz_keeps_supplementary_bbl_files_alongside_tex_and_bib(tmp_path: Path) -> None:
-    import validate_corpus
+    from crawler import validate_corpus
 
     archive_path = _write_tar(
         tmp_path / "with-bbl.tar.gz",

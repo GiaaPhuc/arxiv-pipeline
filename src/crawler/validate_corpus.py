@@ -1,6 +1,10 @@
 """Post-crawl invariant checks. Exit code 0 = PASS.
 
 Owner: E | Reviewer: A | Tasks: T3.2, T4.3
+
+Usage::
+    python src/crawler/validate_corpus.py --data-dir data
+
 Invariants (plan §7.3):
   * every version 1..N has a record (no gaps)
   * no files other than .tex/.bib (and metadata) under data/
@@ -19,9 +23,15 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from corpus import Corpus
-from crawler.ids import id_to_dirname
-from crawler.models import Status
+if not __package__:
+    _here = Path(__file__).resolve()
+    sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != _here.parent]
+    if not any(Path(p or ".").resolve() == _here.parents[1] for p in sys.path):
+        sys.path.insert(0, str(_here.parents[1]))
+
+from corpus import Corpus  # noqa: E402
+from crawler.ids import id_to_dirname  # noqa: E402
+from crawler.models import Status  # noqa: E402
 
 _VERSION_DIR = re.compile(r"v[1-9][0-9]*$")
 _ALLOWED_ROOT_FILES = frozenset({"manifest.sqlite", "manifest.sqlite-wal", "manifest.sqlite-shm"})

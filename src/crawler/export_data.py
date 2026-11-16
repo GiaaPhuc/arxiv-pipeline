@@ -2,10 +2,10 @@
 
 Run AFTER the crawl and ``validate_corpus.py`` (no network)::
 
-    python src/export_data.py --data-dir data            # writes data/stats/
-    python src/export_data.py --data-dir data --stats-only
-    python src/export_data.py --backup arxiv-data.tar.gz --data-dir data
-    python src/export_data.py --sessions-only --stats s1.json s2.json --output bench.json
+    python src/crawler/export_data.py --data-dir data            # writes data/stats/
+    python src/crawler/export_data.py --data-dir data --stats-only
+    python src/crawler/export_data.py --backup arxiv-data.tar.gz --data-dir data
+    python src/crawler/export_data.py --sessions-only --stats s1.json s2.json --output bench.json
 
 Copy the small ``summary.json`` / ``*.csv`` files to ``stats/`` of the book repo; the
 Parquet tables stay local (never committed).
@@ -19,8 +19,19 @@ import sys
 import tempfile
 from pathlib import Path
 
-from crawler.checkpoint import is_archive_path, restore_data_dir
-from crawler.export import export_stats, export_tables, resolve_data_root, summarize_sessions
+if not __package__:
+    _here = Path(__file__).resolve()
+    sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != _here.parent]
+    if not any(Path(p or ".").resolve() == _here.parents[1] for p in sys.path):
+        sys.path.insert(0, str(_here.parents[1]))
+
+from crawler.checkpoint import is_archive_path, restore_data_dir  # noqa: E402
+from crawler.export import (  # noqa: E402
+    export_stats,
+    export_tables,
+    resolve_data_root,
+    summarize_sessions,
+)
 
 
 def _run_export(

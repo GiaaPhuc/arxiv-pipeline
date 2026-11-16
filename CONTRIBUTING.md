@@ -34,7 +34,7 @@ Kỳ vọng: toàn bộ test đạt, không còn test bị skip (đếm số ở
 | B | `ids.py`, `discovery.py` | D |
 | C | `tests/conftest.py`, `source.py` | B |
 | D | `s2.py`, `export.py`, phần xuất của `corpus.py` | E |
-| E | `validate_corpus.py`, repo sách (repo khác) | A |
+| E | `src/crawler/validate_corpus.py`, repo sách (repo khác) | A |
 
 `models.py` là hợp đồng dùng chung. Đổi trường, trạng thái hoặc bố cục đĩa thì mở PR riêng, cả năm người thấy, và tăng `SCHEMA_VERSION` nếu đổi thứ đã ghi ra đĩa. Không sửa lặng trong PR của module mình.
 
@@ -66,7 +66,7 @@ Chỉ ở spike, smoke và pilot. Không gọi trong unit test.
 
 ## Dải ID
 
-File đang dùng: `src/id_ranges.csv` (5 dải, cả hai đầu, tổng 25.000 ID). Mẫu định dạng: `src/id_ranges.example.csv`. Crawl đủ cả file trên **một máy** (D8): `python src/run_crawl.py --ranges src/id_ranges.csv`. Mỗi người chỉ theo dõi dải của mình; không bật crawl đầy đủ trên máy khác cùng lúc.
+File đang dùng: `src/id_ranges.csv` (5 dải, cả hai đầu, tổng 25.000 ID). Crawl đủ cả file trên **một máy** (D8): `python src/run_crawl.py --ranges src/id_ranges.csv`. Mỗi người chỉ theo dõi dải của mình; không bật crawl đầy đủ trên máy khác cùng lúc.
 
 ## Mỗi ngày
 

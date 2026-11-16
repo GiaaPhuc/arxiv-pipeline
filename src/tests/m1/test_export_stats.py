@@ -10,8 +10,7 @@ from pathlib import Path
 
 import pytest
 
-import export_data
-import validate_corpus
+from crawler import export_data, validate_corpus
 from crawler.export import export_stats
 from crawler.ids import id_to_dirname
 from crawler.manifest import Manifest

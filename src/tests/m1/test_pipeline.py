@@ -14,8 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 import responses
 
-import validate_corpus
-from crawler import pipeline
+from crawler import pipeline, validate_corpus
 from crawler.config import Config
 from crawler.export import export_tables
 from crawler.models import Status
