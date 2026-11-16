@@ -15,7 +15,7 @@ import re
 from matching.models import CitationContextStats, PaperCitationIndex
 from parsing.models import ElementRow, HierarchyRow
 
-# Matches the exact citation command family validated in src/validate_m2.py.
+# Matches the exact citation command family validated in src/parsing/validate_m2.py.
 _CITE_CMD_RE = re.compile(
     r"\\(?:cite[tp]?|citeal[pt]|citeauthor|citeyear|parencite|textcite|autocite)\*?"
     r"(?:\s*\[[^\]]*\]){0,2}\s*\{([^{}]*)\}"

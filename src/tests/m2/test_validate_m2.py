@@ -1,4 +1,4 @@
-"""Unit tests for Milestone 2 validator (src/validate_m2.py).
+"""Unit tests for Milestone 2 validator (src/parsing/validate_m2.py).
 
 Owner: E | Reviewer: E/A | Task: M2-E1
 Runs strictly offline on synthetic Parquet shards and M1 corpus fixtures under tmp_path.
@@ -16,9 +16,9 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-import validate_m2
 from crawler.ids import id_to_dirname
-from validate_m2 import main, validate
+from parsing import validate_m2
+from parsing.validate_m2 import main, validate
 
 ELEMENTS_SCHEMA = pa.schema(
     [
@@ -1399,6 +1399,6 @@ def test_exporter_summary_keys_and_labeled_ref_heading_detected(data_dir: Path) 
     problems = validate(data_dir)
     assert any("m2_summary.json: papers=1 != M1 corpus papers (2)" in p for p in problems)
     assert any("m2_summary.json: versions=2 != M1 corpus versions (4)" in p for p in problems)
-    from validate_m2 import _normalize_heading_title
+    from parsing.validate_m2 import _normalize_heading_title
 
     assert _normalize_heading_title(r"References\label{sec:refs}") == "references"

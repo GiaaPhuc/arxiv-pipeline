@@ -24,7 +24,7 @@ MODULES = [
     "crawler.export",
     "corpus",
     "run_crawl",
-    "validate_corpus",
+    "crawler.validate_corpus",
 ]
 
 

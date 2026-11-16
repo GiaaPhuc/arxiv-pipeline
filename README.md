@@ -2,24 +2,25 @@
 
 # arxiv-pipeline
 
-**Resumable arXiv + Semantic Scholar crawler** for an Introduction to Data Science course project.
+**End-to-end arXiv data pipeline** for an Introduction to Data Science course project.
 
-Collect LaTeX sources and metadata now (Milestone 1); parse and match references later (Milestones 2–3).
+Crawl LaTeX sources & metadata (**Milestone 1**) · Parse AST & deduplicate references (**Milestone 2**) · Match citations & package Hugging Face datasets (**Milestone 3**).
 
 <br>
 
 [![CI](https://github.com/GiaaPhuc/arxiv-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/GiaaPhuc/arxiv-pipeline/actions/workflows/ci.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776ab?logo=python&logoColor=white)
-![Milestone](https://img.shields.io/badge/milestone-3%20(reference%20matching%20%26%20HF)-brightgreen)
+![Milestones](https://img.shields.io/badge/milestones-1%20·%202%20·%203%20complete-brightgreen)
 
 <br>
 
 [Quick start](#quick-start) ·
-[Run](#running-the-crawler) ·
+[Milestone 1](#running-the-crawler) ·
 [Milestone 2](#milestone-2--parsing-normalization--dedup) ·
 [Milestone 3](#milestone-3--reference-matching-evaluation--hugging-face-export) ·
 [Colab](#google-colab) ·
 [Layout](#source-layout) ·
+[Team](#team) ·
 [Contributing](CONTRIBUTING.md)
 
 </div>
@@ -28,19 +29,25 @@ Collect LaTeX sources and metadata now (Milestone 1); parse and match references
 
 ## Overview
 
-This repo implements **Milestone 1** under `src/crawler/`, **Milestone 2** under `src/parsing/`, and **Milestone 3** under `src/matching/`. For Milestone 1, for each assigned arXiv ID it:
+This repository implements the complete three-milestone pipeline under `src/`:
+
+- **Milestone 1 (`src/crawler/`, `src/run_crawl.py`):** Resumable arXiv + Semantic Scholar crawler with SQLite manifest, zero-copy streaming `.tex`/`.bib`/`.bbl` extraction, corpus validation, and Parquet/CSV export.
+- **Milestone 2 (`src/parsing/`, `src/run_parse.py`):** Multi-process LaTeX/BibTeX parser that resolves includes, expands macros, normalizes math, splits sentences, builds versioned containment trees, deduplicates elements & BibTeX across versions, and validates 8 invariants.
+- **Milestone 3 (`src/matching/`, `src/run_matching.py`):** Non-LLM reference matching pipeline with 21 features, Stage-1 blocking, manual/auto ground truth & Cohen's kappa, LightGBM LambdaMART + baselines & M2 AST ablation, dual-denominator `MRR@5`, 300-DPI Poster charts, and 6-table Hugging Face packaging.
+
+For Milestone 1, for each assigned arXiv ID the crawler executes:
 
 | Step | What happens |
 | --- | --- |
-| Discover | All versions and dates via the arXiv Atom API |
-| Download | Each version from `export.arxiv.org/src/{id}vN` |
-| Extract | Keep only `.tex` / `.bib`; preserve folder structure inside the tarball |
-| Enrich | Paper-level references and venue hints from Semantic Scholar |
+| Discover | All versions and dates via arXiv Atom API (+ OAI-PMH / Kaggle snapshot option) |
+| Download | Each version from `export.arxiv.org/src/{id}vN` with HTTP 206 Range resume |
+| Extract | Keep only `.tex`, `.bib`, and `.bbl`; preserve folder structure inside the tarball |
+| Enrich | Paper-level references and venue hints from Semantic Scholar (+ local `.bib`/`.bbl` fallback) |
 | Persist | JSON on disk + SQLite manifest for **resume** |
 
-Crawled corpora live under `data/` and are **never committed** (git-ignored).
+Crawled and processed data live under `data/` and are **never committed** (git-ignored).
 
-**Libraries:** `requests` (one rate limiter per host), `psutil`, `pyarrow` / `pandas`, plus stdlib `tarfile`, `gzip`, and `sqlite3`.
+**Core libraries:** `requests`, `psutil`, `pyarrow` / `pandas`, `numpy`, `rapidfuzz`, `scikit-learn`, `lightgbm`, `datasets`, `matplotlib`, plus stdlib `tarfile`, `gzip`, and `sqlite3`.
 
 ```mermaid
 flowchart TB
@@ -51,7 +58,7 @@ flowchart TB
 
   subgraph crawl["src/crawler"]
     D["discovery · metadata"]
-    S["source · .tex/.bib"]
+    S["source · .tex/.bib/.bbl"]
     S2["s2 · references"]
     P["pipeline · workers + resume"]
     D --> P
@@ -66,8 +73,8 @@ flowchart TB
   end
 
   subgraph post["After crawl"]
-    V["validate_corpus.py"]
-    X["export_data.py → stats/"]
+    V["crawler/validate_corpus.py"]
+    X["crawler/export_data.py → stats/"]
   end
 
   R --> P
@@ -85,8 +92,10 @@ flowchart TB
 | Resource | Description |
 | --- | --- |
 | [`STATUS.md`](STATUS.md) | Team status — read **section 0** first |
-| [`docs/huong-dan-crawl-colab-vi.md`](docs/huong-dan-crawl-colab-vi.md) | Colab walkthrough (Vietnamese) |
-| [arxiv-book](https://giaaphuc.github.io/arxiv-book/) | Milestone 1 Jupyter Book report |
+| [`docs/du-an-va-luong-xu-ly-hien-tai-vi.md`](docs/du-an-va-luong-xu-ly-hien-tai-vi.md) | Full M1–M3 technical architecture & processing flow (Vietnamese) |
+| [`docs/huong-dan-crawl-colab-vi.md`](docs/huong-dan-crawl-colab-vi.md) | Milestone 1 Colab walkthrough (Vietnamese) |
+| [`docs/huong-dan-chay-m2-m3-huggingface-vi.md`](docs/huong-dan-chay-m2-m3-huggingface-vi.md) | Local `.tar.gz` → M2 → M3 → Hugging Face guide (Vietnamese) |
+| [arxiv-book](https://giaaphuc.github.io/arxiv-book/) | Milestone 1–2 Jupyter Book report |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Branches, review roles, PR checklist |
 
 </details>
@@ -121,7 +130,7 @@ pytest
 
 **Fast lint + test (~3 s)**
 
-Uses `src/requirements-ci.txt` (no pandas/pyarrow) — same as GitHub Actions.
+Uses `src/requirements-ci.txt` (no pandas/matplotlib) — same as GitHub Actions.
 
 ```bash
 pip install -r src/requirements-ci.txt
@@ -139,7 +148,7 @@ Linux / macOS:
 ruff check . && ruff format --check . && pytest -q
 ```
 
-> Slow CI is usually **runner queue** or **cold pip install**, not pytest (~1 s).
+> Slow CI is usually **runner queue** or **cold pip install**, not unit tests.
 
 </td>
 </tr>
@@ -161,14 +170,16 @@ Set in the shell, a git-ignored `.env`, or Colab **Secrets**. Do not commit secr
 
 Assigned IDs: `src/id_ranges.csv` — **25,000** IDs in five ranges. Full corpus runs **once on one machine** (decision D8).
 
-Range CSV columns: `start_month,start_id,end_month,end_id` (inclusive). Example: `src/id_ranges.example.csv`.
+Range CSV columns: `start_month,start_id,end_month,end_id` (inclusive).
 
 ```bash
 python src/run_crawl.py --ranges src/id_ranges.csv --dry-run
 python src/run_crawl.py --ranges src/id_ranges.csv --limit 30
 python src/run_crawl.py --ranges src/id_ranges.csv --data-dir data
-python src/validate_corpus.py --data-dir data
-python src/export_data.py --data-dir data
+python src/crawler/audit_corpus.py --data-dir data --output data/stats/audit_report.json
+python src/crawler/enrich_references.py --data-dir data
+python src/crawler/validate_corpus.py --data-dir data
+python src/crawler/export_data.py --data-dir data
 ```
 
 | Flag / command | Purpose |
@@ -176,8 +187,10 @@ python src/export_data.py --data-dir data
 | `--dry-run` | Expand ranges and print plan — no network |
 | `--limit N` | Pilot on first *N* IDs |
 | `--data-dir` | Output directory (default `./data`) |
-| `validate_corpus.py` | Check invariants — exit **0** = PASS |
-| `export_data.py` | Parquet/CSV + summary → `data/stats/` |
+| `crawler/audit_corpus.py` | Cross-check disk files & SHA-256 against `manifest.sqlite` |
+| `crawler/enrich_references.py` | Offline backfill of missing references from local `.bib`/`.bbl` |
+| `crawler/validate_corpus.py` | Check corpus invariants — exit **0** = PASS |
+| `crawler/export_data.py` | Export Parquet/CSV tables + summary → `data/stats/` |
 
 ### Resume
 
@@ -202,27 +215,27 @@ Interrupt with **Ctrl+C** (or lose the machine), then run the **same command** o
 
 `data/` is git-ignored.
 
-```
+```text
 data/
 ├── manifest.sqlite          # resume state
 ├── logs/
 │   ├── crawl.log
 │   └── metrics.json         # wall time, RAM, disk (cumulative across resumes)
-├── stats/                   # after export_data.py
+├── stats/                   # after crawler/export_data.py & M2 parse
 └── papers/<arxiv_id>/
     ├── paper.json
     ├── s2_references.raw.json.gz
     └── v<N>/
         ├── meta.json
         ├── references.json
-        └── tex/             # .tex / .bib only
+        └── tex/             # .tex / .bib / .bbl only
 ```
 
 ---
 
 ## Google Colab
 
-Notebook: [`src/colab_run.ipynb`](src/colab_run.ipynb)
+Notebooks: [`src/notebooks/colab_run.ipynb`](src/notebooks/colab_run.ipynb) (Milestone 1 crawl) and [`src/notebooks/colab_parse.ipynb`](src/notebooks/colab_parse.ipynb) (Milestone 2 parse).
 
 | Session step | Action |
 | --- | --- |
@@ -232,7 +245,7 @@ Notebook: [`src/colab_run.ipynb`](src/colab_run.ipynb)
 | 4 | **Crawl** (same command every time; manifest skips done work). Optional: `CRAWLER_BACKUP_DIR` + `CRAWLER_BACKUP_EVERY_IDS=1000` for automatic Drive checkpoints |
 | 5 | On stop: interrupt runtime, then **backup** `data/` to Drive (redundant if auto-backup ran recently) |
 
-Crawl on **local Colab disk** (`/content/data`), not on Drive FUSE — SQLite and network filesystems do not mix well.
+Crawl and parse on **local Colab disk** (`/content/data`), not on Drive FUSE — SQLite and network filesystems do not mix well.
 
 Detailed guide (Vietnamese): [`docs/huong-dan-crawl-colab-vi.md`](docs/huong-dan-crawl-colab-vi.md).
 
@@ -256,16 +269,16 @@ python src/run_parse.py --data-dir data --workers 4 --batch-size 500 --resume
 ```
 
 - Exit codes: `0` finished (check `data/parsed/_errors.jsonl` if individual papers failed), `2` invalid CLI/setup, `130` interrupted (`--resume` skips papers in `_done.txt` and retries previously failed papers).
-- Colab workflow: [`src/colab_parse.ipynb`](src/colab_parse.ipynb) runs a 100-paper pilot (`--workers 1 --limit 100`), resumes the remaining corpus (`--resume`), and runs `src/validate_m2.py`.
+- Colab workflow: [`src/notebooks/colab_parse.ipynb`](src/notebooks/colab_parse.ipynb) runs a 100-paper pilot (`--workers 1 --limit 100`), resumes the remaining corpus (`--resume`), and runs `src/parsing/validate_m2.py`.
 
 ### Validating & inspecting outputs
 
 ```bash
 # Full audit (Parquet invariants + M1 Corpus coverage + stats CSV/JSON)
-python src/validate_m2.py --data-dir data
+python src/parsing/validate_m2.py --data-dir data
 
 # Parquet-only audit without checking M1 raw source directories
-python src/validate_m2.py --data-dir data --skip-corpus-check
+python src/parsing/validate_m2.py --data-dir data --skip-corpus-check
 ```
 
 Outputs are written under:
@@ -349,62 +362,75 @@ PYTHONPATH=src python -m matching.plots --input data/matching/range_0/evaluation
 | 20 | `title_sim_diff_from_max` | Relative (A) | Difference `score - max_query_score` (`<= 0.0`) |
 | 21 | `title_sim_margin_to_top2` | Relative (A) | Margin against the runner-up candidate title similarity in the same query |
 
+---
+
 ## Source layout
 
 <details open>
 <summary><code>src/</code> — click to collapse</summary>
 
-```
+```text
 src/
-├── crawler/
-│   ├── models.py       shared data contract
-│   ├── config.py       environment settings
-│   ├── http.py         session, rate limits, retries
-│   ├── manifest.py     SQLite + resume
-│   ├── ids.py          IDs and range expansion
-│   ├── discovery.py    arXiv Atom API
-│   ├── source.py       /src/ download + extract
-│   ├── s2.py           Semantic Scholar
-│   ├── metrics.py      timing and resource use
-│   ├── pipeline.py     orchestration
-│   └── export.py       tables and stats
-├── parsing/              Milestone 2 parser, normalizer & dedup modules
-│   ├── models.py
-│   ├── gathering.py
-│   ├── hierarchy.py
-│   ├── cleaner.py
-│   ├── math_normalizer.py
-│   ├── sentence_splitter.py
-│   ├── bib_extractor.py
-│   ├── dedup.py
-│   ├── export_m2.py
-│   └── pipeline.py
-├── matching/             Milestone 3 feature extraction, matching & HF export
-│   ├── models.py            shared 21-feature & evaluation contracts
-│   ├── cleaner.py           TeX/Unicode folding & AuthorTokens normalization
-│   ├── lexical_features.py  15 pairwise features + local char 3-5 TF-IDF
-│   ├── hierarchy_features.py M2 AST PaperCitationIndex & section context
-│   ├── features.py          Stage-1 blocking (n>50) & 3 query-relative features
-│   ├── auto_matcher.py      3-tier cascade auto-matcher & precision/recall audit
-│   ├── labelling.py         manual labeling CLI, Cohen's kappa & paper splits
-│   ├── train_ranker.py      grouped weighted training (LightGBM / Logistic)
-│   ├── ranker.py            MatchingRanker baselines + LambdaMART & Top-5 tiering
-│   ├── evaluation.py        dual-denominator MRR@5, Hit@K, MAP & Null F1
-│   ├── export_hf.py         6-table ZSTD shard packager & datasets verifier
-│   ├── pipeline.py          end-to-end M3 orchestrator & ablation runner
-│   └── plots.py             300-DPI Poster PNG chart generator
-├── corpus.py             read API (Milestones 2–3)
-├── audit_corpus.py
-├── enrich_references.py
-├── validate_corpus.py
-├── validate_m2.py
-├── export_data.py
-├── run_crawl.py
-├── run_parse.py
-├── run_matching.py
-├── colab_run.ipynb
-├── colab_parse.ipynb
-└── tests/                pytest, mocked HTTP only
+├── run_crawl.py                 Milestone 1 CLI entrypoint
+├── run_parse.py                 Milestone 2 CLI entrypoint
+├── run_matching.py              Milestone 3 CLI entrypoint
+├── corpus.py                    Shared read API (Milestones 2–3)
+├── id_ranges.csv                Assigned 25,000 IDs (5 × 5,000 slices)
+├── requirements.txt             Full runtime dependencies (Milestones 1–3)
+├── requirements-ci.txt          CI lint + test dependencies
+├── requirements-dev.txt         Full dev dependencies
+├── crawler/                     Milestone 1 crawler, checkpoint & validation
+│   ├── models.py                Shared M1 data contract
+│   ├── config.py                Environment settings
+│   ├── http.py                  Session, rate limits, retries
+│   ├── manifest.py              SQLite + resume
+│   ├── ids.py                   IDs and range expansion
+│   ├── discovery.py             arXiv Atom API + OAI-PMH fallback
+│   ├── snapshot.py              Offline Kaggle metadata snapshot filter
+│   ├── source.py                /src/ streaming download + .tex/.bib/.bbl extract
+│   ├── s2.py                    Semantic Scholar + local .bib/.bbl fallback
+│   ├── checkpoint.py            Atomic tar.gz backup/restore & shrink protection
+│   ├── metrics.py               Timing, diagnostics, and resource use
+│   ├── pipeline.py              Multi-threaded crawler orchestration
+│   ├── export.py                Parquet/CSV tables and report stats
+│   ├── audit_corpus.py          Disk vs manifest checksum auditor CLI
+│   ├── enrich_references.py     Offline .bib/.bbl reference backfill CLI
+│   ├── validate_corpus.py       M1 post-crawl invariant checker CLI
+│   └── export_data.py           M1 Parquet/CSV/stats exporter CLI
+├── parsing/                     Milestone 2 parser, normalizer, dedup & validator
+│   ├── models.py                Shared M2 AST & table contracts
+│   ├── gathering.py             Root selection, comment stripping & include DFS
+│   ├── hierarchy.py             Containment tree builder & reference separation
+│   ├── cleaner.py               Macro expansion & LaTeX presentation cleanup
+│   ├── math_normalizer.py       Inline/block math state-machine normalization
+│   ├── sentence_splitter.py     Protect-Mask-Guard-Split-Restore splitter
+│   ├── bib_extractor.py         BibTeX/BibLaTeX & .bbl entry parser
+│   ├── dedup.py                 Two-level cross-version element & BibTeX dedup
+│   ├── export_m2.py             Sharded ZSTD Parquet exporter & rollback
+│   ├── pipeline.py              Multi-process M2 orchestration
+│   └── validate_m2.py           8-invariant M2 Parquet & coverage validator CLI
+├── matching/                    Milestone 3 feature extraction, matching & HF export
+│   ├── models.py                Shared 21-feature & evaluation contracts
+│   ├── cleaner.py               TeX/Unicode folding & AuthorTokens normalization
+│   ├── lexical_features.py      15 pairwise features + local char 3–5 TF-IDF
+│   ├── hierarchy_features.py    M2 AST PaperCitationIndex & section context
+│   ├── features.py              Stage-1 blocking (n>50) & 3 query-relative features
+│   ├── auto_matcher.py          3-tier cascade auto-matcher & precision/recall audit
+│   ├── labelling.py             Manual labeling CLI, Cohen's kappa & paper splits
+│   ├── train_ranker.py          Grouped weighted training (LightGBM / Logistic)
+│   ├── ranker.py                MatchingRanker baselines + LambdaMART & Top-5 tiering
+│   ├── evaluation.py            Dual-denominator MRR@5, Hit@K, MAP & Null F1
+│   ├── export_hf.py             6-table ZSTD shard packager & datasets verifier
+│   ├── pipeline.py              End-to-end M3 orchestrator & ablation runner
+│   └── plots.py                 300-DPI Poster PNG chart generator
+├── notebooks/                   Colab notebooks
+│   ├── colab_run.ipynb          Milestone 1 Colab crawler notebook
+│   └── colab_parse.ipynb        Milestone 2 Colab parser notebook
+└── tests/                       Offline pytest suite (765 tests; mocked HTTP/fixtures)
+    ├── conftest.py              Shared archive fixtures & M3 fixture path
+    ├── m1/                      Milestone 1 unit & pipeline tests
+    ├── m2/                      Milestone 2 parser, dedup & validator tests
+    └── m3/                      Milestone 3 matching, ranker, evaluation & HF tests
 ```
 
 Each module docstring lists owner, reviewer, task code, and “done when” criteria.
@@ -429,10 +455,22 @@ Each module docstring lists owner, reviewer, task code, and “done when” crit
 ruff check . && ruff format . && pytest
 ```
 
-- Tests use `responses` and fixtures — **no real network** in unit tests.
+- Unit tests (`765` total across `src/tests/m1/`, `src/tests/m2/`, `src/tests/m3/`) use `responses` and synthetic fixtures — **no real network** in tests.
 - Never commit `data/`, `.env`, keys, `*.gz`, `*.parquet`, `*.sqlite`.
 - Branches and reviewers: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 - CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): ruff, pytest, block tracked secrets/data.
+
+---
+
+## Team
+
+| Role | Member | Milestone 1 | Milestone 2 | Milestone 3 |
+| :---: | --- | --- | --- | --- |
+| **A** | **Võ Gia Phúc** *(Leader)* | Pipeline orchestration, HTTP/rate limits, manifest, checkpoint, metrics | Shared contracts (`models.py`), `run_parse.py`, M2 orchestration & profiling | Shared contracts (`matching/models.py`), blocking & relative features, `run_matching.py`, HF export |
+| **B** | **Trần Thanh Sơn** | Range/ID utilities, Atom & OAI-PMH discovery, Semantic Scholar client | Macro/presentation cleanup (`cleaner.py`), math normalization, sentence splitting | TeX/Unicode precleaning (`cleaner.py`), 15 lexical features & local char TF-IDF |
+| **C** | **Phạm Trường Quỳnh** | Synthetic archive fixtures, `/src/` streaming download & extraction | Multi-file TeX gathering (`gathering.py`), hierarchy tree building & ref separation | Interactive manual labeling CLI, paper-level splits, Cohen's kappa, 3-tier auto-matcher & audit |
+| **D** | **Trần Nguyễn Lâm Gia Thụ** | Corpus API (`corpus.py`), Parquet/CSV export & summary stats | BibTeX/BibLaTeX & `.bbl` extraction, two-level dedup, sharded Parquet exporter | Grouped weighted training (`train_ranker.py`), baselines & LightGBM LambdaMART (`ranker.py`) |
+| **E** | **Thân Nguyễn Quang Triệu** | Post-crawl corpus validator (`crawler/validate_corpus.py`), Jupyter Book report | 8-invariant M2 Parquet & coverage validator (`parsing/validate_m2.py`) | M2 AST citation index (`hierarchy_features.py`), dual-denominator `MRR@5` eval & 300-DPI Poster charts |
 
 <div align="center">
 

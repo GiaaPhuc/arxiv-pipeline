@@ -3,6 +3,9 @@
 Owner: E | Reviewer: E/A | Task: M2-E1
 Exit code 0 = PASS, 1 = invariant violation(s) found.
 
+Usage::
+    python src/parsing/validate_m2.py --data-dir data
+
 Verifies all 8 Milestone 2 invariants across sharded Parquet outputs:
   1. Parquet Schema & Non-null Check (elements, hierarchy, bibtex types & nulls)
   2. Single Root Invariant (unique <dirname>#root<v> per parsed TeX version, never a child)
@@ -28,10 +31,16 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from corpus import Corpus
-from crawler.ids import id_to_dirname
-from crawler.models import Status
-from parsing.models import ELEMENT_KINDS
+if not __package__:
+    _here = Path(__file__).resolve()
+    sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != _here.parent]
+    if not any(Path(p or ".").resolve() == _here.parents[1] for p in sys.path):
+        sys.path.insert(0, str(_here.parents[1]))
+
+from corpus import Corpus  # noqa: E402
+from crawler.ids import id_to_dirname  # noqa: E402
+from crawler.models import Status  # noqa: E402
+from parsing.models import ELEMENT_KINDS  # noqa: E402
 
 _ELEMENT_KINDS_SET = frozenset(ELEMENT_KINDS)
 _TABLE_NAMES = ("elements", "hierarchy", "bibtex")

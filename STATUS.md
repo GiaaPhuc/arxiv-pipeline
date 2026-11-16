@@ -3,7 +3,7 @@
 > File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **16/11/2026, 01:52 (Asia/Saigon)** — Đã merge đủ cả **5 vai M3 (A/B/C/D/E)** lên `main` (`668a436`: PR #34 E, #35 D, #37/#38 B, #36/#39 C) và rà soát hoàn thiện tích hợp M3 cuối: `pipeline.py` tự động xuất `ranker_metadata.json`, bảng so sánh 4 mô hình (`models`), ablation M2 18 vs 21 (`ablation`) và `feature_importance_gain` trong `evaluation_results.json`; `run_matching.py` hỗ trợ `--plot-figures` / `--figures-dir`; cập nhật đồng bộ `README.md`, `STATUS.md`, `docs/du-an-va-luong-xu-ly-hien-tai-vi.md`, `d-ranker-handoff.md`. Toàn repo **765 passed** (gồm **163 tests M3** offline), `ruff` sạch 100%; còn chạy thật 5.000 ID cá nhân & đẩy Hugging Face ở Phase 3A.
+> Cập nhật lần cuối: **16/11/2026, 12:02 (Asia/Saigon)** — Bổ sung bảng thành viên đầy đủ (A–E: Võ Gia Phúc, Trần Thanh Sơn, Phạm Trường Quỳnh, Trần Nguyễn Lâm Gia Thụ, Thân Nguyễn Quang Triệu) vào `README.md` và `docs/du-an-va-luong-xu-ly-hien-tai-vi.md`. Trước đó đã hoàn tất dọn dẹp cuối cho bản final: gọn hóa `docs/`, tái cấu trúc `src/` & `src/tests/{m1,m2,m3}/`, hoàn thiện `README.md` + `docs/*.md`, kiểm chứng `ruff` sạch và toàn bộ **765 passed** (`0` failed/skipped).
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -48,14 +48,14 @@
 - `train_ranker.py`: gom nhóm `(arxivid, citationkey)`, căn nhãn/trọng số, 21/18 cột; Fuzzy, TF-IDF, StandardScaler + LogisticRegression, LambdaMART; Manual=3/Auto=1. LambdaMART bỏ nhóm toàn âm, early stopping chỉ bật khi Valid-Manual có ít nhất một truy vấn chứa cả nhãn dương và âm (`_has_ranking_pair`); thiếu valid phù hợp thì dùng số cây cố định. `fit_model` chỉ nhận `"logistic"`/`"lambdamart"`. Dữ liệu thiếu nhãn/nguồn, không hữu hạn hoặc Train không học được báo lỗi rõ.
 - `ranker.py`: đúng giao diện `RankerProtocol`; Train/Valid tách theo bài; anchor arXiv/DOI trước, điểm giảm dần, bằng điểm giữ thứ tự gốc, dedup ID và đệm `None`. `predict_rows` hỗ trợ partition dạng `Enum` hoặc `str` (từ chối `None`), xuất JSON thời gian fit/cấu hình/thứ tự cột/gain importance; không đổi ground truth/splits.
 - Kiểm chứng: **52 passed** phần D (unit/validation, tích hợp `ranker_factory`, và handoff E2E thật với `evaluate_mrr5` + `generate_all_poster_figures` của E sau khi merge `main` PR #34). Toàn repo **681 passed**, không fail/skip; `ruff check .` sạch và `ruff format --check .` chuẩn **101** file. `6` cảnh báo LightGBM 4.7 deprecate `eval_set` (giữ API tương thích `>=4.3`).
-- Tích hợp pipeline dùng ranker thật qua `ranker_factory`; handoff đầu ra đã kiểm với module thật của E (`evaluate_mrr5` + `generate_all_poster_figures`), sau đó đã merge vào `main` (PR #35) và nối thông với B/C. Chưa đo MRR@5, benchmark CPU hay chạy dải 5.000 ID. `NullQueryDetector` tùy chọn chưa làm. Hướng dẫn: [`d-ranker-handoff.md`](docs/reports/m3/d-ranker-handoff.md).
+- Tích hợp pipeline dùng ranker thật qua `ranker_factory`; handoff đầu ra đã kiểm với module thật của E (`evaluate_mrr5` + `generate_all_poster_figures`), sau đó đã merge vào `main` (PR #35) và nối thông với B/C. Chưa đo MRR@5, benchmark CPU hay chạy dải 5.000 ID. `NullQueryDetector` tùy chọn chưa làm.
 
 ### M2 — Hoàn thiện, tối ưu và kiểm định trên 10.000 bài thật (14/11)
 
-- **Khai thác & khử trùng lặp (`bib_extractor.py`, `dedup.py`, `pipeline.py`, `export_m2.py`):** lọc entry `.bib` theo khóa trích dẫn thực sự xuất hiện trong `.tex`/`.bbl` (không phân biệt hoa/thường, bỏ lọc khi có `\nocite{*}`); pipeline dùng `strict=False` để cứu hộ từng entry trên `.bib` lỗi cục bộ (chỉ báo lỗi khi `0` entry hợp lệ; không để `@string` lỗi trong tệp chỉ chứa macro làm sập cả bài); mở rộng `_FIELD_START_RE` nhận tên trường/macro BibTeX/BibLaTeX chứa `.`, `+`, `:`, `/`, `*` (như `author+an`, `I-MIT/WHOI`, `SP:IC`, `ISIT*`, `eccv4.1`); `dedup` chia nhóm cùng năm quá lớn theo ký tự đầu để tránh $O(n^2)$. Vẫn giữ ưu tiên `.bib` → `.bbl`, kẹp `depth >= 0`, collapse chu trình DAG, Parquet ZSTD/int8/non-null, rollback marker lô dở, `_errors.jsonl` một dòng/bài lỗi, và thêm `--resume` trong `src/colab_parse.ipynb`.
+- **Khai thác & khử trùng lặp (`bib_extractor.py`, `dedup.py`, `pipeline.py`, `export_m2.py`):** lọc entry `.bib` theo khóa trích dẫn thực sự xuất hiện trong `.tex`/`.bbl` (không phân biệt hoa/thường, bỏ lọc khi có `\nocite{*}`); pipeline dùng `strict=False` để cứu hộ từng entry trên `.bib` lỗi cục bộ (chỉ báo lỗi khi `0` entry hợp lệ; không để `@string` lỗi trong tệp chỉ chứa macro làm sập cả bài); mở rộng `_FIELD_START_RE` nhận tên trường/macro BibTeX/BibLaTeX chứa `.`, `+`, `:`, `/`, `*` (như `author+an`, `I-MIT/WHOI`, `SP:IC`, `ISIT*`, `eccv4.1`); `dedup` chia nhóm cùng năm quá lớn theo ký tự đầu để tránh $O(n^2)$. Vẫn giữ ưu tiên `.bib` → `.bbl`, kẹp `depth >= 0`, collapse chu trình DAG, Parquet ZSTD/int8/non-null, rollback marker lô dở, `_errors.jsonl` một dòng/bài lỗi, và thêm `--resume` trong `src/notebooks/colab_parse.ipynb`.
 - **Chuẩn hóa & tách cấu trúc (`math_normalizer.py`, `gathering.py`, `hierarchy.py`):** sửa `_math_body` giữ khoảng trắng sau dấu `\` cuối thân toán (`\ `) để không escape `$` / `\end{equation}` kế tiếp; chặn quét `\verb` trên một dòng; thêm `Verbatim` / `Verbatim*` vào `_LITERAL_ENVS`; giới hạn quét toán và phục hồi môi trường chưa đóng trước `\begin{document}`, `\end{document}`, `\begin{thebibliography}` và `\bibitem`; lọc tiêu đề mục tham khảo có `\label{...}` hoặc dấu câu ở cuối.
 - **Chạy thực tế 10.000 bài cục bộ (`data/papers/`, trong tổng 25.000 ID mục tiêu):** `run_parse.py --workers 12 --batch-size 500` đạt **10.000/10.000 bài (0 lỗi)** trong **678,06 s** (`67,81 ms/bài`, RAM đỉnh `1.629,2 MB`, trung bình `1.025,2 MB`, `20` shard/bảng, đầu ra `286.068.147 B` từ `7.751.298.877 B` đầu vào): **12.783** versions (**867** empty), **4.539.133** elements, **6.884.462** hierarchy, **373.776** bibtex. Trên Colab 25.000 ID sau `b7921d8`, **25.000/25.000** bài parse không lỗi; `validate_m2.py` chỉ còn 1 lỗi `2408.05882` lọt heading `{References}` (đã vá trong `hierarchy.py`, chờ re-parse `2408.05882` + chạy lại `validate_m2.py`).
-- **Kiểm định & kiểm thử:** `src/validate_m2.py --data-dir data` đạt **`PASS`** (exit `0`, 0 vi phạm trên 10.000 bài cục bộ); bộ test offline **614 passed**; Ruff check/format sạch. Còn chờ re-parse `2408.05882` + `validate_m2` trên Colab 25k, benchmark Colab CPU và ghép báo cáo vào `arxiv-book/m2/*`.
+- **Kiểm định & kiểm thử:** `src/parsing/validate_m2.py --data-dir data` đạt **`PASS`** (exit `0`, 0 vi phạm trên 10.000 bài cục bộ); bộ test offline **614 passed**; Ruff check/format sạch. Còn chờ re-parse `2408.05882` + `validate_m2` trên Colab 25k, benchmark Colab CPU và ghép báo cáo vào `arxiv-book/m2/*`.
 
 ### Phần B M2 — hoàn thành và kiểm thử 12/11 (PR #28)
 
@@ -79,12 +79,12 @@
 ### Phần C M2 — checkpoint local 08/11
 
 - `gathering` chọn root, khử comment có bảo vệ literal, DFS include và thu tham khảo; `hierarchy` dựng cây qua `CleanerHooks`, tách References và giữ cảm ơn/phụ lục. Chấm root chỉ thưởng include tìm được đích trong mapping; sửa nhầm template ở `2408.11049` v4/v5. API/schema giữ nguyên.
-- Bản thảo giao E: `docs/reports/m2/01_parsing_hierarchy.md`. Bảng kiểm chứng/đầu việc B/D/A/E ở `docs/reports/m2/02_c_real_sample_check.md`, bằng chứng từng phiên bản ở JSON cùng thư mục. Chưa sửa/build repo sách.
+- Bản thảo phần C đã chuyển sang repo sách `arxiv-book/m2/01_parsing_hierarchy.md` (các bản nháp tạm dưới `docs/reports/` và `docs/SESSION_HANDOFF.md` đã được dọn bỏ khi chốt cấu trúc cuối).
 - Ruff check/format đạt; **359 passed (24,94 s)** sau ghép main `ea13d45`, gồm **98 test C**. Unit test dùng nguồn tổng hợp, không gọi mạng; không phải benchmark hay số parse thật.
 - Trên Windows, lần full-suite đầu lỗi 7 test checkpoint/export do đường dẫn Temp sandbox có `#` làm URI SQLite bị cắt. Đặt `TEMP`/`TMP` của tiến trình test dưới `.venv/m2c-temp`, dùng basetemp mới thì toàn bộ đạt; không sửa checkpoint/export.
 - Người dùng xác nhận `arxiv-data/` do leader cung cấp, đã giải nén: **1.000 bài / 1.678 phiên bản** theo metadata (1.526 `ok`, 148 `no_source`, 4 `not_found`); không có `.bbl`. Chỉ kiểm hash **349 tệp** của mẫu 10 bài, chưa validate toàn subset hoặc xác nhận hoàn tất 25k.
 - **C độc lập:** 26/26 phiên bản mẫu + 3/3 đối chứng đạt kiểm tra cây/marker References với hook truyền nguyên văn; dùng **265/324 TeX**, 6 phiên bản mẫu cảnh báo bibliography thiếu trong subset. Chưa chứng minh chất lượng macro/math/split hoặc trích tham khảo/dedup B/D thật. M2-C vẫn 🟡; D đã nối `.bbl` qua `Corpus.tex_files()` ngày 13/11; chưa đánh giá lại mẫu thật.
-- **Session handoff 08/11:** `docs/SESSION_HANDOFF.md` đã ghi bằng chứng mẫu thật, lỗi root đã sửa và các bước tích hợp còn chờ. Đã commit C `935b3dc`, đối chiếu và nhận main `ea13d45` (v3.9); người dùng tự tạo PR trên trình duyệt sau khi push.
+- **Session handoff 08/11:** đã ghi nhận bằng chứng mẫu thật, lỗi root đã sửa và các bước tích hợp còn chờ (đã dọn `docs/SESSION_HANDOFF.md` ở bước clean cuối sau khi tích hợp xong). Đã commit C `935b3dc`, đối chiếu và nhận main `ea13d45` (v3.9); người dùng tự tạo PR trên trình duyệt sau khi push.
 
 ### Milestone 3 — đề vs hiện trạng
 
@@ -98,13 +98,14 @@
 
 ### Việc đang làm — **Phase 2 / chuẩn bị Phase 3 (M3)**
 
+- **Dọn repo & tái cấu trúc final (16/11):** đã gọn hóa `docs/`, sắp xếp lại `src/` (`crawler/`, `parsing/`, `matching/`, `notebooks/`, `tests/{m1,m2,m3}/`), cập nhật toàn bộ `README.md` và `docs/*.md`, giữ **765 passed** (`0` failed/skipped) và `ruff` sạch 100% (**102** file).
 - **M3:** Toàn bộ mã và kiểm thử của cả **5 vai A/B/C/D/E** đã merge lên `main` (**163 tests M3** / **765 passed** toàn repo, kiểm thông CLI `--export-hf --verify-hf --plot-figures`), `README.md` đã cập nhật đủ hướng dẫn M3 + định dạng ground truth + bảng 21 đặc trưng. Chuyển sang Phase 3A: chạy thật 5.000 ID cá nhân, gán nhãn tay $\ge 5$ bài, đo Kappa/Audit/MRR@5 thật, sinh hình Poster 300 DPI và đẩy Dataset HF cá nhân.
-- **M2 (hoàn thiện & kiểm định 10.000 bài thật):** pipeline M2 đã chạy sạch **10.000/10.000 bài** cục bộ (`0` lỗi) và `validate_m2.py` đạt **`PASS`**; còn lại chạy bổ sung 15.000 ID còn thiếu khi có dữ liệu, đo benchmark Colab và ghép notebook/báo cáo vào repo `arxiv-book/m2/*`.
+- **M2 (hoàn thiện & kiểm định 10.000 bài thật):** pipeline M2 đã chạy sạch **10.000/10.000 bài** cục bộ (`0` lỗi) và `src/parsing/validate_m2.py` đạt **`PASS`**; còn lại chạy bổ sung 15.000 ID còn thiếu khi có dữ liệu, đo benchmark Colab và ghép notebook/báo cáo vào repo `arxiv-book/m2/*`.
 - **Go/no-go:** Pilot 30 ID ✅. V̄ pilot **~1,9** phiên bản/bài → ~**47.500** request `/src/`; chỉ chờ 3 s/arXiv ≈ **~40 h** (+ tải/trích). Wall pilot (27–28/10, gồm S2 429 trước batch) cỡ **~2 h** cho 30 ID → nhân tuyến tính **~7 ngày** wall nếu S2 vẫn nghẽn; với batch + key ổn định kỳ vọng **~2–3 ngày** một máy (R1 — cần đo lại sau vài trăm ID đầu T4.1).
 - **T4.1 (A):** `python src/run_crawl.py --ranges src/id_ranges.csv` trên máy chính; sao lưu định kỳ `data/` + `manifest.sqlite`.
 - **T4.2–T4.4:** retry `failed` theo dải; validate ≥ 20 phiên bản; đẩy `stats/` vào sách.
 - **T5.x:** nháp sách trong lúc crawl; đóng băng sáng **4/11**; nộp chiều **4/11** (Book Moodle **6/11** 23:59).
-- **Tùy chọn vận hành dài hạn (`v3.1`/`v3.11`):** `--auto-resume-rate-limit`, `--skip-s2` và `--s2-only` đã tích hợp sẵn trong `src/run_crawl.py` và `src/colab_run.ipynb` ✅.
+- **Tùy chọn vận hành dài hạn (`v3.1`/`v3.11`):** `--auto-resume-rate-limit`, `--skip-s2` và `--s2-only` đã tích hợp sẵn trong `src/run_crawl.py` và `src/notebooks/colab_run.ipynb` ✅.
 
 ---
 
@@ -196,7 +197,7 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | T4.3 | Validate + đối chiếu ≥ 20 phiên bản | 1/11 | ⬜ |
 | T4.4 | `stats/` vào repo sách | 1/11 | ⬜ |
 | T5.1 | Sách (viết nháp trong lúc crawl) | 3/11 | ✅ (4 chương hoàn chỉnh, chờ chép `stats/` 25k & chốt 6 hộp `⏳`) |
-| T5.2 | README | 3/11 | ⬜ (có bản khởi tạo) |
+| T5.2 | README | 3/11 | ✅ (đã hoàn thiện cho đủ M1–M3 & cấu trúc final) |
 | T5.3 | Đóng băng checklist | sáng 4/11 | ⬜ |
 | T5.4 | Nộp Moodle. Hạn Book theo ảnh: 6/11/2026 23:59 | chiều 4/11 | ⬜ |
 
@@ -205,11 +206,11 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | Mã | Việc | Owner | Mốc | TT |
 | --- | --- | --- | --- | --- |
 | M2-A0 | Khóa hợp đồng `src/parsing/models.py` + `CleanerHooks` | A | 06/11 | ✅ |
-| M2-A1 | Điều phối `src/parsing/pipeline.py` + `src/run_parse.py` + `src/colab_parse.ipynb` + `test_parse_pipeline.py` | A | 06/11 (khung) · 13/11 (tích hợp) | 🟡 (hoàn tất trên 10.000/10.000 bài thật, `0` lỗi; còn 15.000 ID & benchmark Colab) |
+| M2-A1 | Điều phối `src/parsing/pipeline.py` + `src/run_parse.py` + `src/notebooks/colab_parse.ipynb` + `test_parse_pipeline.py` | A | 06/11 (khung) · 13/11 (tích hợp) | 🟡 (hoàn tất trên 10.000/10.000 bài thật, `0` lỗi; còn 15.000 ID & benchmark Colab) |
 | M2-C | `gathering.py`, `hierarchy.py`, unit tests, mục 1 báo cáo | C | 06–12/11 | 🟡 mã, tests và sửa edge-case trên 10.000 bài thật (`Verbatim`, giới hạn quét toán/`\verb`, phục hồi env/tham khảo) đạt `validate_m2` `PASS`; mục 1 báo cáo ghép ở repo sách |
 | M2-B | `cleaner.py`, `math_normalizer.py`, `sentence_splitter.py`, unit tests, nửa đầu mục 2 báo cáo | B | 06–12/11 | 🟡 mã & unit tests đã tích hợp, đã sửa `_math_body`/`\verb` và đạt `validate_m2` `PASS` trên 10.000 bài thật; nửa đầu mục 2 báo cáo ở repo sách |
-| M2-D | `bib_extractor.py`, `dedup.py`, `export_m2.py`, unit tests, nửa sau mục 2 báo cáo | D | 06–12/11 | 🟡 mã, test, `docs/m2/02_standardization_dedup.md`, tối ưu lọc `.bib`/`strict=False`/sharding đạt `validate_m2` `PASS` trên 10.000 bài thật; chờ ghép Book |
-| M2-E | `validate_m2.py`, `arxiv-book/m2/*` (`03_parsing_statistics.ipynb`, `04_parser_performance.ipynb`) | E | 06–13/11 | 🟡 `validate_m2.py` đạt `PASS` trên cả 10.000 bài thật; còn 2 notebook thống kê trên `arxiv-book/m2/*` |
+| M2-D | `bib_extractor.py`, `dedup.py`, `export_m2.py`, unit tests, nửa sau mục 2 báo cáo | D | 06–12/11 | 🟡 mã, test, tối ưu lọc `.bib`/`strict=False`/sharding đạt `validate_m2` `PASS` trên 10.000 bài thật; chờ ghép Book |
+| M2-E | `src/parsing/validate_m2.py`, `arxiv-book/m2/*` (`03_parsing_statistics.ipynb`, `04_parser_performance.ipynb`) | E | 06–13/11 | 🟡 `validate_m2.py` đạt `PASS` trên cả 10.000 bài thật; còn 2 notebook thống kê trên `arxiv-book/m2/*` |
 
 ### Milestone 3 — Khớp tài liệu tham khảo (Code-Complete < 16/11 · HF cá nhân 20/11 · Poster 27/11)
 

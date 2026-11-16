@@ -1,8 +1,8 @@
 """Audit corpus on disk against manifest invariants and checksums.
 
 Usage::
-    python src/audit_corpus.py --data-dir data
-    python src/audit_corpus.py --data-dir data --output audit_report.json
+    python src/crawler/audit_corpus.py --data-dir data
+    python src/crawler/audit_corpus.py --data-dir data --output audit_report.json
 """
 
 from __future__ import annotations
@@ -14,8 +14,14 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from crawler.ids import id_to_dirname
-from crawler.models import Status
+if not __package__:
+    _here = Path(__file__).resolve()
+    sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != _here.parent]
+    if not any(Path(p or ".").resolve() == _here.parents[1] for p in sys.path):
+        sys.path.insert(0, str(_here.parents[1]))
+
+from crawler.ids import id_to_dirname  # noqa: E402
+from crawler.models import Status  # noqa: E402
 
 
 def audit_corpus(data_dir: Path) -> dict:

@@ -5,7 +5,7 @@ import json
 import pyarrow.parquet as pq
 
 import run_parse
-from validate_m2 import validate
+from parsing.validate_m2 import validate
 
 
 def _paper(data_dir, aid, versions):

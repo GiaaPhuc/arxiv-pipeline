@@ -2,7 +2,7 @@
 
 Tài liệu này dành cho người mới: chạy crawler Milestone 1 trên **Colab chỉ CPU**, không cần cài Python trên máy cá nhân.
 
-Notebook có sẵn trong repo: [`src/colab_run.ipynb`](../src/colab_run.ipynb). Bạn có thể mở notebook đó trên Colab hoặc làm theo các bước dưới đây.
+Notebook có sẵn trong repo: [`src/notebooks/colab_run.ipynb`](../src/notebooks/colab_run.ipynb). Bạn có thể mở notebook đó trên Colab hoặc làm theo các bước dưới đây.
 
 ---
 
@@ -79,7 +79,7 @@ Cả nhóm vẫn chỉ **một** corpus trên **một** máy đang crawl. Ngư�
 ### Bước 1 — Mở Colab và lấy mã
 
 1. Vào [Google Colab](https://colab.research.google.com/).
-2. **File → Upload notebook** → chọn `src/colab_run.ipynb` từ repo.
+2. **File → Upload notebook** → chọn `src/notebooks/colab_run.ipynb` từ repo.
 3. Trong notebook, chạy ô clone/pull repo:
 
 ```bash
@@ -198,26 +198,26 @@ Khi bạn muốn tắt máy hoặc đóng tab Colab:
 
 Khi toàn bộ 25.000 ID (hoặc đợt pilot) đã chạy xong không còn lỗi:
 
-**1. Kiểm toán tính toàn vẹn kho dữ liệu (`audit_corpus.py` — v3.12):**
+**1. Kiểm toán tính toàn vẹn kho dữ liệu (`crawler/audit_corpus.py` — v3.12):**
 Đối chiếu tệp thực tế trên đĩa với `manifest.sqlite`, kiểm tra checksum SHA-256 các file `.tex`/`.bib` và xuất báo cáo:
 ```bash
-!python audit_corpus.py --data-dir /content/data --output audit_report.json
+!python crawler/audit_corpus.py --data-dir /content/data --output audit_report.json
 ```
 
-**2. Làm giàu trích dẫn offline từ file `.bib/.bbl` (`enrich_references.py` — v3.12):**
+**2. Làm giàu trích dẫn offline từ file `.bib/.bbl` (`crawler/enrich_references.py` — v3.12):**
 Nếu còn bài chưa có trích dẫn do S2 chưa lập chỉ mục (404), công cụ này sẽ tự động đọc các file `.bib/.bbl` có sẵn để bổ sung vào `references.json` 100% offline không cần mạng:
 ```bash
-!python enrich_references.py --data-dir /content/data
+!python crawler/enrich_references.py --data-dir /content/data
 ```
 
 **3. Kiểm tra tính toàn vẹn và xuất bảng dữ liệu nộp bài:**
 ```bash
-!python validate_corpus.py --data-dir /content/data
-!python export_data.py --data-dir /content/data
+!python crawler/validate_corpus.py --data-dir /content/data
+!python crawler/export_data.py --data-dir /content/data
 ```
 
-- `validate_corpus.py` thoát mã **0** = PASS (cấu trúc thư mục, phiên bản, hash file .tex/.bib và tham chiếu đều hợp lệ).
-- `export_data.py` xuất bảng dữ liệu và thống kê vào `data/stats/` (Parquet + CSV) phục vụ làm báo cáo Jupyter Book.
+- `crawler/validate_corpus.py` thoát mã **0** = PASS (cấu trúc thư mục, phiên bản, hash file .tex/.bib và tham chiếu đều hợp lệ).
+- `crawler/export_data.py` xuất bảng dữ liệu và thống kê vào `data/stats/` (Parquet + CSV) phục vụ làm báo cáo Jupyter Book.
 
 ---
 
@@ -229,7 +229,7 @@ data/
   manifest.sqlite      # SQLite WAL quản lý trạng thái từng bài/phiên bản
   papers/<arxiv_id>/   # metadata (paper.json), từng phiên bản v1..vN, tex/bib, references
   logs/                # crawl.log, metrics.json
-  stats/               # sau khi chạy export_data.py
+  stats/               # sau khi chạy crawler/export_data.py
 ```
 
 Trên Google Drive cá nhân (`MyDrive/`):
@@ -246,8 +246,8 @@ Trên Google Drive cá nhân (`MyDrive/`):
 | Thoát mã **2** | Thiếu `CRAWLER_CONTACT` hoặc lỗi đọc `id_ranges.csv` — sửa lại Bước 2 / 3 |
 | Thoát mã **3** | arXiv **403**, hoặc **429** trên API discovery hoặc `/src/` sau khi đã chờ `Retry-After` tối đa 4 lần — **dừng lại**, chờ **30–60 phút**, rồi chạy lại lệnh crawl (resume). Nếu bật `--auto-resume-rate-limit`, crawler sẽ tự defer bài và tự ngủ cooldown rồi chạy tiếp |
 | `Mountpoint must not already contain files` | Lỗi do Drive mount bị treo từ phiên trước. Bấm **Runtime → Restart session**, rồi chạy lại từ ô Setup |
-| `validate_corpus` / `export_data` lỗi | Do corpus **chưa crawl xong** (dừng giữa chừng, thiếu S2 hoặc thiếu ngày trung gian). Kiểm tra qua `audit_corpus.py` trước khi xuất |
-| S2 404 (bài mới chưa index) | Kích hoạt `--enable-bib-fallback` để bóc tách `.bib/.bbl` cục bộ, hoặc chạy offline: `python enrich_references.py --data-dir /content/data` |
+| `validate_corpus` / `export_data` lỗi | Do corpus **chưa crawl xong** (dừng giữa chừng, thiếu S2 hoặc thiếu ngày trung gian). Kiểm tra qua `crawler/audit_corpus.py` trước khi xuất |
+| S2 404 (bài mới chưa index) | Kích hoạt `--enable-bib-fallback` để bóc tách `.bib/.bbl` cục bộ, hoặc chạy offline: `python crawler/enrich_references.py --data-dir /content/data` |
 | S2 lỗi 413 hoặc 504 | v3.12 đã mặc định lô 25 bài và tự chia đôi lô (**Batch Bisection**) đệ quy để cô lập bài lỗi, không làm gián đoạn cả lô |
 | Thiếu ngày phiên bản trung gian | Kích hoạt cờ `--enable-oai-dates` để crawler tự động truy vấn OAI-PMH `arXivRaw` bù đắp ngày chính xác cho các bản $v_2 \dots v_N$ |
 | S2 chậm / nghẽn mạng giờ cao điểm | Thêm cờ `--skip-s2` để ưu tiên cào gói arXiv siêu tốc, sau đó chạy bù trích dẫn bằng `--s2-only` |

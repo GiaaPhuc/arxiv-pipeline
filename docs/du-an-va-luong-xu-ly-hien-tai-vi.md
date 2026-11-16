@@ -20,7 +20,7 @@
   - [2.2. Hợp đồng Dữ liệu Khóa cứng (`src/parsing/models.py`)](#22-hợp-đồng-dữ-liệu-khóa-cứng-srcparsingmodelspy)
   - [2.3. Kiến trúc Điều phối Đa tiến trình (`src/parsing/pipeline.py`)](#23-kiến-trúc-điều-phối-đa-tiến-trình-srcparsingpipelinepy)
   - [2.4. Chuỗi Xử lý Chi tiết 5 Giai đoạn (Stages C, B, D)](#24-chuỗi-xử-lý-chi-tiết-5-giai-đoạn-stages-c-b-d)
-  - [2.5. Bộ Quy tắc Kiểm toán & 8 Bất biến Nghiệm thu (`src/validate_m2.py`)](#25-bộ-quy-tắc-kiểm-toán--8-bất-biến-nghiệm-thu-srcvalidatem2py)
+  - [2.5. Bộ Quy tắc Kiểm toán & 8 Bất biến Nghiệm thu (`src/parsing/validate_m2.py`)](#25-bộ-quy-tắc-kiểm-toán--8-bất-biến-nghiệm-thu-srcparsingvalidate_m2py)
   - [2.6. Hướng dẫn Lệnh Vận hành Milestone 2](#26-hướng-dẫn-lệnh-vận-hành-milestone-2)
 - [Phần III: Milestone 3 — Khớp Tài liệu Tham khảo (`src/matching/` & `src/run_matching.py`)](#phần-iii-milestone-3--khớp-tài-liệu-tham-khảo-srcmatching--srcrun_matchingpy)
   - [3.0.1. Hợp đồng Dữ liệu, Tiền xử lý & 21 Đặc trưng](#301-hợp-đồng-dữ-liệu--21-đặc-trưng-srcmatchingmodelspy--featurespy)
@@ -167,7 +167,7 @@ flowchart TB
     S2_3 -->|"Thành công"| S2_5["Ghi references.json vào vK/ & s2_references.raw.json.gz"]
     S2_BIB --> S2_5
     S2_4 --> S2_5
-    SKIP -.->|"Stage 2: --s2-only hoặc enrich_references.py"| S2_1
+    SKIP -.->|"Stage 2: --s2-only hoặc crawler/enrich_references.py"| S2_1
   end
 
   subgraph Backup["5. Sao lưu định kỳ — checkpoint-worker"]
@@ -228,12 +228,12 @@ data/
 │       │   └── tex/                    # Thư mục chứa các tệp .tex, .bib, .bbl giữ nguyên cấu trúc
 │       └── v2/
 │           └── ...
-└── stats/                              # Kết xuất từ src/export_data.py & src/audit_corpus.py
+└── stats/                              # Kết xuất từ src/crawler/export_data.py & src/crawler/audit_corpus.py
     ├── papers.parquet / .csv           # Bảng dữ liệu papers cho Hugging Face
     ├── references.parquet / .csv       # Bảng trích dẫn (chỉ giữ trích dẫn có ref_arxiv_id)
     ├── summary.json                    # Thống kê tổng hợp báo cáo & tỷ lệ trùng lặp cross_version_dedup
     ├── performance.json                # Tổng hợp tài nguyên và thời gian chạy
-    └── audit_report.json               # Kết quả kiểm toán tính toàn vẹn kho dữ liệu từ audit_corpus.py
+    └── audit_report.json               # Kết quả kiểm toán tính toàn vẹn kho dữ liệu từ crawler/audit_corpus.py
 ```
 
 **Hợp đồng dữ liệu khóa cứng (`src/crawler/models.py` — `SCHEMA_VERSION = 1`):**
@@ -281,20 +281,20 @@ python src/run_crawl.py \
   --s2-batch-size 25
 
 # Bù trích dẫn ngoại tuyến từ file .bib/.bbl có sẵn (100% offline, vài giây)
-python src/enrich_references.py --data-dir data
+python src/crawler/enrich_references.py --data-dir data
 
 # ==============================================================================
 # BỘ CÔNG CỤ KIỂM TOÁN, NGHIỆM THU & XUẤT DỮ LIỆU
 # ==============================================================================
 
 # 1. Kiểm toán đối chiếu đĩa vs manifest và xuất báo cáo JSON
-python src/audit_corpus.py --data-dir data --output data/stats/audit_report.json
+python src/crawler/audit_corpus.py --data-dir data --output data/stats/audit_report.json
 
 # 2. Kiểm tra tính hợp lệ toàn diện của kho dữ liệu M1
-python src/validate_corpus.py --data-dir data
+python src/crawler/validate_corpus.py --data-dir data
 
 # 3. Xuất 2 bảng dữ liệu và số liệu thống kê cho Jupyter Book / Hugging Face
-python src/export_data.py --data-dir data --out-dir data/stats
+python src/crawler/export_data.py --data-dir data --out-dir data/stats
 ```
 
 ---
@@ -474,9 +474,9 @@ flowchart LR
 
 ---
 
-### 2.5. Bộ Quy tắc Kiểm toán & 8 Bất biến Nghiệm thu (`src/validate_m2.py`)
+### 2.5. Bộ Quy tắc Kiểm toán & 8 Bất biến Nghiệm thu (`src/parsing/validate_m2.py`)
 
-Bộ công cụ kiểm toán `src/validate_m2.py` (Owner: E | Task: M2-E1) kiểm tra tính toàn vẹn tuyệt đối trên toàn bộ các tệp Parquet đầu ra, trả về mã thoát `0` (PASS) hoặc `1` (FAIL):
+Bộ công cụ kiểm toán `src/parsing/validate_m2.py` (Owner: E | Task: M2-E1) kiểm tra tính toàn vẹn tuyệt đối trên toàn bộ các tệp Parquet đầu ra, trả về mã thoát `0` (PASS) hoặc `1` (FAIL):
 
 | # | Tên bất biến nghiệm thu | Ràng buộc kỹ thuật kiểm tra |
 | :---: | :--- | :--- |
@@ -525,7 +525,7 @@ python src/run_parse.py \
 # ==============================================================================
 
 # Kiểm tra toàn bộ 8 bất biến trên thư mục kết quả Parquet
-python src/validate_m2.py --data-dir data --parsed-dir data/parsed
+python src/parsing/validate_m2.py --data-dir data --parsed-dir data/parsed
 ```
 
 ---
@@ -569,7 +569,7 @@ Ba baseline dùng `model="fuzzy"`, `"tfidf"`, `"logistic"`; scaler của Logisti
 fit Train. Hậu xử lý chung ưu tiên anchor arXiv/DOI, điểm giảm dần và thứ tự gốc
 khi bằng điểm, khử ID trùng rồi đệm `None`. `predict_rows` nhận partition `Enum` hoặc `str` (chặn `None`) để bàn giao cho `evaluate_mrr5` của E, và
 `export_metadata` ghi thời gian fit, cấu hình, cột và gain importance vào
-`data/matching/range_<k>/ranker_metadata.json`; dữ liệu/artifact không commit. Đã kiểm đủ **52 tests** phần D và tích hợp `default_matching_stages()`; chưa đánh giá trên corpus thật 5.000 ID. Chi tiết tại [`d-ranker-handoff.md`](reports/m3/d-ranker-handoff.md).
+`data/matching/range_<k>/ranker_metadata.json`; dữ liệu/artifact không commit. Đã kiểm đủ **52 tests** phần D và tích hợp `default_matching_stages()`; chưa đánh giá trên corpus thật 5.000 ID.
 
 #### Chi tiết bước 3 — M3-C: nhãn, kiểm toán và chia tập (PR #36 & #39 đã merge)
 
@@ -691,11 +691,11 @@ Quy định phân công theo `CONTRIBUTING.md` và tiến độ thực tế qua 
 
 | Vai | Thành viên | Trách nhiệm chính M1 | Trách nhiệm chính M2 | Trách nhiệm chính M3 | Reviewer | Trạng thái |
 | :---: | :--- | :--- | :--- | :--- | :---: | :---: |
-| **A** | **Gia Phúc (Leader)** | Điều phối pipeline, mạng HTTP, manifest, metrics, crawler operator. | Khóa hợp đồng `models.py`, điều phối `pipeline.py`, CLI `run_parse.py`, profiler. | Khóa `matching/models.py`, `features.py`, `pipeline.py`, `run_matching.py`, `export_hf.py`, `matching_fixtures.py`, `README.md`. | **E** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Đã chạy 10k bài (chờ 15k ID & Colab)<br>✅ M3 Mã & tích hợp A (`M3-A0..A3`) |
-| **B** | **Sơn** | Xử lý dải ID, khám phá Atom API, tích hợp Semantic Scholar. | Làm sạch văn bản (`cleaner.py`), chuẩn hóa toán (`math_normalizer.py`), tách câu (`sentence_splitter.py`). | Tiền xử lý (`cleaner.py`), 15 đặc trưng lexical + TF-IDF (`lexical_features.py`). | **C** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test xong, đạt kiểm định 10k bài (chờ Book)<br>✅ M3 Đã merge PR #37 & #38 lên `main` |
-| **C** | **Trường Quỳnh** | Fixture tổng hợp, tải và giải nén source TeX/bib/bbl. | Gom nguồn (`gathering.py`), dựng cây cấp bậc (`hierarchy.py`). | CLI gán nhãn & splits (`labelling.py`), Auto-matcher + audit (`auto_matcher.py`). | **B** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test xong, đạt kiểm định 10k bài (chờ Book)<br>✅ M3 Đã merge PR #36 & #39 lên `main` |
-| **D** | **Thụ** | Xuất dữ liệu Parquet/CSV, đối soát corpus, notebook số liệu. | Trích tham khảo (`bib_extractor.py`), khử trùng lặp (`dedup.py`), xuất Parquet (`export_m2.py`). | Mô hình xếp hạng (`ranker.py`), huấn luyện có trọng số & ablation (`train_ranker.py`). | **E** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Mã/test/báo cáo D xong, kiểm định 10k bài (chờ Book)<br>✅ M3 Đã merge PR #35 lên `main` |
-| **E** | **Triệu** | Xác thực corpus (`validate_corpus.py`), xây dựng Jupyter Book. | Kiểm toán 8 bất biến (`validate_m2.py`), viết notebook thống kê M2 trên sách. | Đặc trưng AST (`hierarchy_features.py`), đánh giá `MRR@5` (`evaluation.py`), hình poster (`plots.py`). | **D / A** (M3) | ✅ M1 Hoàn tất<br>🟡 M2 Validator `PASS` 10k bài (chờ notebook Book)<br>✅ M3 Đã merge PR #34 lên `main` |
+| **A** | **Võ Gia Phúc (Leader)** | Điều phối pipeline, mạng HTTP, manifest, metrics, crawler operator. | Khóa hợp đồng `models.py`, điều phối `pipeline.py`, CLI `run_parse.py`, profiler. | Khóa `matching/models.py`, `features.py`, `pipeline.py`, `run_matching.py`, `export_hf.py`, `matching_fixtures.py`, `README.md`. | **E** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Mã & tích hợp A (`M3-A0..A3`) |
+| **B** | **Trần Thanh Sơn** | Xử lý dải ID, khám phá Atom API, tích hợp Semantic Scholar. | Làm sạch văn bản (`cleaner.py`), chuẩn hóa toán (`math_normalizer.py`), tách câu (`sentence_splitter.py`). | Tiền xử lý (`cleaner.py`), 15 đặc trưng lexical + TF-IDF (`lexical_features.py`). | **C** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Đã merge PR #37 & #38 lên `main` |
+| **C** | **Phạm Trường Quỳnh** | Fixture tổng hợp, tải và giải nén source TeX/bib/bbl. | Gom nguồn (`gathering.py`), dựng cây cấp bậc (`hierarchy.py`). | CLI gán nhãn & splits (`labelling.py`), Auto-matcher + audit (`auto_matcher.py`). | **B** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Đã merge PR #36 & #39 lên `main` |
+| **D** | **Trần Nguyễn Lâm Gia Thụ** | Xuất dữ liệu Parquet/CSV, đối soát corpus, notebook số liệu. | Trích tham khảo (`bib_extractor.py`), khử trùng lặp (`dedup.py`), xuất Parquet (`export_m2.py`). | Mô hình xếp hạng (`ranker.py`), huấn luyện có trọng số & ablation (`train_ranker.py`). | **E** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Đã merge PR #35 lên `main` |
+| **E** | **Thân Nguyễn Quang Triệu** | Xác thực corpus (`crawler/validate_corpus.py`), xây dựng Jupyter Book. | Kiểm toán 8 bất biến (`parsing/validate_m2.py`), viết notebook thống kê M2 trên sách. | Đặc trưng AST (`hierarchy_features.py`), đánh giá `MRR@5` (`evaluation.py`), hình poster (`plots.py`). | **D / A** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Đã merge PR #34 lên `main` |
 
 ---
 
@@ -709,7 +709,7 @@ ruff check . && ruff format --check . && pytest -q
 ```
 
 - **Kết quả kiểm thử trên `main` (16/11):** **765 passed**, 0 failed/skipped (kèm cảnh báo `LGBMDeprecationWarning` về `eval_set` để giữ tương thích LightGBM `>=4.3`). Đây là kiểm thử tổng hợp, không thay cho đo chất lượng nhãn/corpus thật ở Phase 3A.
-  - Bao phủ toàn bộ **M1** (crawler/discovery/source/s2/export/checkpoint), **M2** (`gathering`, `hierarchy`, `cleaner`, `math_normalizer`, `sentence_splitter`, `bib_extractor`, `dedup`, `export_m2`, `pipeline`, `validate_m2` và kiểm thử tích hợp E2E), và **163 tests M3**: **phần A** (`src/tests/test_matching_pipeline.py` **9** tests, `src/tests/test_export_hf.py` **4** tests: contract 21 cột, Stage-1 blocking & 3 query-relative features, E2E CLI `--export-hf --verify-hf --plot-figures`, export đa shard ZSTD), **phần B** (`src/tests/test_matching_cleaner.py`, `src/tests/test_lexical_features.py`: **47 passed**), **phần C** (`src/tests/test_labelling.py`: **36 passed** cho manual/auto/audit/kappa/splits/CLI và tích hợp thực 5 module `default_matching_stages()`), **phần D** (`src/tests/test_ranker.py`: **52 passed** gồm unit/validation, `ranker_factory` và E2E với `evaluate_mrr5`/`plots`), và **phần E** (`src/tests/test_hierarchy_features.py` **9** tests, `src/tests/test_evaluation.py` **6** tests).
+  - Bao phủ toàn bộ **M1** (crawler/discovery/source/s2/export/checkpoint), **M2** (`gathering`, `hierarchy`, `cleaner`, `math_normalizer`, `sentence_splitter`, `bib_extractor`, `dedup`, `export_m2`, `pipeline`, `validate_m2` và kiểm thử tích hợp E2E), và **163 tests M3**: **phần A** (`src/tests/m3/test_matching_pipeline.py` **9** tests, `src/tests/m3/test_export_hf.py` **4** tests: contract 21 cột, Stage-1 blocking & 3 query-relative features, E2E CLI `--export-hf --verify-hf --plot-figures`, export đa shard ZSTD), **phần B** (`src/tests/m3/test_matching_cleaner.py`, `src/tests/m3/test_lexical_features.py`: **47 passed**), **phần C** (`src/tests/m3/test_labelling.py`: **36 passed** cho manual/auto/audit/kappa/splits/CLI và tích hợp thực 5 module `default_matching_stages()`), **phần D** (`src/tests/m3/test_ranker.py`: **52 passed** gồm unit/validation, `ranker_factory` và E2E với `evaluate_mrr5`/`plots`), và **phần E** (`src/tests/m3/test_hierarchy_features.py` **9** tests, `src/tests/m3/test_evaluation.py` **6** tests).
 - **Kiểm tra chuẩn phong cách mã:** `ruff check .` sạch (`All checks passed!`); `ruff format --check .` báo **108 files already formatted**. Windows dùng `HF_HOME` trong `.venv/hf`, `TEMP`/`TMP` và basetemp ngắn trong `.venv/m2c-temp/` để tránh quyền cache và giới hạn độ dài đường dẫn.
 
 ---
@@ -756,7 +756,7 @@ khảo và lọc tiêu đề mục tham khảo chứa `\label{...}` hoặc dấu
 Pipeline chuyển số đếm `bib_fields_before` qua `PaperResult` kể cả khi chạy
 nhiều worker. Exporter ghi Parquet ZSTD, dictionary int8 và cột bắt buộc non-null;
 shard rỗng có 0 row groups. CLI vẫn từ chối output cũ nếu không có `--resume`;
-`src/colab_parse.ipynb` chạy pilot rồi dùng `--resume` cho phần còn lại.
+`src/notebooks/colab_parse.ipynb` chạy pilot rồi dùng `--resume` cho phần còn lại.
 Mỗi lô ghi marker `_export_pending.json` trước ba shard và CSV; khi khởi động
 lại, lô dở được rollback. CSV đã commit là nguồn khôi phục ID bài nếu `_done.txt`
 chưa kịp ghi. Summary và phân bố kind cộng cả cũ + mới. Bài lỗi được thử lại;
@@ -771,6 +771,6 @@ Trên corpus thật cục bộ (`data/papers/`, **10.000/25.000 ID** mục tiêu
 RAM đỉnh `1.629,2 MB`, trung bình `1.025,2 MB`, đầu vào `7.751.298.877 B` → đầu ra
 Parquet `286.068.147 B` qua `20` shard/bảng): **12.783** versions (**867** empty),
 **4.539.133** elements, **6.884.462** hierarchy, **373.776** bibtex; và
-`src/validate_m2.py --data-dir data` đạt **`PASS`** (exit `0`). Hiện còn chờ
+`src/parsing/validate_m2.py --data-dir data` đạt **`PASS`** (exit `0`). Hiện còn chờ
 15.000 ID còn lại, benchmark Colab và ghép notebook/báo cáo sang `arxiv-book/m2/*`.
 Giữ nguyên phần M1 v3.14 và M3-A đã nhận từ `origin/main` (`5980068`).
