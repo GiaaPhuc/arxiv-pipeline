@@ -1079,8 +1079,9 @@ def test_download_source_paced_streaming_caps_bandwidth_above_512kib(tmp_path: P
     # The tail 2.5 MiB (above 512 KiB) was paced via sleep_fn:
     assert len(sleeps) > 0
     total_paced = sum(sleeps)
-    # 2.5 MiB / 4.5 MiB/s = ~0.556s:
-    assert 0.50 <= total_paced <= 0.65
+    # 2.5 MiB / 6.0 MiB/s = ~0.417s (v3.15 default):
+    assert 0.36 <= total_paced <= 0.48
+    assert res.download_seconds == pytest.approx(total_paced, abs=0.05)
 
 
 def test_download_source_dynamic_stream_bps_via_config(tmp_path: Path) -> None:

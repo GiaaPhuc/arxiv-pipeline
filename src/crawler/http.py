@@ -130,6 +130,11 @@ class RateLimiter:
         self._active_thread: int | None = None
         self._last_request_at: float | None = None
         self._last_done_at: float | None = None
+        self.total_wait_seconds: float = 0.0
+
+    def _tracks_end_to_start_idle(self) -> bool:
+        """True only when caller explicitly configured End-to-Start style ``min_idle_gap``."""
+        return self._base_idle_gap > 0.0 and self._base_idle_gap >= self._base_floor - 0.50
 
     def _acquire_slot(self) -> None:
         ident = threading.get_ident()
@@ -194,6 +199,7 @@ class RateLimiter:
             remaining = max(remaining, cooldown_rem)
             if remaining > 0:
                 self._sleep(remaining)
+                self.total_wait_seconds += remaining
             self._last_request_at = self._clock()
         except BaseException:
             self._active_thread = None
@@ -208,13 +214,13 @@ class RateLimiter:
             self._lock.release()
 
     def note_429(self) -> None:
-        """Widen Start-to-Start interval (+0.50 s, cap 5.0 s) on 429 (v3.8)."""
+        """Widen Start-to-Start interval (+0.50 s, cap 5.0 s) on 429 (v3.8/v3.15)."""
         self._adaptive_streak = 0
         if self._max_adaptive_interval > 0:
             self._min_interval = round(
                 min(self._min_interval + self._adaptive_step, self._max_adaptive_interval), 4
             )
-            if self._base_idle_gap > 0.0:
+            if self._tracks_end_to_start_idle():
                 self._min_idle_gap = round(max(self._base_idle_gap, self._min_interval - 0.20), 4)
 
     def enter_ramp_up(
@@ -229,12 +235,12 @@ class RateLimiter:
         self._min_interval = round(target_interval, 4)
         if start_idle_gap is not None:
             self._min_idle_gap = round(max(self._base_idle_gap, float(start_idle_gap)), 4)
-        elif self._base_idle_gap > 0.0:
+        elif self._tracks_end_to_start_idle():
             self._min_idle_gap = round(max(self._base_idle_gap, self._min_interval - 0.20), 4)
         self._adaptive_streak = 0
 
     def note_success(self) -> None:
-        """Fast step-down (-0.75 s every 2 GET 200s) back to ``_base_floor`` (v3.8)."""
+        """Fast step-down (-0.75 s every 2 GET 200s) back to ``_base_floor`` (v3.8/v3.15)."""
         if self._min_interval <= self._base_floor and self._min_idle_gap <= self._base_idle_gap:
             return
         self._adaptive_streak += 1
@@ -243,7 +249,14 @@ class RateLimiter:
                 max(self._base_floor, self._min_interval - self._recover_step), 4
             )
             if self._min_idle_gap > self._base_idle_gap:
-                self._min_idle_gap = round(max(self._base_idle_gap, self._min_interval - 0.20), 4)
+                if self._tracks_end_to_start_idle():
+                    self._min_idle_gap = round(
+                        max(self._base_idle_gap, self._min_interval - 0.20), 4
+                    )
+                else:
+                    self._min_idle_gap = round(
+                        max(self._base_idle_gap, self._min_idle_gap - self._recover_step), 4
+                    )
             self._adaptive_streak = 0
 
     def reset_interval(self) -> None:
@@ -289,6 +302,7 @@ class AdaptiveRateLimiter(RateLimiter):
             remaining = max(remaining, cooldown_rem)
             if remaining > 0:
                 self._sleep(remaining)
+                self.total_wait_seconds += remaining
             self._last_request_at = self._clock()
         except BaseException:
             self._active_thread = None

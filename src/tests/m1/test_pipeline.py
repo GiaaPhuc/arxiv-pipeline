@@ -1344,8 +1344,9 @@ def test_v37_backup_throttle_s2_no_infinite_requeue_and_heavy_breather(tmp_path,
     # S2 gave up after 4 attempts per batch instead of looping forever in run.s2_queue:
     assert 4 <= s2_post_calls <= 12
 
-    # Also verify heavy download (>= 2 MiB) schedules a full End-to-Start breather on limiter:
-    limiter = RateLimiter(3.15, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=2.20)
+    # v3.15: 2 MiB and 10 MiB packages fit within Start-to-Start base_interval (<= 3.05s),
+    # so they must NOT inject End-to-Start retry_backoff or trigger a 50 MiB 12s window breather:
+    limiter = RateLimiter(3.05, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=0.25)
     heavy_client = HostClient(ARXIV, limiter, config)
     dummy_run = pipeline._Run(
         config=config,
@@ -1365,6 +1366,7 @@ def test_v37_backup_throttle_s2_no_infinite_requeue_and_heavy_breather(tmp_path,
                 http_status=200,
                 data=bytearray(b"x"),
                 raw_archive_bytes=2 * 1024 * 1024,
+                download_seconds=0.4,
             ),
         )
         paper_meta = pipeline.PaperMeta(
@@ -1375,9 +1377,8 @@ def test_v37_backup_throttle_s2_no_infinite_requeue_and_heavy_breather(tmp_path,
             num_versions=1,
         )
         pipeline._download_version(dummy_run, paper_meta, 1)
-        assert limiter._retry_backoff == 3.15  # noqa: SLF001
+        assert limiter._retry_backoff == 0.0  # noqa: SLF001
 
-        # v3.10: giant archive (>= 10 MiB) schedules min_interval breather (no 6.0s penalty)
         monkeypatch.setattr(
             pipeline,
             "download_source",
@@ -1386,25 +1387,23 @@ def test_v37_backup_throttle_s2_no_infinite_requeue_and_heavy_breather(tmp_path,
                 http_status=200,
                 data=bytearray(b"x"),
                 raw_archive_bytes=10 * 1024 * 1024,
+                download_seconds=1.6,
             ),
         )
         pipeline._download_version(dummy_run, paper_meta, 1)
-        assert limiter._retry_backoff == 3.15  # noqa: SLF001
+        assert limiter._retry_backoff == 0.0  # noqa: SLF001
 
-        # v3.9.4: 45 MiB cumulative wire bytes in live mode (arxiv_min_interval >= 3.0)
-        # triggers a 12.0s bandwidth-bucket recharge and resets window_heavy_bytes:
+        # Verify v3.15 true Start-to-Start defaults on Config:
         live_cfg = Config(
             data_dir=tmp_path / "data",
             contact="test@example.com",
-            arxiv_min_interval=3.15,
         )
-        assert live_cfg.arxiv_min_idle_gap == 3.05
-        assert live_cfg.arxiv_jitter_max == 0.20
+        assert live_cfg.arxiv_min_interval == 3.05
+        assert live_cfg.arxiv_min_idle_gap == 0.25
+        assert live_cfg.arxiv_jitter_max == 0.10
+        assert live_cfg.arxiv_socket_recycle_every == 500
+        assert live_cfg.max_stream_mbps == 6.0
         dummy_run.config = live_cfg
-        dummy_run.window_heavy_bytes = 40 * 1024 * 1024
-        pipeline._download_version(dummy_run, paper_meta, 1)
-        assert dummy_run.window_heavy_bytes == 0
-        assert limiter._retry_backoff == 12.0  # noqa: SLF001
 
         # v3.9.4: post-429 caution holds elevated limiter._min_interval across 6 clean 2xxs:
         dummy_run.arxiv_429_streak = 1
@@ -1505,14 +1504,14 @@ def test_v395_no_latch_feedback_loop_on_fast_200_ok(tmp_path, monkeypatch):
 
 
 def test_v398_ttfb_tarpit_triggers_preemptive_cushion(tmp_path, monkeypatch):
-    """v3.9.8: response header TTFB >= 3.5s triggers pre-emptive session recycle and cushion."""
+    """v3.15: response header TTFB >= 5.0s recycles TCP without extra End-to-Start penalty."""
     from crawler.http import HostClient, RateLimiter
 
-    limiter = RateLimiter(3.15, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=3.05)
+    limiter = RateLimiter(3.05, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=0.25)
     cfg = Config(
         data_dir=tmp_path / "data",
         contact="test@example.com",
-        arxiv_min_interval=3.15,
+        arxiv_min_interval=3.05,
     )
     client = HostClient(ARXIV, limiter, cfg)
     dummy_run = pipeline._Run(
@@ -1531,8 +1530,6 @@ def test_v398_ttfb_tarpit_triggers_preemptive_cushion(tmp_path, monkeypatch):
         num_versions=1,
     )
 
-    client.last_header_elapsed = 4.3  # simulate Fastly holding headers for 4.3s (tarpit)
-    recycles_before = client.session_recycles
     monkeypatch.setattr(
         pipeline,
         "download_source",
@@ -1544,12 +1541,19 @@ def test_v398_ttfb_tarpit_triggers_preemptive_cushion(tmp_path, monkeypatch):
             download_seconds=0.01,
         ),
     )
-    pipeline._download_version(dummy_run, paper_meta, 1)
 
+    # Moderate TTFB (3.8s < 5.0s) preserves warm TCP Keep-Alive:
+    client.last_header_elapsed = 3.8
+    recycles_before = client.session_recycles
+    pipeline._download_version(dummy_run, paper_meta, 1)
+    assert client.session_recycles == recycles_before
+
+    # Severe tarpit TTFB (5.3s >= 5.0s) recycles session without widening min_interval:
+    client.last_header_elapsed = 5.3
+    pipeline._download_version(dummy_run, paper_meta, 1)
     assert client.session_recycles == recycles_before + 1
-    assert limiter._retry_backoff == limiter._min_interval  # noqa: SLF001
-    # v3.10: 200 OK does NOT call note_429() or widen min_interval:
-    assert limiter._min_interval == 3.15  # noqa: SLF001
+    assert limiter._retry_backoff == 0.0  # noqa: SLF001
+    assert limiter._min_interval == 3.05  # noqa: SLF001
 
     dummy_run.manifest.close()
 
@@ -1646,27 +1650,35 @@ def test_v397_stream_break_never_escalates_429_streak_or_triggers_false_cooldown
 
 
 def test_v314_proportional_breather_and_giant_package_recycle(tmp_path, monkeypatch):
-    """v3.14: verify proportional breather scales with package size and recycles giant sockets."""
+    """v3.15: deficit breather subtracts elapsed time, skips slow links, recycles >=50 MiB."""
     from crawler.config import Config
     from crawler.http import HostClient, RateLimiter
 
-    # 1. Direct unit test of _compute_proportional_breather:
+    # 1. Direct unit test of _compute_proportional_breather (6.0 MiB/s target, 6.0s cap):
     # Under 2 MiB -> 0.0
-    assert pipeline._compute_proportional_breather(3.15, 1 * 1024 * 1024, False, 0.5) == 0.0
-    # 2 MiB and 10 MiB -> 3.15s
-    assert pipeline._compute_proportional_breather(3.15, 2 * 1024 * 1024, False, 0.5) == 3.15
-    assert pipeline._compute_proportional_breather(3.15, 10 * 1024 * 1024, False, 0.5) == 3.15
-    # 20 MiB -> 5.0s
-    assert pipeline._compute_proportional_breather(3.15, 20 * 1024 * 1024, False, 1.0) == 5.0
-    # 32 MiB -> 8.0s
-    assert pipeline._compute_proportional_breather(3.15, 32 * 1024 * 1024, False, 2.0) == 8.0
-    # 60 MiB -> capped at 12.0s
-    assert pipeline._compute_proportional_breather(3.15, 60 * 1024 * 1024, False, 3.0) == 12.0
+    assert pipeline._compute_proportional_breather(3.05, 1 * 1024 * 1024, False, 0.5) == 0.0
+    # 10 MiB -> target_cycle 1.67s <= base_interval 3.05s -> 0.0 (Start-to-Start covers it)
+    assert pipeline._compute_proportional_breather(3.05, 10 * 1024 * 1024, False, 0.5) == 0.0
+    # 24 MiB downloaded slowly in 5.0s (4.8 MiB/s < 6.0 MiB/s) -> 0.0 (never double-penalize!)
+    assert pipeline._compute_proportional_breather(3.05, 24 * 1024 * 1024, False, 5.0) == 0.0
+    # 30 MiB downloaded smoothly at 6.0 MiB/s in 5.0s -> 0.0
+    assert pipeline._compute_proportional_breather(3.05, 30 * 1024 * 1024, False, 5.0) == 0.0
+    # 30 MiB downloaded in fast 2.0s burst -> deficit 5.0 - 2.0 = 3.0s
+    assert pipeline._compute_proportional_breather(3.05, 30 * 1024 * 1024, False, 2.0) == 3.0
+    # Same 30 MiB with 1.0s TTFB + 2.0s body -> deficit 5.0 - 3.0 = 2.0s
+    assert (
+        pipeline._compute_proportional_breather(
+            3.05, 30 * 1024 * 1024, False, 2.0, header_seconds=1.0
+        )
+        == 2.0
+    )
+    # 90 MiB downloaded in 2.0s -> deficit 13.0s capped at 6.0s
+    assert pipeline._compute_proportional_breather(3.05, 90 * 1024 * 1024, False, 2.0) == 6.0
 
     # 2. End-to-end integration with _download_version:
-    cfg = Config(tmp_path / "data", "test@example.com", max_stream_mbps=16.0)
-    assert cfg.max_stream_mbps == 16.0
-    limiter = RateLimiter(3.15, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=3.05)
+    cfg = Config(tmp_path / "data", "test@example.com", max_stream_mbps=6.0)
+    assert cfg.max_stream_mbps == 6.0
+    limiter = RateLimiter(3.05, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=0.25)
     client = HostClient("https://export.arxiv.org", limiter, cfg)
     dummy_run = pipeline._Run(
         config=cfg,
@@ -1683,7 +1695,7 @@ def test_v314_proportional_breather_and_giant_package_recycle(tmp_path, monkeypa
         submission_date="2024-08-01",
         num_versions=1,
     )
-    # Mock download of 32 MiB package:
+    # 30 MiB in fast 2.0s burst: schedules 3.0s deficit breather, keeps TCP warm (<50 MiB):
     monkeypatch.setattr(
         pipeline,
         "download_source",
@@ -1691,14 +1703,104 @@ def test_v314_proportional_breather_and_giant_package_recycle(tmp_path, monkeypa
             path=None,
             http_status=200,
             data=bytearray(b"x"),
-            raw_archive_bytes=32 * 1024 * 1024,
+            raw_archive_bytes=30 * 1024 * 1024,
             download_seconds=2.0,
         ),
     )
     initial_recycles = client.session_recycles
     pipeline._download_version(dummy_run, paper_meta, 1)
-    # Proportional breather must be scheduled to 8.0s (32 MiB / 4.0 MiB/s):
-    assert limiter._retry_backoff == 8.0  # noqa: SLF001
-    # Giant package (>= 30 MiB) must trigger session recycle:
+    assert limiter._retry_backoff == 3.0  # noqa: SLF001
+    assert client.session_recycles == initial_recycles
+
+    # 55 MiB giant package triggers session recycle:
+    limiter._retry_backoff = 0.0  # noqa: SLF001
+    monkeypatch.setattr(
+        pipeline,
+        "download_source",
+        lambda *_a, **_kw: pipeline.DownloadResult(
+            path=None,
+            http_status=200,
+            data=bytearray(b"x"),
+            raw_archive_bytes=55 * 1024 * 1024,
+            download_seconds=9.5,
+        ),
+    )
+    pipeline._download_version(dummy_run, paper_meta, 1)
+    assert limiter._retry_backoff == 0.0  # noqa: SLF001
     assert client.session_recycles == initial_recycles + 1
     dummy_run.manifest.close()
+
+
+@responses.activate
+def test_v315_skip_s2_resume_counts_leading_done_and_separates_wire_metrics(tmp_path):
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+
+    cfg1 = _config(tmp_path, skip_s2=True)
+    summary1 = pipeline.run(["2408.00001"], cfg1)
+    assert summary1["ok"] == 1
+    assert summary1["no_source"] == 1
+    metrics1 = _read(cfg1.data_dir / "logs" / "metrics.json")
+    assert metrics1["sessions"][0]["papers_done"] == 1
+    assert metrics1["sessions"][0]["papers_skipped"] == 0
+    assert metrics1["arxiv"]["requests_ok"] == 2
+    assert metrics1["arxiv"]["wire_bytes"] > 0
+    assert metrics1["sessions"][0]["download_breakdown"]["requests_ok"] == 2
+
+    # Verify _count_leading_done_ids returns 1 under skip_s2=True without S2 raw marker:
+    from crawler.manifest import Manifest
+
+    manifest = Manifest(cfg1.data_dir / "manifest.sqlite")
+    probe_run = pipeline._Run(
+        config=cfg1,
+        manifest=manifest,
+        arxiv=pipeline.make_arxiv_client(cfg1),
+        s2=pipeline.make_s2_client(cfg1),
+        papers_dir=cfg1.data_dir / "papers",
+        tmp_dir=cfg1.data_dir / ".tmp",
+    )
+    assert pipeline._count_leading_done_ids(probe_run, ["2408.00001", "2408.00002"]) == 1
+    manifest.close()
+
+    # Run 2 resumes with 2408.00001 (already done) + 2408.00002 (new):
+    # papers_done must count ONLY the 1 newly completed paper, NOT re-count 2408.00001!
+    summary2 = pipeline.run(["2408.00001", "2408.00002"], cfg1)
+    assert summary2["ok"] == 2
+    metrics2 = _read(cfg1.data_dir / "logs" / "metrics.json")
+    assert metrics2["sessions"][1]["papers_done"] == 1
+    assert metrics2["sessions"][1]["papers_skipped"] == 1
+    assert metrics2["arxiv"]["requests_ok"] == 3
+
+
+def test_v315_rolling_throughput_telemetry_warns_on_slow_wire(tmp_path, caplog):
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=3.05,
+    )
+    manifest = pipeline.Manifest(tmp_path / "data" / "manifest.sqlite")
+    dummy_run = pipeline._Run(
+        config=cfg,
+        manifest=manifest,
+        arxiv=pipeline.make_arxiv_client(cfg),
+        s2=pipeline.make_s2_client(cfg),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    try:
+        with caplog.at_level("INFO", logger="crawler.pipeline"):
+            for _ in range(pipeline._THROUGHPUT_WINDOW_REQS):
+                pipeline._record_download_telemetry(
+                    dummy_run,
+                    wire_bytes=2 * 1024 * 1024,
+                    ttfb=0.40,
+                    body_seconds=1.50,  # ~1.33 MiB/s (< 3.5 MiB/s warning threshold)
+                    cycle_seconds=4.50,
+                )
+        infos = [r.message for r in caplog.records if "throughput (last 100 reqs)" in r.message]
+        warns = [r.message for r in caplog.records if "slow wire throughput" in r.message]
+        assert len(infos) == 1
+        assert len(warns) == 1
+        assert "1.33 MiB/s" in warns[0]
+    finally:
+        manifest.close()

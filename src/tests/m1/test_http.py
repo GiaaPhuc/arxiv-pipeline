@@ -571,3 +571,47 @@ def test_host_client_recycle_session_and_thermal_sensor():
     client._session.get = MagicMock(side_effect=make_resp(200, 0.05))  # noqa: SLF001
     client.get("/api/query?id_list=5")
     assert sleeps == [3.0]
+
+
+def test_v315_start_to_start_keeps_small_idle_gap_on_429_and_tracks_wait_seconds():
+    now = [0.0]
+    sleeps: list[float] = []
+    starts: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(round(seconds, 4))
+        now[0] += seconds
+
+    limiter = RateLimiter(3.05, clock=clock, sleep=fake_sleep, min_idle_gap=0.25)
+
+    # Fast transfer (1.50s <= 2.80s): waits 1.55s -> starts at 3.05s (true Start-to-Start)
+    limiter.wait()
+    starts.append(round(now[0], 4))
+    now[0] += 1.50
+    limiter.done()
+
+    # Heavy transfer (4.00s): ends at 7.05s -> waits only 0.25s cushion -> starts at 7.30s
+    limiter.wait()
+    starts.append(round(now[0], 4))
+    now[0] += 4.00
+    limiter.done()
+
+    limiter.wait()
+    starts.append(round(now[0], 4))
+    limiter.done()
+
+    assert sleeps == [1.55, 0.25]
+    assert starts == [0.0, 3.05, 7.30]
+    assert round(limiter.total_wait_seconds, 4) == 1.80
+
+    # A 429 widens Start-to-Start _min_interval without flipping _min_idle_gap to End-to-Start:
+    limiter.note_429()
+    assert limiter._min_interval == 3.55  # noqa: SLF001
+    assert limiter._min_idle_gap == 0.25  # noqa: SLF001
+    for _ in range(2):
+        limiter.note_success()
+    assert limiter._min_interval == 3.05  # noqa: SLF001
+    assert limiter._min_idle_gap == 0.25  # noqa: SLF001

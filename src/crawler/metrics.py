@@ -378,6 +378,10 @@ def merge_with_base(
         + int(s2_in.get("s2_not_indexed", 0)),
     }
     prev_arxiv = previous.get("arxiv", {})
+    sess_wire_sec = float(s2_in.get("arxiv_wire_download_seconds", 0.0))
+    sess_wait_sec = float(s2_in.get("arxiv_rate_limit_wait_seconds", 0.0))
+    sess_wire_bytes = int(s2_in.get("arxiv_wire_bytes", 0))
+    sess_reqs_ok = int(s2_in.get("arxiv_requests_ok", 0))
     merged_arxiv = {
         "http_429": int(prev_arxiv.get("http_429", 0)) + int(s2_in.get("arxiv_429", 0)),
         "retry_wait_seconds": float(prev_arxiv.get("retry_wait_seconds", 0.0))
@@ -390,6 +394,12 @@ def merge_with_base(
         + float(s2_in.get("arxiv_cooldown_seconds", 0.0)),
         "range_resumes": int(prev_arxiv.get("range_resumes", 0))
         + int(s2_in.get("range_resumes", 0)),
+        "wire_download_seconds": float(prev_arxiv.get("wire_download_seconds", 0.0))
+        + sess_wire_sec,
+        "rate_limit_wait_seconds": float(prev_arxiv.get("rate_limit_wait_seconds", 0.0))
+        + sess_wait_sec,
+        "wire_bytes": int(prev_arxiv.get("wire_bytes", 0)) + sess_wire_bytes,
+        "requests_ok": int(prev_arxiv.get("requests_ok", 0)) + sess_reqs_ok,
     }
     active_sec = sum(merged_stages.values())
     cooldown_retry_sec = (
@@ -415,9 +425,18 @@ def merge_with_base(
     sess_disk_peak = float(resources.get("disk_peak_bytes", 0.0))
     sess_disk_final = float(resources.get("disk_final_bytes", sess_disk_peak))
     papers_done_val = int(s2_in.get("papers_done", s2_in.get("s2_ok", 0)))
+    papers_skipped_val = int(s2_in.get("papers_skipped", 0))
     intervals_info = {
-        "arxiv_min_interval": float(os.environ.get("CRAWLER_ARXIV_MIN_INTERVAL", "3.0") or 3.0),
-        "s2_min_interval": float(os.environ.get("CRAWLER_S2_MIN_INTERVAL", "1.0") or 1.0),
+        "arxiv_min_interval": float(
+            s2_in.get("arxiv_min_interval")
+            if "arxiv_min_interval" in s2_in
+            else (os.environ.get("CRAWLER_ARXIV_MIN_INTERVAL", "3.05") or 3.05)
+        ),
+        "s2_min_interval": float(
+            s2_in.get("s2_min_interval")
+            if "s2_min_interval" in s2_in
+            else (os.environ.get("CRAWLER_S2_MIN_INTERVAL", "1.0") or 1.0)
+        ),
     }
     session_entry = {
         "run": run_number,
@@ -431,7 +450,14 @@ def merge_with_base(
         "total_profiler_sec": session_active,
         "cooldown_retry_seconds": session_cooldown,
         "stage_seconds": {k: float(stages.get(k, 0.0)) for k in STAGES},
+        "download_breakdown": {
+            "wire_download_seconds": round(sess_wire_sec, 6),
+            "rate_limit_wait_seconds": round(sess_wait_sec, 6),
+            "wire_bytes": sess_wire_bytes,
+            "requests_ok": sess_reqs_ok,
+        },
         "papers_done": papers_done_val,
+        "papers_skipped": papers_skipped_val,
         "processed_attempts": papers_done_val,
         "source_code_hash": code_hash,
         "source_revision": code_hash,

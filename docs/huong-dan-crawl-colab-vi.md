@@ -1,8 +1,8 @@
-# Hướng dẫn crawl arXiv trên Google Colab (v3.12.0)
+# Hướng dẫn crawl arXiv trên Google Colab (v3.15.0)
 
 Tài liệu này dành cho người mới: chạy crawler Milestone 1 trên **Colab chỉ CPU**, không cần cài Python trên máy cá nhân.
 
-Notebook có sẵn trong repo: [`src/notebooks/colab_run.ipynb`](../src/notebooks/colab_run.ipynb). Bạn có thể mở notebook đó trên Colab hoặc làm theo các bước dưới đây.
+Notebook có sẵn trong repo: [`src/notebooks/colab_crawl.ipynb`](../src/notebooks/colab_crawl.ipynb). Bạn có thể mở notebook đó trên Colab hoặc làm theo các bước dưới đây.
 
 ---
 
@@ -79,7 +79,7 @@ Cả nhóm vẫn chỉ **một** corpus trên **một** máy đang crawl. Ngư�
 ### Bước 1 — Mở Colab và lấy mã
 
 1. Vào [Google Colab](https://colab.research.google.com/).
-2. **File → Upload notebook** → chọn `src/notebooks/colab_run.ipynb` từ repo.
+2. **File → Upload notebook** → chọn `src/notebooks/colab_crawl.ipynb` từ repo.
 3. Trong notebook, chạy ô clone/pull repo:
 
 ```bash
@@ -109,15 +109,18 @@ else:
      os.environ["CRAWLER_CONTACT"] = "email-cua-ban@example.com"
      os.environ["CRAWLER_DATA_DIR"] = "/content/data"
      os.environ["CRAWLER_BACKUP_DIR"] = "/content/drive/MyDrive/arxiv-data.tar.gz"
-     os.environ["CRAWLER_BACKUP_EVERY_IDS"] = "1000"  # tự nén backup mỗi 1000 ID mới + khi thoát
-     os.environ["CRAWLER_ARXIV_MIN_INTERVAL"] = "3.35"  # 3.35s Start-to-Start (an toàn giờ cao điểm)
-     os.environ["CRAWLER_ARXIV_MIN_IDLE_GAP"] = "3.25"  # 3.25s End-to-Start gap
+     os.environ["CRAWLER_BACKUP_EVERY_IDS"] = "2500"  # tự nén backup mỗi 2500 ID mới + khi thoát
+     os.environ["CRAWLER_ARXIV_MIN_INTERVAL"] = "3.05"  # v3.15: Start-to-Start chuẩn >= 3.0s
+     os.environ["CRAWLER_ARXIV_MIN_IDLE_GAP"] = "0.25"  # v3.15: đệm hậu tải 0.25s
+     os.environ["CRAWLER_ARXIV_JITTER_MAX"] = "0.10"  # v3.15: jitter 0..0.10s (TB ~3.10s)
+     os.environ["CRAWLER_ARXIV_SOCKET_RECYCLE_EVERY"] = "500"  # giữ ấm TCP/TLS Keep-Alive
      os.environ["CRAWLER_AUTO_RESUME_RATE_LIMIT"] = "1"  # tự defer & cooldown khi dính 429
      os.environ["CRAWLER_ENABLE_BIB_FALLBACK"] = (
-         "1"  # v3.12: Dual-engine trích xuất .bib/.bbl cục bộ khi S2 404
+         "1"  # Dual-engine trích xuất .bib/.bbl cục bộ khi S2 404
      )
-     os.environ["CRAWLER_ENABLE_OAI_DATES"] = "1"  # v3.12: OAI-PMH arXivRaw khôi phục ngày trung gian
-     os.environ["CRAWLER_S2_BATCH_SIZE"] = "25"  # v3.12: mẻ 25 chống lỗi 413/504
+     os.environ["CRAWLER_ENABLE_OAI_DATES"] = "1"  # OAI-PMH arXivRaw khôi phục ngày trung gian
+     os.environ["CRAWLER_S2_BATCH_SIZE"] = "25"  # mẻ 25 chống lỗi 413/504
+     os.environ["CRAWLER_MAX_STREAM_MBPS"] = "6.0"  # v3.15: mượt 6.0 MiB/s (~7.7h/5000 ID)
      ```
    - Định nghĩa các hàm `backup_now()` và `restore_now()`.
 

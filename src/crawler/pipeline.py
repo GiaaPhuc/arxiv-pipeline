@@ -50,6 +50,7 @@ import shutil
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -101,14 +102,17 @@ _ARXIV_OK_STREAK_TO_DECAY = 6  # v3.9.4: 6 clean 2xx downloads step down 429 esc
 _MAX_DEFERRED_PASSES = 5  # v3.9.9: up to 5 passes for multi-slice heavy archives
 _PRE_COOLDOWN_MIN_NEW_PAIRS = 100  # v3.7: min new final pairs before another pre-cooldown backup
 _PRE_COOLDOWN_MIN_INTERVAL_SECONDS = 900.0  # v3.7: min 15 min between pre-cooldown backups
-_HEAVY_TRANSFER_BREATHER_BYTES = 2 * 1024 * 1024  # v3.9.3: End-to-Start breather after >= 2 MiB
-_SLOW_TRANSFER_BREATHER_SECONDS = 2.5  # v3.9.3: End-to-Start breather after >= 2.5s wire transfer
+_HEAVY_TRANSFER_BREATHER_BYTES = 2 * 1024 * 1024  # v3.15: evaluate proportional deficit >= 2 MiB
 _STREAM_BREAK_BREATHER_SECONDS = 12.0  # v3.9.4: 12s End-to-Start rest after Fastly 1 MiB stream cut
 _STREAM_FAILURES_FOR_COOLDOWN = 2  # v3.9.4: 2 consecutive stream cuts -> cooldown before 429
-_BANDWIDTH_WINDOW_MAX_BYTES = 50 * 1024 * 1024  # v3.10: 12s recharge every 50 MiB wire bytes
-_BANDWIDTH_WINDOW_BREATHER_SECONDS = 12.0
-_REFILL_SAFE_BPS = 4.0 * 1024 * 1024  # v3.14: Fastly token-bucket refill rate (~4.0 MiB/s)
-_GIANT_RECYCLE_BYTES = 30 * 1024 * 1024  # v3.14: 30 MiB giant package triggers TCP session recycle
+_REFILL_SAFE_BPS = 6.0 * 1024 * 1024  # v3.15: sustainable 6.0 MiB/s target (matches stream cap)
+_PROPORTIONAL_BREATHER_CAP_SECONDS = 6.0  # v3.15: cap extra breather on fast giant bursts
+_EDGE_DELAY_RECYCLE_SECONDS = 5.0  # v3.15: recycle TCP session only on real >= 5.0s TTFB tarpit
+_GIANT_RECYCLE_BYTES = 50 * 1024 * 1024  # v3.15: recycle TCP only after >= 50 MiB giant archive
+_THROUGHPUT_WINDOW_REQS = 100  # v3.15: rolling window size for live wire-speed telemetry
+_SLOW_WIRE_WARN_MBPS = 3.5  # v3.15: warn when sustained wire throughput drops below 3.5 MiB/s
+_SLOW_WIRE_MIN_WINDOW_BYTES = 50 * 1024 * 1024  # avoid false slow-wire warnings on tiny-file runs
+_EST_VERSIONS_PER_5000_IDS = 8265.0  # measured V_bar = 1.653 versions/paper across 22.2k papers
 _FINAL_STATUS_NAMES = frozenset(s.value for s in Status if s.is_final)
 _GIANT_DIAGNOSTIC_BYTES = 50 * 1024 * 1024  # U5: log packages >= 50 MiB to diagnostics.jsonl
 
@@ -118,23 +122,28 @@ def _compute_proportional_breather(
     wire_bytes: int,
     range_resumed: bool,
     download_seconds: float,
+    *,
+    header_seconds: float = 0.0,
 ) -> float:
-    """Compute proportional post-download breather for Fastly token-bucket recovery (v3.14).
+    """Compute Start-to-Start deficit breather for Fastly token-bucket recovery (v3.15).
 
-    - Light packages (< 2 MiB): standard base_interval (>= 3.05s).
-    - Heavy packages (>= 2 MiB): scales with wire_bytes / _REFILL_SAFE_BPS (up to 12.0s max),
-      ensuring sustainable average bandwidth <= 4.0 MiB/s across requests.
+    - Light/medium packages where ``wire_bytes / _REFILL_SAFE_BPS <= base_interval``: ``0.0``
+      (standard Start-to-Start ``base_interval`` already gives full recovery).
+    - Heavy packages downloaded slowly (``elapsed >= wire_bytes / _REFILL_SAFE_BPS``): ``0.0``
+      (never double-penalize already-throttled transfers).
+    - Fast giant bursts (``wire_bytes / _REFILL_SAFE_BPS > max(base_interval, elapsed)``):
+      returns only the remaining deficit ``target_cycle - elapsed`` capped at ``6.0 s``.
     """
-    if (
-        not range_resumed
-        and wire_bytes < _HEAVY_TRANSFER_BREATHER_BYTES
-        and download_seconds < _SLOW_TRANSFER_BREATHER_SECONDS
-    ):
+    if not range_resumed and wire_bytes < _HEAVY_TRANSFER_BREATHER_BYTES:
         return 0.0
-    proportional_refill = wire_bytes / _REFILL_SAFE_BPS
-    return round(
-        max(base_interval, min(proportional_refill, _BANDWIDTH_WINDOW_BREATHER_SECONDS)), 4
-    )
+    target_cycle = wire_bytes / _REFILL_SAFE_BPS
+    if target_cycle <= base_interval:
+        return 0.0
+    elapsed = max(float(download_seconds), 0.0) + max(float(header_seconds), 0.0)
+    needed_extra = target_cycle - elapsed
+    if needed_extra <= 0.0:
+        return 0.0
+    return round(min(needed_extra, _PROPORTIONAL_BREATHER_CAP_SECONDS), 4)
 
 
 class StopCrawl(Exception):
@@ -265,13 +274,17 @@ class _Run:
     arxiv_ok_since_429: int = 0
     consecutive_stream_failures: int = 0
     proactive_cooldown_papers: int = 0
-    window_heavy_bytes: int = 0
+    throughput_window: deque[tuple[float, float, float, int]] = field(
+        default_factory=lambda: deque(maxlen=_THROUGHPUT_WINDOW_REQS)
+    )
+    last_download_finished_at: float | None = None
     last_backup_signature: tuple[int, int] = (-1, -1)
     last_backup_at: float = 0.0
     counters: dict[str, int | float | str] = field(
         default_factory=lambda: {
             "session_started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "papers_done": 0,
+            "papers_skipped": 0,
             "papers_not_found": 0,
             "discovery_errors": 0,
             "revised_dates_incomplete": 0,
@@ -280,6 +293,10 @@ class _Run:
             "arxiv_auto_resumes": 0,
             "arxiv_thermal_cooldowns": 0,
             "arxiv_cooldown_seconds": 0.0,
+            "arxiv_wire_download_seconds": 0.0,
+            "arxiv_rate_limit_wait_seconds": 0.0,
+            "arxiv_wire_bytes": 0,
+            "arxiv_requests_ok": 0,
             "range_resumes": 0,
             "s2_ok": 0,
             "s2_not_indexed": 0,
@@ -377,11 +394,74 @@ def _version_date(paper: PaperMeta, version: int) -> str | None:
     return paper.revised_dates[index] if 0 <= index < len(paper.revised_dates) else None
 
 
+def _record_download_telemetry(
+    run: _Run,
+    *,
+    wire_bytes: int,
+    ttfb: float,
+    body_seconds: float,
+    cycle_seconds: float,
+) -> None:
+    """Track wire-vs-wait telemetry and emit rolling throughput diagnostics every 100 reqs."""
+    wire_sec = max(float(ttfb), 0.0) + max(float(body_seconds), 0.0)
+    nbytes = max(int(wire_bytes), 0)
+    _inc(run, "arxiv_wire_download_seconds", wire_sec)
+    _inc(run, "arxiv_wire_bytes", nbytes)
+    _inc(run, "arxiv_requests_ok")
+    run.throughput_window.append(
+        (
+            max(float(cycle_seconds), 0.0),
+            max(float(ttfb), 0.0),
+            max(float(body_seconds), 0.0),
+            nbytes,
+        )
+    )
+    with run.counters_lock:
+        req_count = int(run.counters.get("arxiv_requests_ok", 0))
+    if (
+        len(run.throughput_window) >= _THROUGHPUT_WINDOW_REQS
+        and req_count % _THROUGHPUT_WINDOW_REQS == 0
+    ):
+        samples = list(run.throughput_window)
+        n = len(samples)
+        sum_cycle = sum(s[0] for s in samples)
+        ttfbs = sorted(s[1] for s in samples)
+        sum_body = sum(s[2] for s in samples)
+        sum_bytes = sum(s[3] for s in samples)
+        wire_mbps = (sum_bytes / (1024 * 1024)) / max(sum_body, 0.001)
+        ttfb_p50_ms = ttfbs[n // 2] * 1000.0
+        avg_cycle = sum_cycle / n
+        est_5000_h = avg_cycle * _EST_VERSIONS_PER_5000_IDS / 3600.0
+        logger.info(
+            "throughput (last %d reqs): wire=%.2f MiB/s | ttfb_p50=%.0fms | "
+            "avg=%.2fs/req | est_5000id=%.2fh",
+            n,
+            wire_mbps,
+            ttfb_p50_ms,
+            avg_cycle,
+            est_5000_h,
+        )
+        if (
+            run.config.arxiv_min_interval >= 3.0
+            and sum_bytes >= _SLOW_WIRE_MIN_WINDOW_BYTES
+            and wire_mbps < _SLOW_WIRE_WARN_MBPS
+        ):
+            logger.warning(
+                "slow wire throughput (%.2f MiB/s < %.1f MiB/s over last %d reqs, "
+                "ttfb_p50=%.0fms); target ~8h/5000id requires >= 5.0 MiB/s",
+                wire_mbps,
+                _SLOW_WIRE_WARN_MBPS,
+                n,
+                ttfb_p50_ms,
+            )
+
+
 def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResult:
     """Download ``/src/{id}vK`` into RAM (``<= 96 MiB``) or overflow file, releasing HTTP fast."""
     arxiv_id = paper.arxiv_id
     download: DownloadResult | None = None
     for rate_attempt in range(_ARXIV_MAX_429_ATTEMPTS):
+        req_started = time.monotonic()
         with metrics.stage_timer("download"):
             download = download_source(
                 run.arxiv,
@@ -391,6 +471,7 @@ def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResu
                 spool_max_bytes=run.config.spool_max_bytes,
                 keep_partial_on_retryable=run.config.auto_resume_rate_limit,
             )
+        req_finished = time.monotonic()
         if download.http_status == 403:
             if download.path is not None:
                 download.path.unlink(missing_ok=True)
@@ -431,39 +512,44 @@ def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResu
                 and bytes(download.data[:8]).startswith(_EARLY_ABORT_MAGICS)
             )
             wire_bytes = 65536 if is_early_stub else download.raw_archive_bytes
-            run.window_heavy_bytes += max(wire_bytes, 0)
+            header_elapsed = float(getattr(run.arxiv, "last_header_elapsed", 0.0) or 0.0)
+            cycle_seconds = (
+                req_finished - run.last_download_finished_at
+                if run.last_download_finished_at is not None
+                else req_finished - req_started
+            )
+            run.last_download_finished_at = req_finished
+            _record_download_telemetry(
+                run,
+                wire_bytes=wire_bytes,
+                ttfb=header_elapsed,
+                body_seconds=download.download_seconds,
+                cycle_seconds=cycle_seconds,
+            )
             breather = _compute_proportional_breather(
                 run.arxiv.limiter._min_interval,
                 wire_bytes,
                 download.range_resumed,
                 download.download_seconds,
+                header_seconds=header_elapsed,
             )
             if (
                 run.config.arxiv_min_interval >= 3.0
-                and getattr(run.arxiv, "last_header_elapsed", 0.0) >= 3.5
+                and header_elapsed >= _EDGE_DELAY_RECYCLE_SECONDS
             ):
                 logger.info(
-                    "arXiv edge queue delay (TTFB %.2fs >= 3.5s) for %sv%d; "
-                    "scheduling session recycle to clear tarpit",
-                    run.arxiv.last_header_elapsed,
+                    "arXiv edge queue delay (TTFB %.2fs >= %.1fs) for %sv%d; "
+                    "recycling session to clear tarpit",
+                    header_elapsed,
+                    _EDGE_DELAY_RECYCLE_SECONDS,
                     arxiv_id,
                     version,
                 )
                 run.arxiv.recycle_session()
-                run.arxiv.limiter.schedule_retry_backoff(
-                    max(run.arxiv.limiter._min_interval, breather)
-                )
-            elif breather > 0.0:
-                if wire_bytes >= _GIANT_RECYCLE_BYTES:
-                    run.arxiv.recycle_session()
-                run.arxiv.limiter.schedule_retry_backoff(breather)
-            if (
-                run.config.arxiv_min_interval >= 3.0
-                and run.window_heavy_bytes >= _BANDWIDTH_WINDOW_MAX_BYTES
-            ):
-                run.window_heavy_bytes = 0
+            elif wire_bytes >= _GIANT_RECYCLE_BYTES:
                 run.arxiv.recycle_session()
-                run.arxiv.limiter.schedule_retry_backoff(_BANDWIDTH_WINDOW_BREATHER_SECONDS)
+            if breather > 0.0:
+                run.arxiv.limiter.schedule_retry_backoff(breather)
             if download.range_resumed:
                 _inc(run, "range_resumes")
                 _diag(
@@ -683,7 +769,7 @@ def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) 
         pending_versions.append(version)
 
     if not pending_versions:
-        _inc(run, "papers_done")
+        _inc(run, "papers_skipped")
         if not run.config.skip_s2 and not (paper_dir / S2_RAW_NAME).is_file():
             run.s2_queue.put(_S2Job(paper, paper_dir))
         return False
@@ -727,14 +813,6 @@ def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) 
             )
             if can_defer_stream:
                 run.consecutive_stream_failures += 1
-                run.window_heavy_bytes += max(stashed_now - stashed_before, 0)
-                if (
-                    run.config.arxiv_min_interval >= 3.0
-                    and run.window_heavy_bytes >= _BANDWIDTH_WINDOW_MAX_BYTES
-                ):
-                    run.window_heavy_bytes = 0
-                    run.arxiv.recycle_session()
-                    run.arxiv.limiter.schedule_retry_backoff(_BANDWIDTH_WINDOW_BREATHER_SECONDS)
                 if idx == 0:
                     with run.counters_lock:
                         run.paper_pending_versions.pop(paper.arxiv_id, None)
@@ -923,6 +1001,8 @@ def _arxiv_id_needs_no_work(run: _Run, arxiv_id: str) -> bool:
         status = run.manifest.status(arxiv_id, version)
         if status is None or not status.is_final:
             return False
+    if run.config.skip_s2:
+        return True
     return (_paper_dir(run, arxiv_id) / S2_RAW_NAME).is_file()
 
 
@@ -1267,7 +1347,7 @@ def _handle_auto_resume_cooldown(
             save_rate_state(run.rate_state_path, arxiv_cooldown_until=0.0)
     run.consecutive_arxiv_429 = 0
     run.consecutive_stream_failures = 0
-    run.window_heavy_bytes = 0
+    run.last_download_finished_at = None
     run.arxiv.limiter._retry_backoff = 0.0
 
 
@@ -1468,6 +1548,11 @@ def _flush_metrics(run: _Run, *, final_resources: dict[str, float] | None = None
         )
         with run.counters_lock:
             counters_snapshot = dict(run.counters)
+        counters_snapshot["arxiv_rate_limit_wait_seconds"] = round(
+            float(getattr(run.arxiv.limiter, "total_wait_seconds", 0.0) or 0.0), 6
+        )
+        counters_snapshot["arxiv_min_interval"] = float(run.config.arxiv_min_interval)
+        counters_snapshot["s2_min_interval"] = float(run.config.s2_min_interval)
         return metrics.flush_run(
             run.metrics_path,
             run.base_metrics,
@@ -1553,8 +1638,6 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
         for chunk in _chunks(target_ids, chunk_size):
             if run.stop.is_set():
                 return
-            if seen > 0:
-                run.arxiv.recycle_session()
             try:
                 planned = _plan_chunk(run, chunk)
             except _DeferRateLimit as exc:

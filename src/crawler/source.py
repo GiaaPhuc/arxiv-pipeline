@@ -42,7 +42,7 @@ _HOT_STREAM_DEFER_BYTES = 1024 * 1024  # v3.9.3: heavy stream threshold for back
 _HEAVY_STREAM_BREAK_BYTES = 4 * 1024 * 1024  # threshold constant kept for backward compatibility
 _PACED_STREAM_START_BYTES = (
     512 * 1024
-)  # v3.9.7: unthrottled first 512 KiB; pace >= 512 KiB at 4.5 MiB/s (v3.10)
+)  # v3.9.7/v3.15: unthrottled first 512 KiB; smooth sustained pacing above 512 KiB
 
 
 def _resolve_max_stream_bps(client: Any = None) -> int:
@@ -72,7 +72,7 @@ def _resolve_max_stream_bps(client: Any = None) -> int:
                 return int(parsed * 1024 * 1024)
         except ValueError:
             pass
-    return int(4.5 * 1024 * 1024)  # v3.10 Clean Lean Turbo: 4.5 MiB/s sustained stream cap default
+    return int(6.0 * 1024 * 1024)  # v3.15: 6.0 MiB/s smooth sustained stream cap default
 
 
 _MAX_SUSTAINED_STREAM_BPS = _resolve_max_stream_bps()
@@ -608,9 +608,8 @@ def download_source(
             attempt_bytes = 0
             active_stream_bps = _resolve_max_stream_bps(client)
             t_pace_start: float | None = None
-            paced_sleep_total = 0.0
 
-            t_stream_start = time.monotonic()
+            t_stream_start = clock_fn()
             for chunk in response.iter_content(chunk_size=read_chunk_size):
                 if not chunk:
                     continue
@@ -634,7 +633,7 @@ def download_source(
                             ):
                                 for _ in response.iter_content(chunk_size=read_chunk_size):
                                     pass
-                            dl_secs = max(0.0, time.monotonic() - t_stream_start)
+                            dl_secs = max(0.0, clock_fn() - t_stream_start)
                             if disk_out is not None:
                                 disk_out.seek(0)
                                 disk_out.truncate()
@@ -687,9 +686,8 @@ def download_source(
                             step_sleep = min(target_dt - actual_dt, 0.20)
                             if step_sleep >= 0.005:
                                 sleep_fn(step_sleep)
-                                paced_sleep_total += step_sleep
 
-            dl_secs = max(0.0, (time.monotonic() - t_stream_start) - paced_sleep_total)
+            dl_secs = max(0.0, clock_fn() - t_stream_start)
             if disk_out is not None:
                 disk_out.close()
                 disk_out = None

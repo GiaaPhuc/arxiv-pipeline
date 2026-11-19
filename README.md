@@ -235,7 +235,7 @@ data/
 
 ## Google Colab
 
-Notebooks: [`src/notebooks/colab_run.ipynb`](src/notebooks/colab_run.ipynb) (Milestone 1 crawl) and [`src/notebooks/colab_parse.ipynb`](src/notebooks/colab_parse.ipynb) (Milestone 2 parse).
+Notebooks: [`src/notebooks/colab_crawl.ipynb`](src/notebooks/colab_crawl.ipynb) (Milestone 1 crawl) and [`src/notebooks/colab_parse.ipynb`](src/notebooks/colab_parse.ipynb) (Milestone 2 parse).
 
 | Session step | Action |
 | --- | --- |
@@ -424,7 +424,7 @@ src/
 │   ├── pipeline.py              End-to-end M3 orchestrator & ablation runner
 │   └── plots.py                 300-DPI Poster PNG chart generator
 ├── notebooks/                   Colab notebooks
-│   ├── colab_run.ipynb          Milestone 1 Colab crawler notebook
+│   ├── colab_crawl.ipynb        Milestone 1 Colab crawler notebook
 │   └── colab_parse.ipynb        Milestone 2 Colab parser notebook
 └── tests/                       Offline pytest suite (765 tests; mocked HTTP/fixtures)
     ├── conftest.py              Shared archive fixtures & M3 fixture path

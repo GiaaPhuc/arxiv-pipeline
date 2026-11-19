@@ -96,7 +96,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--max-stream-mbps",
         type=float,
         default=None,
-        help="max sustained streaming download speed in MiB/s (default 4.5, recommended 12.0-18.0)",
+        help="max sustained streaming download speed in MiB/s (default 6.0, recommended 5.5-8.0)",
     )
     return p.parse_args(argv)
 

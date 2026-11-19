@@ -1,6 +1,6 @@
 # arxiv-pipeline — Kiến trúc Kỹ thuật & Luồng Xử lý Toàn diện (Milestone 1, 2 & 3)
 
-> **Mục đích tài liệu:** Trình bày toàn diện kiến trúc, nguyên lý vận hành, luồng xử lý end-to-end, hợp đồng dữ liệu và cơ chế kiểm toán của hệ thống **`arxiv-pipeline`**, phản ánh **chính xác 100% theo mã nguồn đang chạy trên `main`** (M1 `v3.14.0`, M2 Parser sạch 10.000 bài thật, M3 Matching + HF hợp nhất đủ 5 vai A–E).
+> **Mục đích tài liệu:** Trình bày toàn diện kiến trúc, nguyên lý vận hành, luồng xử lý end-to-end, hợp đồng dữ liệu và cơ chế kiểm toán của hệ thống **`arxiv-pipeline`**, phản ánh **chính xác 100% theo mã nguồn đang chạy trên `main`** (M1 `v3.15.0`, M2 Parser sạch 10.000 bài thật, M3 Matching + HF hợp nhất đủ 5 vai A–E).
 > Tài liệu gồm ba cấu phần liên hoàn: **Phần I (Milestone 1 — Thu thập Dữ liệu)**, **Phần II (Milestone 2 — Phân tích Cú pháp & Chuẩn hóa)** và **Phần III (Milestone 3 — Khớp Tài liệu Tham khảo & Đóng gói Hugging Face)**.
 
 ---
@@ -43,7 +43,7 @@
 | **Mục tiêu dự án** | Thu thập toàn bộ các phiên bản (`v1..vN`) của các bài báo trong dải ID được giao; chỉ trích xuất và lưu giữ mã nguồn `.tex`, `.bib` và `.bbl`; thu thập metadata arXiv và trích dẫn Semantic Scholar (S2); xuất dữ liệu chuẩn hóa phục vụ M2 và M3. |
 | **Quy mô dữ liệu** | `src/id_ranges.csv`: **5 dải × 5.000 = 25.000 ID** gốc (tháng 06–08/2024), tính cả hai đầu (`inclusive`). |
 | **Mô hình vận hành** | Vận hành tập trung trên **một máy** qua `src/run_crawl.py` (theo khuyến nghị giảng viên); resume an toàn qua SQLite manifest; khóa tệp hệ điều hành (`_acquire_workspace_lock`) ngăn chặn chạy trùng lặp. |
-| **Đột phá v3.14** | **Xử lý Dứt điểm Tại chỗ & Hồi phục Băng thông Tỷ lệ thuận (In-Place Resolution & Proportional Breather):**<br>• *In-Place Resolution:* Loại bỏ hoàn toàn việc dồn bài nặng về cuối (nguyên nhân gây bão 429 dồn toa); bài nặng được kéo và giải nén dứt điểm ngay tại vị trí của nó.<br>• *Proportional Bandwidth Breather:* Sau mỗi gói $\ge 2\text{ MiB}$, tự động cấp khoảng nghỉ hồi phục Token Bucket $S / 4.0\text{ MiB/s}$ (sàn $\ge 3.05\text{s}$, trần 12.0s, tự động xoay session TCP khi gói $\ge 30\text{ MiB}$), đảm bảo nạp đầy 100% Token Bucket Fastly trước request tiếp theo.<br>• *Wire-Speed Streaming:* Hỗ trợ tham số CLI `--max-stream-mbps` và env `CRAWLER_MAX_STREAM_MBPS` cho phép kéo 12.0–18.0 MiB/s trên Colab/Cloud, rút ngắn 65–75% thời gian download bài nặng mà không bao giờ bị phạt. |
+| **Đột phá v3.15** | **True Start-to-Start Pacing, Deficit Breather & Smooth 6.0 MiB/s Streaming (~7,5–8,0 h / 5.000 ID):**<br>• *Start-to-Start chuẩn:* Khôi phục nhịp `arxiv_min_interval = 3.05 s + jitter 0..0.10 s` với đệm hậu tải `arxiv_min_idle_gap = 0.25 s` (thay cho End-to-Start `3.05–3.25 s` gây tốn oan ~2,13 h / 5.000 ID) và giữ nguyên `0.25 s` khi `note_429()` nới `min_interval`.<br>• *Proportional Deficit Breather:* Gỡ bỏ van ngủ cứng `50 MiB -> 12 s` và sửa `_compute_proportional_breather` trừ đi thời gian thực tải (`header + download_seconds`), mục tiêu bền vững `6.0 MiB/s` (trần `6.0 s`): gói ≤ 18 MiB hoặc mạng chậm sẵn ngủ thêm `0 s` (tiết kiệm ~2,37 h / 5.000 ID).<br>• *Smooth Streaming & Warm Keep-Alive:* Mặc định `--max-stream-mbps 6.0`, chỉ xoay vòng TCP sau mỗi `500` request, gói $\ge 50\text{ MiB}$, lỗi stream/429 hoặc `TTFB >= 5.0 s`.<br>• *Fix `--skip-s2` Resume & Telemetry:* `_arxiv_id_needs_no_work()` bỏ kiểm tra S2 khi `--skip-s2` bật (tránh backup thừa lúc resume), sửa `papers_done` chỉ đếm bài mới, tách bạch `wire_download_seconds` vs `rate_limit_wait_seconds` trong `metrics.json` và cảnh báo tốc độ trượt mỗi 100 request khi wire `< 3.5 MiB/s`. |
 | **Bảo toàn dữ liệu** | Bảo toàn 100% hợp đồng dữ liệu `src/crawler/models.py` (`SCHEMA_VERSION = 1`); tương thích ngược hoàn toàn với dữ liệu, manifest và checkpoint đã thu thập trước đó. |
 
 ---
@@ -56,10 +56,10 @@ Hệ thống quản lý 2 kênh kết nối mạng độc lập, tuân thủ tuy
 - **Điểm truy cập duy nhất:** Chỉ sử dụng `export.arxiv.org`, tuyệt đối không gọi máy chủ giao diện web `arxiv.org`.
 - **Kết nối đơn (Connection Pooling):** Giữ đúng 1 kết nối duy nhất qua `_SingleConnAdapter(pool_connections=1, pool_maxsize=1)` với cờ `TCP_NODELAY = 1`, giữ ấm HTTP Keep-Alive và bảo toàn cơ chế tự động mở rộng cửa sổ nhận của Linux (`tcp_moderate_rcvbuf`, `tcp_rmem` lên tới 6 MiB).
 - **Bộ điều phối nhịp độ (`RateLimiter`):**
-  - **Nhịp khởi đầu (Start-to-Start):** `arxiv_min_interval = 3.15s` kết hợp jitter ngẫu nhiên `0..0.20s` (xóa bỏ xung nhịp bot cố định).
-  - **Sàn nghỉ socket (End-to-Start):** `arxiv_min_idle_gap = 3.05s`. Bất kể gói trước tải nhanh hay chậm, crawler **luôn đảm bảo socket nghỉ tối thiểu 3.05s** từ thời điểm đóng socket request trước đến khi mở request tiếp theo. Do $3.05\text{ s} > 3.00\text{ s}$, crawler không bao giờ vi phạm quy định $\ge 3\text{ s}$ của arXiv.
-  - **Xoay vòng phiên kết nối:** Tự động gọi `recycle_session()` sau mỗi 120 request hoặc ngay khi gặp sự cố đứt luồng socket để làm mới trạng thái TCP.
-  - **Tản nhiệt chủ động:** Đặt mặc định `arxiv_proactive_cooldown_every_ids = 0` (tắt tự động ngủ 60s định kỳ; crawler chỉ ngủ khi arXiv thực sự trả về HTTP 429), tiết kiệm hơn 40 phút thời gian chết lãng phí.
+  - **Nhịp khởi đầu (Start-to-Start):** `arxiv_min_interval = 3.05s` kết hợp jitter ngẫu nhiên `0..0.10s` (trung bình ~3,10 s Start-to-Start, luôn $\ge 3.00\text{ s}$ theo đúng chuẩn arXiv & `arxiv.py`).
+  - **Đệm hậu tải (Post-Transfer Cushion):** `arxiv_min_idle_gap = 0.25s`. Với mọi gói tải xong trong $\le 2.80\text{ s}$, khoảng chờ hoàn toàn tuân theo Start-to-Start (0 s overhead End-to-Start); với gói tải lâu $> 2.80\text{ s}$, socket nghỉ thêm `0.25 s` trước request kế tiếp thay vì ép End-to-Start `3.05–3.25 s`.
+  - **Xoay vòng phiên kết nối:** Tự động gọi `recycle_session()` sau mỗi `500` request, khi gói $\ge 50\text{ MiB}$, khi `TTFB >= 5.0 s`, hoặc ngay khi gặp lỗi đứt luồng/429 (giữ ấm TCP/TLS Keep-Alive và tránh TCP Slow Start).
+  - **Tản nhiệt chủ động:** Đặt mặc định `arxiv_proactive_cooldown_every_ids = 0` (tắt tự động ngủ 60s định kỳ; crawler chỉ ngủ khi arXiv thực sự trả về HTTP 429).
 
 #### B. Kênh Semantic Scholar (`api.semanticscholar.org`)
 - **Tần suất yêu cầu:** Giới hạn tối thiểu **1.1 giây / request** (End-to-Start) qua `AdaptiveRateLimiter`.
@@ -135,10 +135,10 @@ flowchart TB
   subgraph Download["2. Tải gói nguồn (/src/) — MainThread"]
     SnSave --> DL1["Duyệt các cặp (arxiv_id, version) chưa xong"]
     DL1 --> DL2["Đọc 512 byte đầu: ngắt sớm nếu là PDF hoặc ZIP (no_source)"]
-    DL2 --> DL3["Tải trực tiếp vào bytearray RAM (<= 96 MiB) qua Paced Stream 4.5 MiB/s"]
-    DL3 --> DL4["Đo thời gian truyền socket thuần túy (download_seconds)"]
+    DL2 --> DL3["Tải trực tiếp vào bytearray RAM (<= 96 MiB) qua Paced Stream 6.0 MiB/s"]
+    DL3 --> DL4["Đo thời gian truyền thực (download_seconds) & telemetry 100 req"]
     DL4 --> DL5{"Mã phản hồi HTTP?"}
-    DL5 -->|200 OK / 206 OK| OK["Nghỉ nhịp cơ sở (2MB -> 3.15s, nạp hồi 50MB -> 12.0s)"]
+    DL5 -->|200 OK / 206 OK| OK["Start-to-Start 3.05s + Deficit Breather (trừ elapsed, trần 6.0s)"]
     DL5 -->|Đứt luồng socket| RETRY["Thử lại Range tại chỗ (HTTP 206, session mới & nghỉ >= 12s-14s)"]
     RETRY -->|Hoàn tất| OK
     RETRY -->|Hết lượt thử| STASH["Bảo toàn .part, defer về cuối dải (0s chờ phạt)"]
@@ -180,15 +180,14 @@ flowchart TB
 
 ### 1.5. Cơ chế Phòng ngừa & Phục hồi Sự cố Mạng
 
-1. **Phân cấp đệm nghỉ theo dung lượng (Proportional Bandwidth Breather - v3.14):**
-   - *Gói thông thường (< 2 MiB, ~85% kho):* Nhịp cơ sở Start-to-Start 3.15s, sàn nghỉ socket 3.05s.
-   - *Phản ứng trễ mạng (TTFB Clean Lean Turbo):* Khi `last_header_elapsed >= 3.5s`, crawler xoay vòng session để làm mới kết nối TCP tránh nghẽn socket, **tuyệt đối không gọi `note_429()`** trên mã `200 OK`.
-   - *Gói trung bình & lớn ($\ge 2\text{ MiB}$):* Tự động kích hoạt cơ chế `_compute_proportional_breather` tính thời gian nghỉ nạp hồi Token Bucket theo tỷ lệ thực tế $S / 4.0\text{ MiB/s}$ (sàn $\ge 3.05\text{s}$, trần 12.0s). Khi gói $\ge 30\text{ MiB}$, crawler tự động xoay session TCP để làm sạch socket trước khi sang bài tiếp theo.
-   - *Nạp hồi băng thông trượt (Mỗi 50 MiB):* Sau mỗi 50 MiB dữ liệu tải thực qua mạng, crawler tự động xoay vòng socket và nghỉ `12.0s` làm van an toàn thứ 2 để duy trì burst limit của CDN.
-2. **Điều tiết lưu lượng tải động (Dynamic Wire-Speed Streaming - v3.14):**
-   - Hỗ trợ tham số `--max-stream-mbps` và biến môi trường `CRAWLER_MAX_STREAM_MBPS`. Mặc định 4.5 MiB/s trên mạng nội địa, tự động mở rộng lên **12.0 – 18.0 MiB/s** khi chạy trên Google Colab / Cloud.
-   - Với các gói nhỏ $\le 512\text{ KiB}$, đọc trực tiếp với tốc độ tối đa không độ trễ.
-   - Khi dung lượng vượt $512\text{ KiB}$, tốc độ đọc socket được điều tiết theo `max_stream_mbps`. Bài 40 MB hoàn tất trong ~2.5s (thay vì 15s), vừa giảm 80% nguy cơ đứt socket vừa bứt phá chỉ số benchmark `download_seconds`.
+1. **Điều tiết Start-to-Start & Deficit Breather (v3.15):**
+   - *Gói thông thường & trung bình ($S / 6.0\text{ MiB/s} \le 3.05\text{ s}$, tức $\le 18\text{ MiB}$):* Chạy thuần nhịp Start-to-Start `3.05 s + jitter 0..0.10 s` với đệm hậu tải `0.25 s`, không phạt thêm breather.
+   - *Phản ứng trễ mạng (`TTFB >= 5.0 s`):* Khi `last_header_elapsed >= 5.0 s`, crawler xoay vòng session để làm mới kết nối TCP tránh nghẽn socket, **tuyệt đối không gọi `note_429()`** và không cộng thêm hình phạt End-to-Start trên mã `200 OK`.
+   - *Gói khổng lồ tải quá nhanh:* `_compute_proportional_breather` tính phần thiếu hụt $\max(0, S / 6.0\text{ MiB/s} - (\text{TTFB} + \text{download\_seconds}))$ (trần `6.0 s`). Nếu đường truyền đã chậm sẵn ($\le 6.0\text{ MiB/s}$), thời gian nghỉ thêm bằng `0 s`. Gói $\ge 50\text{ MiB}$ tự động xoay vòng TCP sau khi tải xong.
+   - *Giám sát tốc độ trượt (Rolling Telemetry):* Mỗi 100 request `2xx`, crawler ghi log `wire MiB/s`, `ttfb_p50`, `avg s/req`, `est_5000id` và phát cảnh báo sớm nếu băng thông wire tụt dưới `3.5 MiB/s` (cần $\ge 5.0\text{ MiB/s}$ để đạt `~8 h / 5.000 ID`).
+2. **Điều tiết lưu lượng tải mượt (Smooth Wire-Speed Streaming - v3.15):**
+   - Hỗ trợ tham số `--max-stream-mbps` và biến môi trường `CRAWLER_MAX_STREAM_MBPS`, mặc định **`6.0 MiB/s`** (thời gian cào ~7,7 h / 5.000 ID khi đường truyền ổn định, chỉ chậm hơn 16 MiB/s khoảng 22 phút nhưng giảm 2,7× đỉnh burst lên Fastly CDN).
+   - Với các gói nhỏ $\le 512\text{ KiB}$, đọc trực tiếp không độ trễ; trên $512\text{ KiB}$ điều tiết mượt theo `max_stream_mbps`.
 3. **Nối tiếp tại chỗ cho tệp lớn (In-Place Multi-Slice Range Resume):**
    - Khi gặp đứt stream trên file lớn ($\ge 1\text{ MiB}$), crawler tự động xoay vòng session mới (`recycle_session()`), áp dụng đệm nghỉ an toàn $\ge \mathbf{12,0\text{ s} - 14,0\text{ s}}$ (`_HEAVY_STREAM_BREAK_BONUS = 9.0s`) để token bucket Fastly CDN sạc đầy, sau đó gửi ngay `Range: bytes={written}-` (`HTTP 206 Partial Content`).
    - File 20–40 MB hoàn tất sau 2 slice ngay tại chỗ trong ~13.5s mà không bị Fastly trả 429 và không bao giờ dồn toa sang cuối dải.
@@ -718,9 +717,9 @@ ruff check . && ruff format --check . && pytest -q
 
 Khi tổng hợp dữ liệu đưa vào báo cáo và poster, nhóm tập trung làm nổi bật các luận điểm kỹ thuật then chốt:
 
-1. **Chuẩn lịch sự tuyệt đối đi cùng hiệu năng trần vật lý:**
-   - Bảo đảm nghiêm ngặt sàn socket End-to-Start $\ge 3.05\text{ s}$ và kết nối đơn tới `export.arxiv.org`.
-   - Vẫn đưa thời gian cào 5.000 ID về mức tối ưu **~5,8 – 6,5 giờ** nhờ kiến trúc **Producer–Consumer đa luồng**, đệm RAM Zero-Copy **96 MiB**, giải nén **1-pass 512 KiB**, và cơ chế **Paced Streaming 4.5 MiB/s**.
+1. **Chuẩn lịch sự tuyệt đối đi cùng hiệu năng mục tiêu ~8 h / 5.000 ID:**
+   - Bảo đảm nghiêm ngặt nhịp Start-to-Start $\ge 3.05\text{ s}$ (đệm hậu tải `0.25 s`) và kết nối đơn tới `export.arxiv.org`.
+   - Đạt mục tiêu **~7,5 – 8,0 giờ / 5.000 ID** (khi tốc độ đường truyền wire $\ge 5.0\text{ MiB/s}$) nhờ kiến trúc **Producer–Consumer đa luồng**, đệm RAM Zero-Copy **96 MiB**, giải nén **1-pass 512 KiB**, **Smooth Paced Streaming 6.0 MiB/s**, **Deficit Breather** không phạt kép và giữ ấm TCP Keep-Alive.
 2. **Kaggle Snapshot Metadata Discovery:**
    - Bước đột phá vận dụng hộp công cụ đề bài cho phép tải trước metadata 25.000 bài trong < 60s, loại bỏ 100% thời gian chờ và rủi ro rate limit trên Atom API.
 3. **Chịu lỗi mạng đa tầng (In-Place Range Resume & Stream Failure Isolation):**
