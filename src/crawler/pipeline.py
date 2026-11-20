@@ -772,9 +772,11 @@ def _download_and_extract_in_flight(
                 is_stream_failure=False,
             )
             continue
-        metrics.add_stage_seconds("download", result.network_seconds)
+        extract_sec = result.extract_seconds if 200 <= result.http_status < 300 else 0.0
+        download_sec = max(result.network_seconds, (req_finished - req_started) - extract_sec)
+        metrics.add_stage_seconds("download", download_sec)
         if 200 <= result.http_status < 300:
-            metrics.add_stage_seconds("extract", result.extract_seconds)
+            metrics.add_stage_seconds("extract", extract_sec)
             _inc(run, "in_flight_extractions")
             _post_process_arxiv_2xx(
                 run,

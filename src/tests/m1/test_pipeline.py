@@ -1955,3 +1955,64 @@ def test_v316_cdn_self_healing_soft_pacing_and_429_classification(tmp_path, capl
         assert dummy_run.counters["arxiv_429_edge_fast"] == 1
     finally:
         manifest.close()
+
+
+def test_v316_in_flight_stage_download_includes_rate_limit_wait(tmp_path, monkeypatch):
+    import pytest
+
+    from crawler import metrics
+    from crawler.models import PaperMeta, Status, VersionMeta
+    from crawler.source import InFlightResult
+
+    now = [100.0]
+    monkeypatch.setattr(pipeline.time, "monotonic", lambda: now[0])
+
+    def fake_in_flight(*_args, **_kwargs):
+        now[0] += 3.50
+        return InFlightResult(
+            http_status=200,
+            meta=VersionMeta("2408.00002", 1, Status.OK, raw_archive_bytes=1024),
+            network_seconds=0.40,
+            extract_seconds=0.10,
+            download_seconds=0.35,
+            wire_bytes=1024,
+        )
+
+    monkeypatch.setattr(pipeline, "download_and_extract_source", fake_in_flight)
+
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        arxiv_min_idle_gap=0.0,
+    )
+    manifest = pipeline.Manifest(tmp_path / "data" / "manifest.sqlite")
+    dummy_run = pipeline._Run(
+        config=cfg,
+        manifest=manifest,
+        arxiv=pipeline.make_arxiv_client(cfg),
+        s2=pipeline.make_s2_client(cfg),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    metrics.reset()
+    try:
+        paper = PaperMeta(
+            arxiv_id="2408.00002",
+            title="t",
+            authors=["a"],
+            submission_date="2024-08-01",
+            revised_dates=[],
+            venue=None,
+            num_versions=1,
+        )
+        part = tmp_path / "data" / "papers" / "2408.00002" / ".v1.part"
+        meta = pipeline._download_and_extract_in_flight(dummy_run, paper, 1, part)
+        assert meta.status is Status.OK
+        stages = metrics.stage_seconds()
+        assert stages["download"] == pytest.approx(3.40)
+        assert stages["extract"] == pytest.approx(0.10)
+        assert dummy_run.counters["arxiv_wire_download_seconds"] == pytest.approx(0.35)
+    finally:
+        metrics.reset()
+        manifest.close()
