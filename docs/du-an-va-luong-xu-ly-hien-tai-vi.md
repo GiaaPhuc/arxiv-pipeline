@@ -29,7 +29,7 @@
   - [3.0.4. Đặc trưng AST M2, Đánh giá `MRR@5` & Biểu đồ Poster (`hierarchy_features.py`, `evaluation.py`, `plots.py`)](#304-đặc-trưng-ast-m2-đánh-giá-mrr5--biểu-đồ-poster-hierarchy_featurespy-evaluationpy-plotspy)
 - [Phần Chung: Đồng bộ hóa, Ma trận Trách nhiệm & Báo cáo](#phần-chung-đồng-bộ-hóa-ma-trận-trách-nhiệm--báo-cáo)
   - [3.1. Ma trận Phân công Vai trò (A–E)](#31-ma-trận-phân-công-vai-trò-ae)
-  - [3.2. Bộ Kiểm thử Chất lượng Toàn diện (786/786 Passed)](#32-bộ-kiểm-thử-chất-lượng-toàn-diện-786786-passed)
+  - [3.2. Bộ Kiểm thử Chất lượng Toàn diện (787/787 Passed)](#32-bộ-kiểm-thử-chất-lượng-toàn-diện-787787-passed)
   - [3.3. Điểm nhấn Kỹ thuật cho Báo cáo Jupyter Book](#33-điểm-nhấn-kỹ-thuật-cho-báo-cáo-jupyter-book)
 
 ---
@@ -718,7 +718,7 @@ Quy định phân công theo `CONTRIBUTING.md` và tiến độ thực tế qua 
 
 ---
 
-### 3.2. Bộ Kiểm thử Chất lượng Toàn diện (786/786 Passed)
+### 3.2. Bộ Kiểm thử Chất lượng Toàn diện (787/787 Passed)
 
 Toàn bộ kho mã nguồn tuân thủ nguyên tắc cách ly mạng tuyệt đối: **100% unit tests chạy trên fixture tổng hợp hoặc mock `responses`, không bao giờ gọi mạng thật**.
 
@@ -727,8 +727,8 @@ Toàn bộ kho mã nguồn tuân thủ nguyên tắc cách ly mạng tuyệt đ�
 ruff check . && ruff format --check . && pytest -q
 ```
 
-- **Kết quả kiểm thử trên nhánh hiện tại (20/11):** **786 passed**, 0 failed/skipped (`289` M1 + `334` M2 + `163` M3, kèm 19 cảnh báo `LGBMDeprecationWarning` về `eval_set` để giữ tương thích LightGBM `>=4.3`). Đây là kiểm thử tổng hợp offline, không thay cho đo chất lượng nhãn/corpus thật ở Phase 3A.
-  - Bao phủ toàn bộ **M1** (**289 tests**: `http`/HTTP/2 adapter, auto-recycle stream ngắt dở/retry & CDN header parser, `discovery`, `source`/Zero-Body Content-Type Early-Reject & cut-through streaming, `preflight`/POP Grade A/B/C, bounded Range, timeout handling & disjoint A/B `[0::2]`/`[1::2]`, `pipeline`/Defensive Soft-Pacing & 429 classification, `s2`, `export`, `checkpoint`, `metrics`, `run_crawl`), **M2** (**334 tests**: `gathering`, `hierarchy`, `cleaner`, `math_normalizer`, `sentence_splitter`, `bib_extractor`, `dedup`, `export_m2`, `pipeline`, `validate_m2` và kiểm thử tích hợp E2E), và **163 tests M3**: **phần A** (`src/tests/m3/test_matching_pipeline.py` **9** tests, `src/tests/m3/test_export_hf.py` **4** tests: contract 21 cột, Stage-1 blocking & 3 query-relative features, E2E CLI `--export-hf --verify-hf --plot-figures`, export đa shard ZSTD), **phần B** (`src/tests/m3/test_matching_cleaner.py`, `src/tests/m3/test_lexical_features.py`: **47 passed**), **phần C** (`src/tests/m3/test_labelling.py`: **36 passed** cho manual/auto/audit/kappa/splits/CLI và tích hợp thực 5 module `default_matching_stages()`), **phần D** (`src/tests/m3/test_ranker.py`: **52 passed** gồm unit/validation, `ranker_factory` và E2E với `evaluate_mrr5`/`plots`), và **phần E** (`src/tests/m3/test_hierarchy_features.py` **9** tests, `src/tests/m3/test_evaluation.py` **6** tests).
+- **Kết quả kiểm thử trên nhánh hiện tại (20/11):** **787 passed**, 0 failed/skipped (`290` M1 + `334` M2 + `163` M3, kèm 19 cảnh báo `LGBMDeprecationWarning` về `eval_set` để giữ tương thích LightGBM `>=4.3`). Đây là kiểm thử tổng hợp offline, không thay cho đo chất lượng nhãn/corpus thật ở Phase 3A.
+  - Bao phủ toàn bộ **M1** (**290 tests**: `http`/HTTP/2 adapter, auto-recycle stream ngắt dở/retry & CDN header parser, `discovery`, `source`/Zero-Body Content-Type Early-Reject & cut-through streaming, `preflight`/POP Grade A/B/C, bounded Range, timeout handling, direct CLI script guard & disjoint A/B `[0::2]`/`[1::2]`, `pipeline`/Defensive Soft-Pacing & 429 classification, `s2`, `export`, `checkpoint`, `metrics`, `run_crawl`), **M2** (**334 tests**: `gathering`, `hierarchy`, `cleaner`, `math_normalizer`, `sentence_splitter`, `bib_extractor`, `dedup`, `export_m2`, `pipeline`, `validate_m2` và kiểm thử tích hợp E2E), và **163 tests M3**: **phần A** (`src/tests/m3/test_matching_pipeline.py` **9** tests, `src/tests/m3/test_export_hf.py` **4** tests: contract 21 cột, Stage-1 blocking & 3 query-relative features, E2E CLI `--export-hf --verify-hf --plot-figures`, export đa shard ZSTD), **phần B** (`src/tests/m3/test_matching_cleaner.py`, `src/tests/m3/test_lexical_features.py`: **47 passed**), **phần C** (`src/tests/m3/test_labelling.py`: **36 passed** cho manual/auto/audit/kappa/splits/CLI và tích hợp thực 5 module `default_matching_stages()`), **phần D** (`src/tests/m3/test_ranker.py`: **52 passed** gồm unit/validation, `ranker_factory` và E2E với `evaluate_mrr5`/`plots`), và **phần E** (`src/tests/m3/test_hierarchy_features.py` **9** tests, `src/tests/m3/test_evaluation.py` **6** tests).
 - **Kiểm tra chuẩn phong cách mã:** `ruff check .` và `ruff format --check .` sạch 100%. Windows dùng `HF_HOME` trong `.venv/hf`, `TEMP`/`TMP` và basetemp ngắn trong `.venv/m2c-temp/` để tránh quyền cache và giới hạn độ dài đường dẫn.
 
 ---

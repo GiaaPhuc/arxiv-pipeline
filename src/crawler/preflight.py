@@ -20,13 +20,13 @@ from itertools import chain, islice
 from pathlib import Path
 from typing import Any
 
-import requests
-
 if not __package__:
     _here = Path(__file__).resolve()
     sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != _here.parent]
     if not any(Path(p or ".").resolve() == _here.parents[1] for p in sys.path):
         sys.path.insert(0, str(_here.parents[1]))
+
+import requests  # noqa: E402
 
 from crawler import ids, metrics  # noqa: E402
 from crawler.config import Config  # noqa: E402

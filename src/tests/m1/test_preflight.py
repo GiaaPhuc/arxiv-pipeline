@@ -384,3 +384,21 @@ def test_run_preflight_handles_read_timeout_gracefully(capsys) -> None:
     assert all(s.wire_bytes == 65536 for s in report.samples)
     assert recycled_count == 2
     assert closed_count == 2
+
+
+def test_preflight_direct_script_invocation_avoids_http_shadowing() -> None:
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script_path = Path(preflight.__file__).resolve()
+    src_dir = script_path.parents[1]
+    proc = subprocess.run(
+        [sys.executable, str(script_path), "--help"],
+        cwd=str(src_dir),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "--mode" in proc.stdout
