@@ -342,3 +342,90 @@ def test_summarize_sessions_supports_benchmark_sessions_format_and_detects_overl
 
     with pytest.raises(ValueError, match="Cannot summarize mock or dry-run"):
         metrics.summarize_sessions([{"is_mock": True, "runs": 1}])
+
+
+def test_merge_with_base_accumulates_cdn_and_transport_v316_fields() -> None:
+    s1 = metrics.merge_with_base(
+        {},
+        {"download": 10.0, "extract": 2.0},
+        {"ram_peak_bytes": 1000.0, "ram_mean_bytes": 500.0, "ram_samples": 2.0},
+        crawl_counters={
+            "cdn_edge_hits": 40,
+            "cdn_shield_hits": 10,
+            "cdn_origin_misses": 50,
+            "cdn_hit_bytes": 10_000_000,
+            "cdn_hit_seconds": 1.0,
+            "cdn_miss_bytes": 20_000_000,
+            "cdn_miss_seconds": 4.0,
+            "early_header_rejects": 3,
+            "arxiv_429_queue_timeout": 1,
+            "arxiv_429_edge_fast": 2,
+            "defensive_soft_pacing_triggers": 1,
+            "in_flight_extractions": 95,
+            "http_protocol": "HTTP/2",
+            "use_http2": 1,
+            "in_flight_extract": 1,
+            "cdn_pop": "cache-sin",
+        },
+    )
+    assert s1["sessions"][0]["transport"] == {
+        "http_protocol": "HTTP/2",
+        "use_http2": True,
+        "in_flight_extract": True,
+        "in_flight_extractions": 95,
+        "early_header_rejects": 3,
+        "cdn_pop": "cache-sin",
+    }
+    assert s1["sessions"][0]["cdn_breakdown"] == {
+        "edge_hits": 40,
+        "shield_hits": 10,
+        "origin_misses": 50,
+        "unknown": 0,
+        "hit_bytes": 10_000_000,
+        "hit_seconds": 1.0,
+        "miss_bytes": 20_000_000,
+        "miss_seconds": 4.0,
+        "http_429_queue_timeout": 1,
+        "http_429_edge_fast": 2,
+        "defensive_soft_pacing_triggers": 1,
+    }
+
+    s2 = metrics.merge_with_base(
+        s1,
+        {"download": 5.0, "extract": 1.0},
+        {"ram_peak_bytes": 1200.0, "ram_mean_bytes": 600.0, "ram_samples": 2.0},
+        crawl_counters={
+            "cdn_edge_hits": 25,
+            "cdn_shield_hits": 5,
+            "cdn_origin_misses": 20,
+            "cdn_hit_bytes": 5_000_000,
+            "cdn_hit_seconds": 0.5,
+            "cdn_miss_bytes": 10_000_000,
+            "cdn_miss_seconds": 2.0,
+            "early_header_rejects": 4,
+            "arxiv_429_queue_timeout": 2,
+            "arxiv_429_edge_fast": 1,
+            "defensive_soft_pacing_triggers": 0,
+            "in_flight_extractions": 45,
+            "http_protocol": "HTTP/1.1",
+            "use_http2": 0,
+            "in_flight_extract": 0,
+            "cdn_pop": "cache-nrt",
+        },
+    )
+    arxiv = s2["arxiv"]
+    assert arxiv["cdn_edge_hits"] == 65
+    assert arxiv["cdn_shield_hits"] == 15
+    assert arxiv["cdn_origin_misses"] == 70
+    assert arxiv["cdn_hit_bytes"] == 15_000_000
+    assert arxiv["cdn_hit_seconds"] == 1.5
+    assert arxiv["cdn_miss_bytes"] == 30_000_000
+    assert arxiv["cdn_miss_seconds"] == 6.0
+    assert arxiv["early_header_rejects"] == 7
+    assert arxiv["http_429_queue_timeout"] == 3
+    assert arxiv["http_429_edge_fast"] == 3
+    assert arxiv["defensive_soft_pacing_triggers"] == 1
+    assert arxiv["in_flight_extractions"] == 140
+    assert s2["sessions"][1]["transport"]["http_protocol"] == "HTTP/1.1"
+    assert s2["sessions"][1]["transport"]["use_http2"] is False
+    assert s2["sessions"][1]["transport"]["cdn_pop"] == "cache-nrt"

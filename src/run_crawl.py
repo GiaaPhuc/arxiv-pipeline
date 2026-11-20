@@ -98,6 +98,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="max sustained streaming download speed in MiB/s (default 6.0, recommended 5.5-8.0)",
     )
+    p.add_argument(
+        "--http2",
+        action="store_true",
+        help="enable optional single-connection HTTP/2 (RST_STREAM early abort via httpx)",
+    )
+    p.add_argument(
+        "--in-flight-extract",
+        action="store_true",
+        help="extract tar.gz/gzip streams in-flight directly to .vK.part/tex (O(1) RAM)",
+    )
     return p.parse_args(argv)
 
 
@@ -146,6 +156,10 @@ def main(argv: list[str] | None = None) -> int:
         overrides["enable_oai_dates"] = True
     if args.max_stream_mbps is not None:
         overrides["max_stream_mbps"] = args.max_stream_mbps
+    if args.http2:
+        overrides["use_http2"] = True
+    if args.in_flight_extract:
+        overrides["in_flight_extract"] = True
     config = Config.from_env(**overrides)
     try:
         all_ids = list(_expand(args.ranges, args.limit))
@@ -160,7 +174,8 @@ def main(argv: list[str] | None = None) -> int:
             f"contact set: {bool(config.contact)}; S2 key set: {bool(config.s2_api_key)}; "
             f"backup: every {config.backup_every_ids} ids -> {config.backup_dir or '-'}; "
             f"bib fallback: {config.enable_bib_fallback}; S2 batch size: {config.s2_batch_size}; "
-            f"OAI dates: {config.enable_oai_dates}; max stream mbps: {config.max_stream_mbps}"
+            f"OAI dates: {config.enable_oai_dates}; max stream mbps: {config.max_stream_mbps}; "
+            f"http2: {config.use_http2}; in-flight extract: {config.in_flight_extract}"
         )
         return 0
     if not config.contact:

@@ -18,6 +18,8 @@ Environment variables:
     CRAWLER_ENABLE_OAI_DATES    1/true to use OAI-PMH arXivRaw for version dates
     CRAWLER_EXTRACT_WORKERS     number of parallel extract-worker threads (default 2)
     CRAWLER_EXTRACT_MAX_QUEUE_BYTES max in-memory bytes queued for extraction (default 192 MiB)
+    CRAWLER_USE_HTTP2           1/true to enable optional single-connection HTTP/2 for arXiv
+    CRAWLER_IN_FLIGHT_EXTRACT   1/true for cut-through in-flight tar.gz/gzip extraction
 """
 
 from __future__ import annotations
@@ -68,6 +70,10 @@ class Config:
     extract_max_queue_bytes: int = 192 * 1024 * 1024  # v3.4: byte budget for extract_queue RAM
     max_stream_mbps: float = (
         6.0  # v3.15: smooth sustained stream cap in MiB/s (hits ~7.7h/5000id without CDN burst)
+    )
+    use_http2: bool = False  # v3.16: opt-in HTTP/2 via httpx (falls back to HTTP/1.1 if absent)
+    in_flight_extract: bool = (
+        False  # v3.16: opt-in cut-through stream extraction (O(1) RAM, zero temp disk I/O)
     )
 
     @property
@@ -271,6 +277,18 @@ class Config:
             except ValueError:
                 pass
 
+        use_http2_raw = (
+            os.environ.get("CRAWLER_USE_HTTP2") or local_vars.get("CRAWLER_USE_HTTP2") or ""
+        ).strip()
+        use_http2 = use_http2_raw.lower() in {"1", "true", "yes", "on"}
+
+        in_flight_raw = (
+            os.environ.get("CRAWLER_IN_FLIGHT_EXTRACT")
+            or local_vars.get("CRAWLER_IN_FLIGHT_EXTRACT")
+            or ""
+        ).strip()
+        in_flight_extract = in_flight_raw.lower() in {"1", "true", "yes", "on"}
+
         values = {
             "data_dir": Path(data_dir_raw),
             "contact": os.environ.get("CRAWLER_CONTACT") or local_vars.get("CRAWLER_CONTACT") or "",
@@ -293,6 +311,8 @@ class Config:
             "extract_workers": extract_workers,
             "extract_max_queue_bytes": extract_max_queue_bytes,
             "max_stream_mbps": max_stream_mbps,
+            "use_http2": use_http2,
+            "in_flight_extract": in_flight_extract,
         }
         values.update(overrides)
         return cls(**values)

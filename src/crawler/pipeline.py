@@ -79,6 +79,8 @@ from .source import (
     _MIN_PROGRESS_BYTES,
     _STREAM_RETRY_ERRORS,
     DownloadResult,
+    InFlightResult,
+    download_and_extract_source,
     download_source,
     extract_tex_bib,
     resume_partial_path,
@@ -113,6 +115,11 @@ _THROUGHPUT_WINDOW_REQS = 100  # v3.15: rolling window size for live wire-speed 
 _SLOW_WIRE_WARN_MBPS = 3.5  # v3.15: warn when sustained wire throughput drops below 3.5 MiB/s
 _SLOW_WIRE_MIN_WINDOW_BYTES = 50 * 1024 * 1024  # avoid false slow-wire warnings on tiny-file runs
 _EST_VERSIONS_PER_5000_IDS = 8265.0  # measured V_bar = 1.653 versions/paper across 22.2k papers
+_QUEUE_TIMEOUT_429_SECONDS = 9.0  # TTFB >= 9s before 429 indicates origin queue timeout
+_HIT_THROTTLE_WARN_MBPS = 2.0  # Fastly RAM HIT < 2.0 MiB/s signals genuine edge/IP throttling
+_HIT_THROTTLE_MIN_BYTES = 20 * 1024 * 1024  # min HIT volume before engaging defensive soft-pacing
+_SOFT_PACING_FLOOR_SECONDS = 3.80  # gentle Start-to-Start floor under genuine edge throttling
+_SOFT_PACING_CAP_SECONDS = 4.50
 _FINAL_STATUS_NAMES = frozenset(s.value for s in Status if s.is_final)
 _GIANT_DIAGNOSTIC_BYTES = 50 * 1024 * 1024  # U5: log packages >= 50 MiB to diagnostics.jsonl
 
@@ -239,6 +246,8 @@ class _ExtractJob:
     download_error: BaseException | None = None
     is_last_for_paper: bool = False
     queued_bytes: int = 0
+    prefilled_meta: VersionMeta | None = None
+    prefilled_part: Path | None = None
 
 
 @dataclass
@@ -274,7 +283,7 @@ class _Run:
     arxiv_ok_since_429: int = 0
     consecutive_stream_failures: int = 0
     proactive_cooldown_papers: int = 0
-    throughput_window: deque[tuple[float, float, float, int]] = field(
+    throughput_window: deque[tuple[float, float, float, int, str]] = field(
         default_factory=lambda: deque(maxlen=_THROUGHPUT_WINDOW_REQS)
     )
     last_download_finished_at: float | None = None
@@ -289,6 +298,8 @@ class _Run:
             "discovery_errors": 0,
             "revised_dates_incomplete": 0,
             "arxiv_429": 0,
+            "arxiv_429_queue_timeout": 0,
+            "arxiv_429_edge_fast": 0,
             "arxiv_retry_wait_seconds": 0.0,
             "arxiv_auto_resumes": 0,
             "arxiv_thermal_cooldowns": 0,
@@ -297,6 +308,19 @@ class _Run:
             "arxiv_rate_limit_wait_seconds": 0.0,
             "arxiv_wire_bytes": 0,
             "arxiv_requests_ok": 0,
+            "cdn_edge_hits": 0,
+            "cdn_shield_hits": 0,
+            "cdn_origin_misses": 0,
+            "cdn_unknown": 0,
+            "cdn_hit_bytes": 0,
+            "cdn_hit_seconds": 0.0,
+            "cdn_miss_bytes": 0,
+            "cdn_miss_seconds": 0.0,
+            "early_header_rejects": 0,
+            "defensive_soft_pacing_triggers": 0,
+            "in_flight_extractions": 0,
+            "http_protocol": "HTTP/1.1",
+            "cdn_pop": "",
             "range_resumes": 0,
             "s2_ok": 0,
             "s2_not_indexed": 0,
@@ -401,23 +425,52 @@ def _record_download_telemetry(
     ttfb: float,
     body_seconds: float,
     cycle_seconds: float,
+    cache_status: str = "UNKNOWN",
+    served_by: str = "",
+    http_version: str = "HTTP/1.1",
+    early_rejected_by_header: bool = False,
 ) -> None:
-    """Track wire-vs-wait telemetry and emit rolling throughput diagnostics every 100 reqs."""
+    """Track wire-vs-wait, CDN HIT/MISS breakdown, and self-healing soft-pacing."""
     wire_sec = max(float(ttfb), 0.0) + max(float(body_seconds), 0.0)
+    body_sec = max(float(body_seconds), 0.0)
     nbytes = max(int(wire_bytes), 0)
+    cstatus = (cache_status or "UNKNOWN").upper()
     _inc(run, "arxiv_wire_download_seconds", wire_sec)
     _inc(run, "arxiv_wire_bytes", nbytes)
     _inc(run, "arxiv_requests_ok")
+    if early_rejected_by_header:
+        _inc(run, "early_header_rejects")
+    if cstatus == "HIT":
+        _inc(run, "cdn_edge_hits")
+        _inc(run, "cdn_hit_bytes", nbytes)
+        _inc(run, "cdn_hit_seconds", body_sec)
+    elif cstatus == "SHIELD_HIT":
+        _inc(run, "cdn_shield_hits")
+        _inc(run, "cdn_hit_bytes", nbytes)
+        _inc(run, "cdn_hit_seconds", body_sec)
+    elif cstatus == "MISS":
+        _inc(run, "cdn_origin_misses")
+        _inc(run, "cdn_miss_bytes", nbytes)
+        _inc(run, "cdn_miss_seconds", body_sec)
+    else:
+        _inc(run, "cdn_unknown")
+
+    with run.counters_lock:
+        if http_version:
+            run.counters["http_protocol"] = http_version
+        if served_by:
+            run.counters["cdn_pop"] = served_by
+        req_count = int(run.counters.get("arxiv_requests_ok", 0))
+
     run.throughput_window.append(
         (
             max(float(cycle_seconds), 0.0),
             max(float(ttfb), 0.0),
-            max(float(body_seconds), 0.0),
+            body_sec,
             nbytes,
+            cstatus,
         )
     )
-    with run.counters_lock:
-        req_count = int(run.counters.get("arxiv_requests_ok", 0))
     if (
         len(run.throughput_window) >= _THROUGHPUT_WINDOW_REQS
         and req_count % _THROUGHPUT_WINDOW_REQS == 0
@@ -432,28 +485,181 @@ def _record_download_telemetry(
         ttfb_p50_ms = ttfbs[n // 2] * 1000.0
         avg_cycle = sum_cycle / n
         est_5000_h = avg_cycle * _EST_VERSIONS_PER_5000_IDS / 3600.0
+
+        hit_samples = [s for s in samples if s[4] in {"HIT", "SHIELD_HIT"}]
+        miss_samples = [s for s in samples if s[4] == "MISS"]
+        hit_count = len(hit_samples)
+        miss_count = len(miss_samples)
+        hit_bytes_win = sum(s[3] for s in hit_samples)
+        hit_body_win = sum(s[2] for s in hit_samples)
+        miss_bytes_win = sum(s[3] for s in miss_samples)
+        miss_body_win = sum(s[2] for s in miss_samples)
+        hit_mbps = (
+            (hit_bytes_win / (1024 * 1024)) / max(hit_body_win, 0.001) if hit_count > 0 else 0.0
+        )
+        miss_mbps = (
+            (miss_bytes_win / (1024 * 1024)) / max(miss_body_win, 0.001) if miss_count > 0 else 0.0
+        )
+        hit_pct = 100.0 * hit_count / n
+        miss_pct = 100.0 * miss_count / n
+        with run.counters_lock:
+            proto = str(run.counters.get("http_protocol", "HTTP/1.1"))
+            pop = str(run.counters.get("cdn_pop", "")) or "-"
+
         logger.info(
             "throughput (last %d reqs): wire=%.2f MiB/s | ttfb_p50=%.0fms | "
-            "avg=%.2fs/req | est_5000id=%.2fh",
+            "avg=%.2fs/req | est_5000id=%.2fh | HIT=%.0f%% (%.2f MiB/s) | "
+            "MISS=%.0f%% (%.2f MiB/s) | proto=%s | pop=%s",
             n,
             wire_mbps,
             ttfb_p50_ms,
             avg_cycle,
             est_5000_h,
+            hit_pct,
+            hit_mbps,
+            miss_pct,
+            miss_mbps,
+            proto,
+            pop,
         )
         if (
+            run.config.arxiv_min_interval >= 3.0
+            and hit_bytes_win >= _HIT_THROTTLE_MIN_BYTES
+            and hit_mbps < _HIT_THROTTLE_WARN_MBPS
+        ):
+            target = round(
+                min(
+                    max(run.config.arxiv_min_interval + 0.75, _SOFT_PACING_FLOOR_SECONDS),
+                    _SOFT_PACING_CAP_SECONDS,
+                ),
+                2,
+            )
+            run.arxiv.limiter.enter_ramp_up(start_interval=target)
+            _inc(run, "defensive_soft_pacing_triggers")
+            _diag(
+                run,
+                "defensive_soft_pacing",
+                hit_mbps=round(hit_mbps, 3),
+                hit_bytes=hit_bytes_win,
+                miss_mbps=round(miss_mbps, 3),
+                target_interval=target,
+                pop=pop,
+                proto=proto,
+            )
+            logger.warning(
+                "Fastly edge HIT throughput degraded (%.2f MiB/s < %.1f MiB/s over %d MiB); "
+                "engaging defensive soft-pacing Start-to-Start %.2fs (pop=%s)",
+                hit_mbps,
+                _HIT_THROTTLE_WARN_MBPS,
+                hit_bytes_win // (1024 * 1024),
+                target,
+                pop,
+            )
+        elif (
             run.config.arxiv_min_interval >= 3.0
             and sum_bytes >= _SLOW_WIRE_MIN_WINDOW_BYTES
             and wire_mbps < _SLOW_WIRE_WARN_MBPS
         ):
+            bottleneck_note = " [origin Cache MISS bottleneck]" if miss_count > 0 else ""
             logger.warning(
                 "slow wire throughput (%.2f MiB/s < %.1f MiB/s over last %d reqs, "
-                "ttfb_p50=%.0fms); target ~8h/5000id requires >= 5.0 MiB/s",
+                "ttfb_p50=%.0fms, hit=%.0f%%, miss=%.2f MiB/s); target ~8h/5000id "
+                "requires >= 5.0 MiB/s%s",
                 wire_mbps,
                 _SLOW_WIRE_WARN_MBPS,
                 n,
                 ttfb_p50_ms,
+                hit_pct,
+                miss_mbps,
+                bottleneck_note,
             )
+
+
+def _post_process_arxiv_2xx(
+    run: _Run,
+    *,
+    arxiv_id: str,
+    version: int,
+    wire_bytes: int,
+    raw_archive_bytes: int,
+    body_seconds: float,
+    req_started: float,
+    req_finished: float,
+    range_resumed: bool = False,
+    cache_status: str = "UNKNOWN",
+    served_by: str = "",
+    http_version: str = "HTTP/1.1",
+    early_rejected_by_header: bool = False,
+) -> None:
+    """Common post-download 2xx accounting, adaptive recovery, breather, and socket recycle."""
+    run.consecutive_arxiv_429 = 0
+    run.consecutive_stream_failures = 0
+    run.arxiv.thermal_score = 0.0
+    run.arxiv_ok_since_429 += 1
+    if run.arxiv_429_streak > 0:
+        if run.arxiv_ok_since_429 >= _ARXIV_OK_STREAK_TO_DECAY:
+            run.arxiv_429_streak -= 1
+            run.arxiv_ok_since_429 = 0
+            run.arxiv.limiter.note_success()
+    else:
+        run.arxiv.limiter.note_success()
+
+    header_elapsed = float(getattr(run.arxiv, "last_header_elapsed", 0.0) or 0.0)
+    cycle_seconds = (
+        req_finished - run.last_download_finished_at
+        if run.last_download_finished_at is not None
+        else req_finished - req_started
+    )
+    run.last_download_finished_at = req_finished
+    _record_download_telemetry(
+        run,
+        wire_bytes=wire_bytes,
+        ttfb=header_elapsed,
+        body_seconds=body_seconds,
+        cycle_seconds=cycle_seconds,
+        cache_status=cache_status,
+        served_by=served_by,
+        http_version=http_version,
+        early_rejected_by_header=early_rejected_by_header,
+    )
+    breather = _compute_proportional_breather(
+        run.arxiv.limiter._min_interval,
+        wire_bytes,
+        range_resumed,
+        body_seconds,
+        header_seconds=header_elapsed,
+    )
+    if run.config.arxiv_min_interval >= 3.0 and header_elapsed >= _EDGE_DELAY_RECYCLE_SECONDS:
+        logger.info(
+            "arXiv edge queue delay (TTFB %.2fs >= %.1fs) for %sv%d; "
+            "recycling session to clear tarpit",
+            header_elapsed,
+            _EDGE_DELAY_RECYCLE_SECONDS,
+            arxiv_id,
+            version,
+        )
+        run.arxiv.recycle_session()
+    elif wire_bytes >= _GIANT_RECYCLE_BYTES:
+        run.arxiv.recycle_session()
+    if breather > 0.0:
+        run.arxiv.limiter.schedule_retry_backoff(breather)
+    if range_resumed:
+        _inc(run, "range_resumes")
+        _diag(
+            run,
+            "range_resume_206",
+            arxiv_id=arxiv_id,
+            version=version,
+            raw_archive_bytes=raw_archive_bytes,
+        )
+    if raw_archive_bytes >= _GIANT_DIAGNOSTIC_BYTES:
+        _diag(
+            run,
+            "giant_archive",
+            arxiv_id=arxiv_id,
+            version=version,
+            raw_archive_bytes=raw_archive_bytes,
+        )
 
 
 def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResult:
@@ -494,82 +700,109 @@ def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResu
             )
             continue
         if 200 <= download.http_status < 300:
-            run.consecutive_arxiv_429 = 0
-            run.consecutive_stream_failures = 0
-            run.arxiv.thermal_score = 0.0
-            run.arxiv_ok_since_429 += 1
-            if run.arxiv_429_streak > 0:
-                if run.arxiv_ok_since_429 >= _ARXIV_OK_STREAK_TO_DECAY:
-                    run.arxiv_429_streak -= 1
-                    run.arxiv_ok_since_429 = 0
-                    run.arxiv.limiter.note_success()
-            else:
-                run.arxiv.limiter.note_success()
             is_early_stub = (
                 download.data is not None
                 and len(download.data) <= 512
                 and download.raw_archive_bytes > 512
                 and bytes(download.data[:8]).startswith(_EARLY_ABORT_MAGICS)
             )
-            wire_bytes = 65536 if is_early_stub else download.raw_archive_bytes
-            header_elapsed = float(getattr(run.arxiv, "last_header_elapsed", 0.0) or 0.0)
-            cycle_seconds = (
-                req_finished - run.last_download_finished_at
-                if run.last_download_finished_at is not None
-                else req_finished - req_started
-            )
-            run.last_download_finished_at = req_finished
-            _record_download_telemetry(
+            if download.early_rejected_by_header:
+                wire_bytes = 0
+            elif is_early_stub:
+                wire_bytes = 65536
+            elif download.wire_bytes > 0:
+                wire_bytes = download.wire_bytes
+            else:
+                wire_bytes = download.raw_archive_bytes
+            _post_process_arxiv_2xx(
                 run,
+                arxiv_id=arxiv_id,
+                version=version,
                 wire_bytes=wire_bytes,
-                ttfb=header_elapsed,
+                raw_archive_bytes=download.raw_archive_bytes,
                 body_seconds=download.download_seconds,
-                cycle_seconds=cycle_seconds,
+                req_started=req_started,
+                req_finished=req_finished,
+                range_resumed=download.range_resumed,
+                cache_status=download.cache_status,
+                served_by=download.served_by,
+                http_version=download.http_version,
+                early_rejected_by_header=download.early_rejected_by_header,
             )
-            breather = _compute_proportional_breather(
-                run.arxiv.limiter._min_interval,
-                wire_bytes,
-                download.range_resumed,
-                download.download_seconds,
-                header_seconds=header_elapsed,
-            )
-            if (
-                run.config.arxiv_min_interval >= 3.0
-                and header_elapsed >= _EDGE_DELAY_RECYCLE_SECONDS
-            ):
-                logger.info(
-                    "arXiv edge queue delay (TTFB %.2fs >= %.1fs) for %sv%d; "
-                    "recycling session to clear tarpit",
-                    header_elapsed,
-                    _EDGE_DELAY_RECYCLE_SECONDS,
-                    arxiv_id,
-                    version,
-                )
-                run.arxiv.recycle_session()
-            elif wire_bytes >= _GIANT_RECYCLE_BYTES:
-                run.arxiv.recycle_session()
-            if breather > 0.0:
-                run.arxiv.limiter.schedule_retry_backoff(breather)
-            if download.range_resumed:
-                _inc(run, "range_resumes")
-                _diag(
-                    run,
-                    "range_resume_206",
-                    arxiv_id=arxiv_id,
-                    version=version,
-                    raw_archive_bytes=download.raw_archive_bytes,
-                )
-            if download.raw_archive_bytes >= _GIANT_DIAGNOSTIC_BYTES:
-                _diag(
-                    run,
-                    "giant_archive",
-                    arxiv_id=arxiv_id,
-                    version=version,
-                    raw_archive_bytes=download.raw_archive_bytes,
-                )
         break
     assert download is not None
     return download
+
+
+def _download_and_extract_in_flight(
+    run: _Run,
+    paper: PaperMeta,
+    version: int,
+    part: Path,
+) -> VersionMeta:
+    """Cut-through stream download + 1-pass extract directly into ``part / 'tex'`` (O(1) RAM)."""
+    arxiv_id = paper.arxiv_id
+    result: InFlightResult | None = None
+    for rate_attempt in range(_ARXIV_MAX_429_ATTEMPTS):
+        if part.exists():
+            shutil.rmtree(part, ignore_errors=True)
+        req_started = time.monotonic()
+        result = download_and_extract_source(
+            run.arxiv,
+            arxiv_id,
+            version,
+            part / "tex",
+            run.config,
+        )
+        req_finished = time.monotonic()
+        if result.http_status == 403:
+            if part.exists():
+                shutil.rmtree(part, ignore_errors=True)
+            _diag(run, "arxiv_403", arxiv_id=arxiv_id, version=version)
+            raise StopCrawl(f"arXiv answered HTTP 403 for {arxiv_id}v{version}")
+        if result.http_status == 429:
+            if part.exists():
+                shutil.rmtree(part, ignore_errors=True)
+            _wait_arxiv_429(
+                run,
+                context=f"for {arxiv_id}v{version}",
+                rate_attempt=rate_attempt,
+                download=result,
+                fast_defer=True,
+                is_stream_failure=False,
+            )
+            continue
+        metrics.add_stage_seconds("download", result.network_seconds)
+        if 200 <= result.http_status < 300:
+            metrics.add_stage_seconds("extract", result.extract_seconds)
+            _inc(run, "in_flight_extractions")
+            _post_process_arxiv_2xx(
+                run,
+                arxiv_id=arxiv_id,
+                version=version,
+                wire_bytes=result.wire_bytes,
+                raw_archive_bytes=(
+                    result.meta.raw_archive_bytes if result.meta is not None else result.wire_bytes
+                ),
+                body_seconds=result.download_seconds,
+                req_started=req_started,
+                req_finished=req_finished,
+                range_resumed=False,
+                cache_status=result.cache_status,
+                served_by=result.served_by,
+                http_version=result.http_version,
+                early_rejected_by_header=result.early_rejected_by_header,
+            )
+        break
+    assert result is not None
+    if result.meta is not None:
+        return result.meta
+    return VersionMeta(
+        arxiv_id,
+        version,
+        Status.FAILED,
+        error=f"HTTP {result.http_status} on /src/",
+    )
 
 
 def _extract_version(
@@ -663,9 +896,11 @@ def _consume_extract_job(run: _Run, job: _ExtractJob) -> Status:
     version = job.version
     paper_dir = _paper_dir(run, paper.arxiv_id)
     final = paper_dir / f"v{version}"
-    part = paper_dir / f".v{version}.part"
+    part = (
+        job.prefilled_part if job.prefilled_part is not None else (paper_dir / f".v{version}.part")
+    )
     old = paper_dir / f".v{version}.old"
-    if part.exists():
+    if job.prefilled_meta is None and part.exists():
         shutil.rmtree(part, ignore_errors=True)
     if old.exists():
         shutil.rmtree(old, ignore_errors=True)
@@ -674,8 +909,11 @@ def _consume_extract_job(run: _Run, job: _ExtractJob) -> Status:
         try:
             if job.download_error is not None:
                 raise job.download_error
-            assert job.download is not None
-            meta = _extract_version(run, paper, version, job.download, part)
+            if job.prefilled_meta is not None:
+                meta = job.prefilled_meta
+            else:
+                assert job.download is not None
+                meta = _extract_version(run, paper, version, job.download, part)
         except Exception as exc:  # one bad pair must never stop the batch
             logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
             shutil.rmtree(part, ignore_errors=True)
@@ -783,23 +1021,44 @@ def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) 
         is_last = idx == len(pending_versions) - 1
         stashed_file = resume_partial_path(run.tmp_dir, paper.arxiv_id, version)
         stashed_before = stashed_file.stat().st_size if stashed_file.is_file() else 0
+        use_in_flight = bool(
+            run.config.in_flight_extract and not run.in_deferred_pass and stashed_before == 0
+        )
+        part = paper_dir / f".v{version}.part"
         try:
-            download = _download_version(run, paper, version)
-            _enqueue_extract_job(
-                run,
-                _ExtractJob(
-                    paper=paper,
-                    version=version,
-                    download=download,
-                    is_last_for_paper=is_last,
-                ),
-            )
+            if use_in_flight:
+                meta = _download_and_extract_in_flight(run, paper, version, part)
+                _enqueue_extract_job(
+                    run,
+                    _ExtractJob(
+                        paper=paper,
+                        version=version,
+                        is_last_for_paper=is_last,
+                        prefilled_meta=meta,
+                        prefilled_part=part,
+                    ),
+                )
+            else:
+                download = _download_version(run, paper, version)
+                _enqueue_extract_job(
+                    run,
+                    _ExtractJob(
+                        paper=paper,
+                        version=version,
+                        download=download,
+                        is_last_for_paper=is_last,
+                    ),
+                )
         except (StopCrawl, _DeferRateLimit):
+            if use_in_flight and part.exists():
+                shutil.rmtree(part, ignore_errors=True)
             if idx == 0:
                 with run.counters_lock:
                     run.paper_pending_versions.pop(paper.arxiv_id, None)
             raise
         except _STREAM_RETRY_ERRORS as exc:
+            if use_in_flight and part.exists():
+                shutil.rmtree(part, ignore_errors=True)
             stashed_now = stashed_file.stat().st_size if stashed_file.is_file() else 0
             can_defer_stream = run.config.auto_resume_rate_limit and (
                 not run.in_deferred_pass
@@ -853,6 +1112,8 @@ def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) 
                 ),
             )
         except Exception as exc:  # one bad pair must never stop the batch
+            if use_in_flight and part.exists():
+                shutil.rmtree(part, ignore_errors=True)
             resume_partial_path(run.tmp_dir, paper.arxiv_id, version).unlink(missing_ok=True)
             logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
             _enqueue_extract_job(
@@ -1064,7 +1325,7 @@ def _retry_after(
 
 
 def _retry_after_download(
-    download: DownloadResult,
+    download: DownloadResult | InFlightResult,
     default: float | None = None,
     *,
     rate_attempt: int = 0,
@@ -1078,7 +1339,7 @@ def _retry_after_download(
 
 def _explicit_retry_after(
     response: requests.Response | None = None,
-    download: DownloadResult | None = None,
+    download: DownloadResult | InFlightResult | None = None,
 ) -> float | None:
     if download is not None and download.retry_after is not None:
         return min(max(float(download.retry_after), 0.0), 600.0)
@@ -1098,12 +1359,17 @@ def _wait_arxiv_429(
     context: str,
     rate_attempt: int,
     response: requests.Response | None = None,
-    download: DownloadResult | None = None,
+    download: DownloadResult | InFlightResult | None = None,
     fast_defer: bool = False,
     is_stream_failure: bool = False,
 ) -> None:
     """Sleep after arXiv 429; defer + escalating cooldown (U1) or raise ``StopCrawl``."""
     _inc(run, "arxiv_429")
+    header_elapsed = float(getattr(run.arxiv, "last_header_elapsed", 0.0) or 0.0)
+    cache_status = str(getattr(run.arxiv, "last_cache_status", "UNKNOWN") or "UNKNOWN")
+    served_by = str(getattr(run.arxiv, "last_served_by", "") or "")
+    is_queue_timeout = header_elapsed >= _QUEUE_TIMEOUT_429_SECONDS
+    _inc(run, "arxiv_429_queue_timeout" if is_queue_timeout else "arxiv_429_edge_fast")
     run.arxiv.limiter.note_429()
     run.arxiv.recycle_session()
     run.arxiv.limiter.schedule_retry_backoff(run.arxiv.limiter._min_interval)
@@ -1118,6 +1384,10 @@ def _wait_arxiv_429(
             streak=run.arxiv_429_streak + (0 if is_stream_failure else 1),
             need_cooldown=True,
             is_stream_failure=is_stream_failure,
+            ttfb_seconds=round(header_elapsed, 4),
+            queue_timeout_429=is_queue_timeout,
+            cache_status=cache_status,
+            served_by=served_by,
         )
         logger.warning(
             "arXiv 429 %s; deferring to queue and entering %s cooldown",
@@ -1137,6 +1407,10 @@ def _wait_arxiv_429(
             context=context,
             attempts=_ARXIV_MAX_429_ATTEMPTS,
             auto_resume=bool(run.config.auto_resume_rate_limit and not run.in_deferred_pass),
+            ttfb_seconds=round(header_elapsed, 4),
+            queue_timeout_429=is_queue_timeout,
+            cache_status=cache_status,
+            served_by=served_by,
         )
         if run.config.auto_resume_rate_limit and not run.in_deferred_pass:
             raise _DeferRateLimit(
@@ -1157,6 +1431,10 @@ def _wait_arxiv_429(
         context=context,
         attempt=rate_attempt + 1,
         wait_seconds=wait,
+        ttfb_seconds=round(header_elapsed, 4),
+        queue_timeout_429=is_queue_timeout,
+        cache_status=cache_status,
+        served_by=served_by,
     )
     if run.rate_state_path is not None and wait > 0:
         save_rate_state(run.rate_state_path, arxiv_cooldown_until=time.time() + wait)
@@ -1553,6 +1831,8 @@ def _flush_metrics(run: _Run, *, final_resources: dict[str, float] | None = None
         )
         counters_snapshot["arxiv_min_interval"] = float(run.config.arxiv_min_interval)
         counters_snapshot["s2_min_interval"] = float(run.config.s2_min_interval)
+        counters_snapshot["in_flight_extract"] = bool(run.config.in_flight_extract)
+        counters_snapshot["use_http2"] = bool(run.config.use_http2)
         return metrics.flush_run(
             run.metrics_path,
             run.base_metrics,

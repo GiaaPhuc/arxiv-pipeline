@@ -18,6 +18,7 @@ import tarfile
 import tempfile
 import time
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -26,7 +27,7 @@ from typing import Any, BinaryIO
 from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
 
 from .config import Config
-from .http import HostClient
+from .http import HostClient, _get_header, parse_cdn_headers
 from .models import FileEntry, Status, VersionMeta
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,11 @@ class DownloadResult:
     download_seconds: float = field(
         default=0.0, compare=False
     )  # pure wire streaming duration in seconds (excludes limiter.wait)
+    wire_bytes: int = field(default=0, compare=False)
+    cache_status: str = field(default="UNKNOWN", compare=False)
+    served_by: str = field(default="", compare=False)
+    http_version: str = field(default="HTTP/1.1", compare=False)
+    early_rejected_by_header: bool = field(default=False, compare=False)
 
 
 @dataclass
@@ -123,6 +129,12 @@ class InFlightResult:
     retry_after: float | None = None
     network_seconds: float = 0.0
     extract_seconds: float = 0.0
+    download_seconds: float = field(default=0.0, compare=False)
+    wire_bytes: int = field(default=0, compare=False)
+    cache_status: str = field(default="UNKNOWN", compare=False)
+    served_by: str = field(default="", compare=False)
+    http_version: str = field(default="HTTP/1.1", compare=False)
+    early_rejected_by_header: bool = field(default=False, compare=False)
 
 
 class _UnsafeArchiveError(ValueError):
@@ -417,6 +429,31 @@ def _content_length_bytes(response) -> int | None:
         return None
 
 
+def _early_abort_content_type_magic(response: Any) -> bytes | None:
+    """Return synthetic magic stub when ``Content-Type`` proves response is PDF/ZIP."""
+    raw_ct = _get_header(getattr(response, "headers", None), "Content-Type")
+    if not raw_ct:
+        return None
+    media_type = raw_ct.split(";", 1)[0].strip().lower()
+    if media_type == "application/pdf":
+        return _PDF_MAGIC
+    if media_type in {"application/zip", "application/x-zip-compressed"}:
+        return _ZIP_MAGICS[0]
+    return None
+
+
+def _response_http_version(response: Any, client: Any) -> str:
+    raw = getattr(response, "http_version", None)
+    if isinstance(raw, str) and raw:
+        return raw
+    client_ver = getattr(client, "last_http_version", None)
+    if isinstance(client_ver, str) and client_ver:
+        return client_ver
+    if bool(getattr(client, "using_http2", False)):
+        return "HTTP/2"
+    return "HTTP/1.1"
+
+
 def download_source(
     client: HostClient,
     arxiv_id: str,
@@ -600,6 +637,55 @@ def download_source(
                 if (expected_total is not None and expected_total >= _GIANT_ARCHIVE_THRESHOLD)
                 else _CHUNK_SIZE
             )
+            cache_status, served_by, _ = parse_cdn_headers(getattr(response, "headers", None))
+            http_version = _response_http_version(response, client)
+            is_h2 = http_version.upper().startswith("HTTP/2")
+
+            hdr_magic = (
+                _early_abort_content_type_magic(response)
+                if (written == 0 and content_length is not None)
+                else None
+            )
+            if hdr_magic is not None:
+                if (
+                    not is_h2
+                    and content_length is not None
+                    and content_length <= _KEEPALIVE_DRAIN_BYTES
+                ):
+                    for _ in response.iter_content(chunk_size=read_chunk_size):
+                        pass
+                assert content_length is not None
+                if keep_partial_on_retryable:
+                    resume_path.unlink(missing_ok=True)
+                if disk_out is not None:
+                    disk_out.write(hdr_magic)
+                    disk_out.close()
+                    disk_out = None
+                    return DownloadResult(
+                        path=temp_path,
+                        http_status=200,
+                        raw_archive_bytes=content_length,
+                        range_resumed=range_resumed,
+                        download_seconds=0.0,
+                        wire_bytes=0,
+                        cache_status=cache_status,
+                        served_by=served_by,
+                        http_version=http_version,
+                        early_rejected_by_header=True,
+                    )
+                return DownloadResult(
+                    path=None,
+                    http_status=200,
+                    raw_archive_bytes=content_length,
+                    data=hdr_magic,
+                    range_resumed=range_resumed,
+                    download_seconds=0.0,
+                    wire_bytes=0,
+                    cache_status=cache_status,
+                    served_by=served_by,
+                    http_version=http_version,
+                    early_rejected_by_header=True,
+                )
 
             limiter_obj = getattr(client, "limiter", None)
             pace_enabled = float(getattr(limiter_obj, "_base_floor", 0.0) or 0.0) >= 3.0
@@ -628,7 +714,8 @@ def download_source(
                                 else total_seen
                             )
                             if (
-                                expected_total is not None
+                                not is_h2
+                                and expected_total is not None
                                 and expected_total - total_seen <= _KEEPALIVE_DRAIN_BYTES
                             ):
                                 for _ in response.iter_content(chunk_size=read_chunk_size):
@@ -648,6 +735,10 @@ def download_source(
                                     raw_archive_bytes=written,
                                     range_resumed=range_resumed,
                                     download_seconds=dl_secs,
+                                    wire_bytes=total_seen,
+                                    cache_status=cache_status,
+                                    served_by=served_by,
+                                    http_version=http_version,
                                 )
                             if keep_partial_on_retryable:
                                 resume_path.unlink(missing_ok=True)
@@ -658,6 +749,10 @@ def download_source(
                                 data=stub,
                                 range_resumed=range_resumed,
                                 download_seconds=dl_secs,
+                                wire_bytes=total_seen,
+                                cache_status=cache_status,
+                                served_by=served_by,
+                                http_version=http_version,
                             )
 
                 if disk_out is None and written + len(chunk) > spool_max_bytes:
@@ -699,6 +794,10 @@ def download_source(
                     raw_archive_bytes=written,
                     range_resumed=range_resumed,
                     download_seconds=dl_secs,
+                    wire_bytes=written,
+                    cache_status=cache_status,
+                    served_by=served_by,
+                    http_version=http_version,
                 )
             if keep_partial_on_retryable:
                 resume_path.unlink(missing_ok=True)
@@ -709,6 +808,10 @@ def download_source(
                 data=mem_buf,
                 range_resumed=range_resumed,
                 download_seconds=dl_secs,
+                wire_bytes=written,
+                cache_status=cache_status,
+                served_by=served_by,
+                http_version=http_version,
             )
         except _STREAM_RETRY_ERRORS as exc:
             last_exc = exc
@@ -796,7 +899,16 @@ def _is_kept(relative: PurePosixPath) -> bool:
 class _CountingChunkStream:
     """Forward-only stream over ``response.iter_content`` with zero temp-file I/O."""
 
-    def __init__(self, response: Any, chunk_size: int = _STREAM_CHUNK_SIZE) -> None:
+    def __init__(
+        self,
+        response: Any,
+        chunk_size: int = _STREAM_CHUNK_SIZE,
+        *,
+        pace_enabled: bool = False,
+        max_stream_bps: int = 0,
+        clock_fn: Callable[[], float] = time.perf_counter,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._iter = iter(response.iter_content(chunk_size=chunk_size))
         self._buf = bytearray()
         self._pos = 0
@@ -804,10 +916,15 @@ class _CountingChunkStream:
         self.bytes_from_wire = 0
         self.network_seconds = 0.0
         self.stream_error: BaseException | None = None
+        self._pace_enabled = bool(pace_enabled and max_stream_bps > 0)
+        self._max_stream_bps = max(int(max_stream_bps), 1)
+        self._clock_fn = clock_fn
+        self._sleep_fn = sleep_fn
+        self._t_pace_start: float | None = None
 
     def _pull_chunk(self) -> bool:
         while not self._eof:
-            t0 = time.perf_counter()
+            t0 = self._clock_fn()
             try:
                 chunk = next(self._iter)
             except StopIteration:
@@ -817,7 +934,7 @@ class _CountingChunkStream:
                 self.stream_error = exc
                 raise
             finally:
-                self.network_seconds += time.perf_counter() - t0
+                self.network_seconds += max(0.0, self._clock_fn() - t0)
             if chunk:
                 self.bytes_from_wire += len(chunk)
                 if self._pos > 0:
@@ -827,6 +944,19 @@ class _CountingChunkStream:
                         del self._buf[: self._pos]
                     self._pos = 0
                 self._buf.extend(chunk)
+                if self._pace_enabled and self.bytes_from_wire > _PACED_STREAM_START_BYTES:
+                    if self._t_pace_start is None:
+                        self._t_pace_start = self._clock_fn()
+                    else:
+                        paced_bytes = self.bytes_from_wire - _PACED_STREAM_START_BYTES
+                        target_dt = paced_bytes / self._max_stream_bps
+                        actual_dt = max(0.0, self._clock_fn() - self._t_pace_start)
+                        if target_dt > actual_dt:
+                            step_sleep = min(target_dt - actual_dt, 0.20)
+                            if step_sleep >= 0.005:
+                                t_sleep0 = self._clock_fn()
+                                self._sleep_fn(step_sleep)
+                                self.network_seconds += max(0.0, self._clock_fn() - t_sleep0)
                 return True
         return False
 
@@ -1072,10 +1202,21 @@ def download_and_extract_source(
 
     path = f"/src/{arxiv_id}v{version}"
     last_exc: BaseException | None = None
+    limiter_obj = getattr(client, "limiter", None)
+    pace_enabled = float(getattr(limiter_obj, "_base_floor", 0.0) or 0.0) >= 3.0
+    clock_fn = getattr(limiter_obj, "_clock", time.perf_counter)
+    sleep_fn = getattr(limiter_obj, "_sleep", time.sleep)
+    active_stream_bps = _resolve_max_stream_bps(client)
+
     for attempt in range(_stream_attempts(client)):
-        t_req = time.perf_counter()
+        t_req = clock_fn()
         response = client.get(path, stream=True)
-        header_seconds = time.perf_counter() - t_req
+        raw_hdr_elapsed = getattr(client, "last_header_elapsed", None)
+        header_seconds = (
+            max(0.0, float(raw_hdr_elapsed))
+            if isinstance(raw_hdr_elapsed, (int, float))
+            else max(0.0, clock_fn() - t_req)
+        )
         staging: Path | None = None
         stream: _CountingChunkStream | None = None
         try:
@@ -1104,14 +1245,47 @@ def download_and_extract_source(
                     network_seconds=header_seconds,
                 )
 
-            body_started = time.perf_counter()
-            stream = _CountingChunkStream(response)
-            prefix = stream.peek_magic(512)
+            cache_status, served_by, _ = parse_cdn_headers(getattr(response, "headers", None))
+            http_version = _response_http_version(response, client)
+            is_h2 = http_version.upper().startswith("HTTP/2")
             content_length = _content_length_bytes(response)
+
+            if content_length is not None and _early_abort_content_type_magic(response) is not None:
+                if not is_h2 and content_length <= _KEEPALIVE_DRAIN_BYTES:
+                    for _ in response.iter_content(chunk_size=_STREAM_CHUNK_SIZE):
+                        pass
+                return InFlightResult(
+                    http_status=status,
+                    meta=VersionMeta(
+                        arxiv_id=arxiv_id,
+                        version=version,
+                        status=Status.NO_SOURCE,
+                        raw_archive_bytes=content_length,
+                    ),
+                    network_seconds=header_seconds,
+                    extract_seconds=0.0,
+                    download_seconds=0.0,
+                    wire_bytes=0,
+                    cache_status=cache_status,
+                    served_by=served_by,
+                    http_version=http_version,
+                    early_rejected_by_header=True,
+                )
+
+            body_started = clock_fn()
+            stream = _CountingChunkStream(
+                response,
+                pace_enabled=pace_enabled,
+                max_stream_bps=active_stream_bps,
+                clock_fn=clock_fn,
+                sleep_fn=sleep_fn,
+            )
+            prefix = stream.peek_magic(512)
 
             if prefix.startswith(_EARLY_ABORT_MAGICS):
                 if (
-                    content_length is not None
+                    not is_h2
+                    and content_length is not None
                     and content_length - stream.bytes_from_wire <= _KEEPALIVE_DRAIN_BYTES
                 ):
                     stream.drain(max_bytes=_KEEPALIVE_DRAIN_BYTES)
@@ -1120,7 +1294,7 @@ def download_and_extract_source(
                     if content_length is not None
                     else stream.bytes_from_wire
                 )
-                body_elapsed = time.perf_counter() - body_started
+                body_elapsed = max(0.0, clock_fn() - body_started)
                 return InFlightResult(
                     http_status=status,
                     meta=VersionMeta(
@@ -1131,10 +1305,15 @@ def download_and_extract_source(
                     ),
                     network_seconds=header_seconds + stream.network_seconds,
                     extract_seconds=max(0.0, body_elapsed - stream.network_seconds),
+                    download_seconds=stream.network_seconds,
+                    wire_bytes=stream.bytes_from_wire,
+                    cache_status=cache_status,
+                    served_by=served_by,
+                    http_version=http_version,
                 )
 
             if not prefix.startswith(_GZIP_MAGIC):
-                if (
+                if not is_h2 and (
                     content_length is None
                     or content_length - stream.bytes_from_wire <= _KEEPALIVE_DRAIN_BYTES
                 ):
@@ -1144,7 +1323,7 @@ def download_and_extract_source(
                     if content_length is not None
                     else stream.bytes_from_wire
                 )
-                body_elapsed = time.perf_counter() - body_started
+                body_elapsed = max(0.0, clock_fn() - body_started)
                 return InFlightResult(
                     http_status=status,
                     meta=VersionMeta(
@@ -1155,6 +1334,11 @@ def download_and_extract_source(
                     ),
                     network_seconds=header_seconds + stream.network_seconds,
                     extract_seconds=max(0.0, body_elapsed - stream.network_seconds),
+                    download_seconds=stream.network_seconds,
+                    wire_bytes=stream.bytes_from_wire,
+                    cache_status=cache_status,
+                    served_by=served_by,
+                    http_version=http_version,
                 )
 
             dest_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -1189,7 +1373,7 @@ def download_and_extract_source(
                 )
                 os.replace(staging, dest_dir)
                 ver_status = Status.OK if entries else Status.OK_NO_TEX
-                body_elapsed = time.perf_counter() - body_started
+                body_elapsed = max(0.0, clock_fn() - body_started)
                 return InFlightResult(
                     http_status=status,
                     meta=VersionMeta(
@@ -1203,6 +1387,11 @@ def download_and_extract_source(
                     ),
                     network_seconds=header_seconds + stream.network_seconds,
                     extract_seconds=max(0.0, body_elapsed - stream.network_seconds),
+                    download_seconds=stream.network_seconds,
+                    wire_bytes=stream.bytes_from_wire,
+                    cache_status=cache_status,
+                    served_by=served_by,
+                    http_version=http_version,
                 )
             except (
                 _UnsafeArchiveError,
@@ -1218,7 +1407,7 @@ def download_and_extract_source(
                     if content_length is not None
                     else stream.bytes_from_wire
                 )
-                body_elapsed = time.perf_counter() - body_started
+                body_elapsed = max(0.0, clock_fn() - body_started)
                 return InFlightResult(
                     http_status=status,
                     meta=VersionMeta(
@@ -1231,12 +1420,19 @@ def download_and_extract_source(
                     ),
                     network_seconds=header_seconds + stream.network_seconds,
                     extract_seconds=max(0.0, body_elapsed - stream.network_seconds),
+                    download_seconds=stream.network_seconds,
+                    wire_bytes=stream.bytes_from_wire,
+                    cache_status=cache_status,
+                    served_by=served_by,
+                    http_version=http_version,
                 )
         except _STREAM_RETRY_ERRORS as exc:
             last_exc = exc
             if staging is not None and staging.exists():
                 shutil.rmtree(staging)
                 staging = None
+            if hasattr(client, "note_stream_break"):
+                client.note_stream_break()
             if attempt >= _stream_attempts(client) - 1:
                 raise
             if hasattr(client, "recycle_session"):

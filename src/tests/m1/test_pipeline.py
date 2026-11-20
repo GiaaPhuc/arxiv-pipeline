@@ -1804,3 +1804,154 @@ def test_v315_rolling_throughput_telemetry_warns_on_slow_wire(tmp_path, caplog):
         assert "1.33 MiB/s" in warns[0]
     finally:
         manifest.close()
+
+
+# ---------------------------------------------------------------------------
+# v3.16.0: cut-through extraction, CDN self-healing, & 429 classification
+# ---------------------------------------------------------------------------
+
+
+@responses.activate
+def test_v316_in_flight_extract_end_to_end_passes_validate_corpus(tmp_path):
+    from crawler import validate_corpus
+
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    _mock_src()
+    _mock_s2(unknown=())
+
+    cfg = _config(tmp_path, in_flight_extract=True)
+    summary = pipeline.run(["2408.00001", "2408.00002"], cfg)
+    assert summary["ok"] == 2
+    assert summary["no_source"] == 1
+    assert validate_corpus.validate(cfg.data_dir) == []
+
+    tmp_dir = cfg.data_dir / ".tmp"
+    assert not tmp_dir.exists() or list(tmp_dir.iterdir()) == []
+
+    metrics_data = _read(cfg.data_dir / "logs" / "metrics.json")
+    assert metrics_data["arxiv"]["in_flight_extractions"] >= 2
+    assert metrics_data["sessions"][0]["transport"]["in_flight_extract"] is True
+    assert metrics_data["sessions"][0]["transport"]["in_flight_extractions"] >= 2
+
+
+@responses.activate
+def test_v316_in_flight_stream_drop_defers_and_falls_back_to_range_download(tmp_path, monkeypatch):
+    import requests
+
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_atom)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00002v1", body=_tar_gz(), status=200)
+
+    monkeypatch.setattr(pipeline, "_STREAM_BREAK_BREATHER_SECONDS", 0.0)
+    in_flight_calls = 0
+    fallback_calls: list[bool] = []
+    real_download_source = pipeline.download_source
+
+    def flaky_in_flight(*_args, **_kwargs):
+        nonlocal in_flight_calls
+        in_flight_calls += 1
+        raise requests.exceptions.ChunkedEncodingError("cut-through dropped")
+
+    def spy_download_source(*args, **kwargs):
+        fallback_calls.append(bool(kwargs.get("keep_partial_on_retryable", False)))
+        return real_download_source(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "download_and_extract_source", flaky_in_flight)
+    monkeypatch.setattr(pipeline, "download_source", spy_download_source)
+
+    cfg = _config(
+        tmp_path,
+        in_flight_extract=True,
+        auto_resume_rate_limit=True,
+        skip_s2=True,
+    )
+    summary = pipeline.run(["2408.00002"], cfg)
+    assert summary["ok"] == 1
+    assert in_flight_calls == 1
+    assert fallback_calls == [True]
+
+
+def test_v316_cdn_self_healing_soft_pacing_and_429_classification(tmp_path, caplog):
+    from dataclasses import replace
+
+    import pytest
+
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=3.05,
+        arxiv_min_idle_gap=0.25,
+    )
+    manifest = pipeline.Manifest(tmp_path / "data" / "manifest.sqlite")
+    dummy_run = pipeline._Run(
+        config=cfg,
+        manifest=manifest,
+        arxiv=pipeline.make_arxiv_client(cfg),
+        s2=pipeline.make_s2_client(cfg),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    try:
+        # 1) 100 slow Cache MISS requests must warn about origin bottleneck, NOT tighten pacing
+        with caplog.at_level("WARNING", logger="crawler.pipeline"):
+            for _ in range(pipeline._THROUGHPUT_WINDOW_REQS):
+                pipeline._record_download_telemetry(
+                    dummy_run,
+                    wire_bytes=2 * 1024 * 1024,
+                    ttfb=0.60,
+                    body_seconds=1.50,  # ~1.33 MiB/s
+                    cycle_seconds=4.50,
+                    cache_status="MISS",
+                    served_by="cache-sin",
+                    http_version="HTTP/1.1",
+                )
+        assert dummy_run.counters["defensive_soft_pacing_triggers"] == 0
+        assert dummy_run.counters["cdn_origin_misses"] == pipeline._THROUGHPUT_WINDOW_REQS
+        assert dummy_run.arxiv.limiter._min_interval == 3.05  # noqa: SLF001
+        assert any("[origin Cache MISS bottleneck]" in r.message for r in caplog.records)
+
+        # 2) 100 slow edge HIT requests (>= 20 MiB, < 2.0 MiB/s) trigger defensive soft-pacing
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="crawler.pipeline"):
+            for _ in range(pipeline._THROUGHPUT_WINDOW_REQS):
+                pipeline._record_download_telemetry(
+                    dummy_run,
+                    wire_bytes=1 * 1024 * 1024,  # 100 MiB total >= 20 MiB
+                    ttfb=0.35,
+                    body_seconds=1.00,  # 1.00 MiB/s < 2.0 MiB/s threshold
+                    cycle_seconds=4.00,
+                    cache_status="HIT",
+                    served_by="cache-sin",
+                    http_version="HTTP/2",
+                )
+        assert dummy_run.counters["defensive_soft_pacing_triggers"] == 1
+        assert dummy_run.counters["cdn_edge_hits"] == pipeline._THROUGHPUT_WINDOW_REQS
+        assert dummy_run.counters["http_protocol"] == "HTTP/2"
+        assert dummy_run.counters["cdn_pop"] == "cache-sin"
+        assert dummy_run.arxiv.limiter._min_interval >= 3.80  # noqa: SLF001
+        assert dummy_run.arxiv.limiter._min_idle_gap == 0.25  # noqa: SLF001
+
+        # 3) _wait_arxiv_429 classifies >= 9.0s TTFB as queue timeout vs fast edge 429
+        dummy_run.config = replace(cfg, auto_resume_rate_limit=True)
+        dummy_run.arxiv.last_header_elapsed = 10.5
+        with pytest.raises(pipeline._DeferRateLimit):
+            pipeline._wait_arxiv_429(
+                dummy_run,
+                context="for 2408.00001v1",
+                rate_attempt=0,
+                fast_defer=True,
+            )
+        assert dummy_run.counters["arxiv_429_queue_timeout"] == 1
+        assert dummy_run.counters["arxiv_429_edge_fast"] == 0
+
+        dummy_run.arxiv.last_header_elapsed = 0.20
+        with pytest.raises(pipeline._DeferRateLimit):
+            pipeline._wait_arxiv_429(
+                dummy_run,
+                context="for 2408.00002v1",
+                rate_attempt=0,
+                fast_defer=True,
+            )
+        assert dummy_run.counters["arxiv_429_queue_timeout"] == 1
+        assert dummy_run.counters["arxiv_429_edge_fast"] == 1
+    finally:
+        manifest.close()

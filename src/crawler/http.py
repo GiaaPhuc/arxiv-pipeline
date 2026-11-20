@@ -20,7 +20,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 from urllib.parse import urljoin, urlsplit
 
 import requests
@@ -37,6 +37,244 @@ _STOP_STATUSES = frozenset({403, 429})
 
 def _default_sleep(seconds: float) -> None:
     time.sleep(seconds)
+
+
+def _get_header(headers: Any, name: str) -> str:
+    """Safely read a header value case-insensitively (ignores mocks/non-str values)."""
+    if headers is None:
+        return ""
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        for candidate in (name, name.lower(), name.title()):
+            val = getter(candidate)
+            if isinstance(val, str):
+                return val
+    items_fn = getattr(headers, "items", None)
+    if callable(items_fn):
+        target = name.lower()
+        try:
+            for key, val in items_fn():
+                if isinstance(key, str) and key.lower() == target and isinstance(val, str):
+                    return val
+        except TypeError:
+            pass
+    return ""
+
+
+def parse_cdn_headers(headers: Any) -> tuple[str, str, int | None]:
+    """Extract Fastly ``(cache_status, served_by, age_seconds)`` from HTTP headers."""
+    x_cache = _get_header(headers, "X-Cache")
+    tokens = [tok.strip().upper() for tok in x_cache.split(",") if tok.strip()]
+    if not tokens:
+        cache_status = "UNKNOWN"
+    elif tokens[-1] == "HIT":
+        cache_status = "HIT"
+    elif any(tok == "HIT" for tok in tokens):
+        cache_status = "SHIELD_HIT"
+    elif any(tok == "MISS" for tok in tokens):
+        cache_status = "MISS"
+    else:
+        cache_status = "UNKNOWN"
+
+    served_raw = _get_header(headers, "X-Served-By")
+    served_tokens = [tok.strip() for tok in served_raw.split(",") if tok.strip()]
+    served_by = served_tokens[-1] if served_tokens else ""
+
+    age_raw = _get_header(headers, "Age").strip()
+    cache_age: int | None = None
+    if age_raw:
+        try:
+            parsed_age = int(age_raw)
+        except ValueError:
+            parsed_age = -1
+        if parsed_age >= 0:
+            cache_age = parsed_age
+    return cache_status, served_by, cache_age
+
+
+def _import_httpx_http2() -> Any | None:
+    """Return the ``httpx`` module when both ``httpx`` and ``h2`` are importable."""
+    try:
+        import h2  # noqa: F401
+        import httpx
+    except ImportError:
+        return None
+    return httpx
+
+
+class _HttpxResponseAdapter:
+    """Expose a ``requests.Response``-compatible surface over an ``httpx.Response``."""
+
+    def __init__(self, httpx_mod: Any, response: Any, *, stream_cm: Any = None) -> None:
+        self._httpx = httpx_mod
+        self._inner = response
+        self._stream_cm = stream_cm
+        self._closed = False
+        self.status_code: int = int(response.status_code)
+        self.headers = response.headers
+        self.url: str = str(getattr(response, "url", ""))
+        raw_ver = getattr(response, "http_version", None)
+        self.http_version: str = raw_ver if isinstance(raw_ver, str) and raw_ver else "HTTP/2"
+
+    @property
+    def content(self) -> bytes:
+        return self._inner.content
+
+    @property
+    def text(self) -> str:
+        return self._inner.text
+
+    def json(self) -> Any:
+        return self._inner.json()
+
+    def raise_for_status(self) -> None:
+        try:
+            self._inner.raise_for_status()
+        except self._httpx.HTTPStatusError as exc:
+            raise requests.HTTPError(str(exc), response=self) from exc
+
+    def iter_content(self, chunk_size: int = 65536):
+        """Yield raw wire bytes (``iter_raw`` avoids accidental gzip decompression)."""
+        try:
+            for chunk in self._inner.iter_raw(chunk_size=chunk_size):
+                if chunk:
+                    yield chunk
+        except self._httpx.TimeoutException as exc:
+            raise requests.exceptions.Timeout(str(exc)) from exc
+        except (
+            self._httpx.RemoteProtocolError,
+            self._httpx.ReadError,
+            self._httpx.StreamError,
+        ) as exc:
+            raise requests.exceptions.ChunkedEncodingError(str(exc)) from exc
+        except self._httpx.TransportError as exc:
+            raise requests.exceptions.ConnectionError(str(exc)) from exc
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._stream_cm is not None:
+            with contextlib.suppress(Exception):
+                self._stream_cm.__exit__(None, None, None)
+        else:
+            with contextlib.suppress(Exception):
+                self._inner.close()
+
+
+class _HttpxSessionAdapter:
+    """Single-connection HTTP/2 client masquerading as ``requests.Session`` for HostClient."""
+
+    def __init__(self, httpx_mod: Any, *, headers: dict[str, str] | None = None) -> None:
+        self._httpx = httpx_mod
+        self.headers: dict[str, str] = dict(headers or {})
+        limits = httpx_mod.Limits(max_connections=1, max_keepalive_connections=1)
+        self._client = httpx_mod.Client(
+            http2=True,
+            limits=limits,
+            headers=self.headers,
+            follow_redirects=True,
+        )
+
+    def _to_timeout(self, timeout: Any) -> Any:
+        if timeout is None:
+            return None
+        if isinstance(timeout, (tuple, list)) and len(timeout) == 2:
+            connect_t = float(timeout[0])
+            read_t = float(timeout[1])
+            return self._httpx.Timeout(
+                connect=connect_t,
+                read=read_t,
+                write=read_t,
+                pool=connect_t,
+            )
+        if isinstance(timeout, (int, float)):
+            return float(timeout)
+        return timeout
+
+    def _build_kwargs(
+        self,
+        *,
+        headers: dict[str, str] | None = None,
+        params: Any = None,
+        timeout: Any = None,
+        data: Any = None,
+        json: Any = None,
+    ) -> dict[str, Any]:
+        merged_headers = dict(self.headers)
+        if headers:
+            merged_headers.update(headers)
+        req_kwargs: dict[str, Any] = {}
+        if merged_headers:
+            req_kwargs["headers"] = merged_headers
+        if params is not None:
+            req_kwargs["params"] = params
+        httpx_timeout = self._to_timeout(timeout)
+        if httpx_timeout is not None:
+            req_kwargs["timeout"] = httpx_timeout
+        if data is not None:
+            req_kwargs["data"] = data
+        if json is not None:
+            req_kwargs["json"] = json
+        return req_kwargs
+
+    def get(
+        self,
+        url: str,
+        *,
+        stream: bool = False,
+        headers: dict[str, str] | None = None,
+        params: Any = None,
+        timeout: Any = None,
+        **_extra: Any,
+    ) -> _HttpxResponseAdapter:
+        req_kwargs = self._build_kwargs(headers=headers, params=params, timeout=timeout)
+        if stream:
+            try:
+                cm = self._client.stream("GET", url, **req_kwargs)
+                inner = cm.__enter__()
+            except self._httpx.TimeoutException as exc:
+                raise requests.Timeout(str(exc)) from exc
+            except self._httpx.TransportError as exc:
+                raise requests.ConnectionError(str(exc)) from exc
+            return _HttpxResponseAdapter(self._httpx, inner, stream_cm=cm)
+        try:
+            inner = self._client.get(url, **req_kwargs)
+        except self._httpx.TimeoutException as exc:
+            raise requests.Timeout(str(exc)) from exc
+        except self._httpx.TransportError as exc:
+            raise requests.ConnectionError(str(exc)) from exc
+        return _HttpxResponseAdapter(self._httpx, inner)
+
+    def post(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: Any = None,
+        timeout: Any = None,
+        data: Any = None,
+        json: Any = None,
+        **_extra: Any,
+    ) -> _HttpxResponseAdapter:
+        req_kwargs = self._build_kwargs(
+            headers=headers,
+            params=params,
+            timeout=timeout,
+            data=data,
+            json=json,
+        )
+        try:
+            inner = self._client.post(url, **req_kwargs)
+        except self._httpx.TimeoutException as exc:
+            raise requests.Timeout(str(exc)) from exc
+        except self._httpx.TransportError as exc:
+            raise requests.ConnectionError(str(exc)) from exc
+        return _HttpxResponseAdapter(self._httpx, inner)
+
+    def close(self) -> None:
+        with contextlib.suppress(Exception):
+            self._client.close()
 
 
 class _SingleConnAdapter(HTTPAdapter):
@@ -337,9 +575,29 @@ class HostClient:
         self.session_recycles = 0
         self.thermal_score: float = 0.0
         self.last_header_elapsed: float = 0.0
+        self.using_http2: bool = False
+        self.last_http_version: str = "HTTP/1.1"
+        self.last_cache_status: str = "UNKNOWN"
+        self.last_served_by: str = ""
+        self.last_cache_age: int | None = None
+        self._warned_missing_http2: bool = False
         self._session = self._build_session()
 
-    def _build_session(self) -> requests.Session:
+    def _build_session(self) -> requests.Session | _HttpxSessionAdapter:
+        if not self._is_s2 and bool(getattr(self._config, "use_http2", False)):
+            httpx_mod = _import_httpx_http2()
+            if httpx_mod is not None:
+                self.using_http2 = True
+                return _HttpxSessionAdapter(
+                    httpx_mod,
+                    headers={"User-Agent": self._config.user_agent},
+                )
+            if not self._warned_missing_http2:
+                self._warned_missing_http2 = True
+                logger.warning(
+                    "use_http2=True requested but httpx/h2 not installed; falling back to HTTP/1.1"
+                )
+        self.using_http2 = False
         session = requests.Session()
         adapter = _SingleConnAdapter(pool_connections=1, pool_maxsize=1)
         session.mount("https://", adapter)
@@ -436,6 +694,18 @@ class HostClient:
                     continue
                 header_elapsed = max(0.0, clock() - t0)
                 self.last_header_elapsed = header_elapsed
+                cache_status, served_by, cache_age = parse_cdn_headers(
+                    getattr(response, "headers", None)
+                )
+                self.last_cache_status = cache_status
+                self.last_served_by = served_by
+                self.last_cache_age = cache_age
+                raw_ver = getattr(response, "http_version", None)
+                self.last_http_version = (
+                    raw_ver
+                    if isinstance(raw_ver, str) and raw_ver
+                    else ("HTTP/2" if self.using_http2 else "HTTP/1.1")
+                )
                 self._requests_since_recycle += 1
                 self._update_thermal_on_response(response.status_code, header_elapsed)
                 self._log_request("GET", url, response.status_code)
