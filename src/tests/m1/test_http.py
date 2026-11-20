@@ -821,7 +821,7 @@ def test_host_client_http2_single_connection_rst_stream_and_error_mapping(monkey
     assert limits.kwargs["max_connections"] == 1
     assert limits.kwargs["max_keepalive_connections"] == 1
 
-    # Streaming GET over HTTP/2 + RST_STREAM close (closes stream CM, keeps TCP/TLS client alive)
+    # Streaming GET over HTTP/2 consumed to EOF keeps TCP/TLS client warm (0 recycles)
     resp = client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
     assert client.last_http_version == "HTTP/2"
     assert client.last_cache_status == "HIT"
@@ -829,7 +829,27 @@ def test_host_client_http2_single_connection_rst_stream_and_error_mapping(monkey
     assert chunks == [b"abc", b"def"]
     resp.close()
     assert stream_exit_count == 1
+    assert client.session_recycles == 0
     assert client_closed_count == 0
+
+    # Early-aborted HTTP/2 stream (0 chunks read) auto-recycles session to avoid httpcore stall
+    stream_behavior.append(FakeStreamCM(FakeStreamResponse()))
+    resp_abort = client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
+    resp_abort.close()
+    assert stream_exit_count == 2
+    assert client.session_recycles == 1
+    assert client_closed_count == 1
+
+    # Manual recycle_session() before closing an early-aborted stream must NOT double-recycle
+    stream_behavior.append(FakeStreamCM(FakeStreamResponse()))
+    resp_manual = client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
+    next(resp_manual.iter_content(chunk_size=1024))
+    client.recycle_session()
+    assert client.session_recycles == 2
+    assert client_closed_count == 2
+    resp_manual.close()
+    assert client.session_recycles == 2
+    assert client_closed_count == 2
 
     # Exception mapping parity with requests:
     # 1) HTTPStatusError via raise_for_status -> requests.HTTPError
@@ -838,8 +858,10 @@ def test_host_client_http2_single_connection_rst_stream_and_error_mapping(monkey
     with pytest.raises(requests.HTTPError):
         resp_err.raise_for_status()
     resp_err.close()
+    assert client.session_recycles == 3
+    assert client_closed_count == 3
 
-    # 2) RemoteProtocolError mid-stream -> ChunkedEncodingError
+    # 2) RemoteProtocolError mid-stream -> ChunkedEncodingError (+ auto-recycle)
     stream_behavior.append(
         FakeStreamCM(FakeStreamResponse(iter_exc=FakeRemoteProtocolError("rst stream")))
     )
@@ -847,6 +869,8 @@ def test_host_client_http2_single_connection_rst_stream_and_error_mapping(monkey
     with pytest.raises(requests.exceptions.ChunkedEncodingError):
         list(resp_drop.iter_content(chunk_size=1024))
     resp_drop.close()
+    assert client.session_recycles == 4
+    assert client_closed_count == 4
 
     # 3) TimeoutException on connect/stream -> requests.Timeout
     stream_behavior.append(FakeTimeoutException("timed out"))
@@ -859,4 +883,120 @@ def test_host_client_http2_single_connection_rst_stream_and_error_mapping(monkey
         client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
 
     client._session.close()  # noqa: SLF001
+    assert client_closed_count == 5
+
+
+def test_host_client_http2_recycles_on_5xx_and_timeout_retry(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from crawler import http as crawler_http
+
+    client_closed_count = 0
+
+    class FakeHTTPStatusError(Exception):
+        pass
+
+    class FakeTransportError(Exception):
+        pass
+
+    class FakeTimeoutException(FakeTransportError):
+        pass
+
+    class FakeRemoteProtocolError(FakeTransportError):
+        pass
+
+    class FakeReadError(FakeTransportError):
+        pass
+
+    class FakeStreamError(FakeTransportError):
+        pass
+
+    class FakeLimits:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class FakeTimeout:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class FakeResp:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+            self.headers = {"X-Cache": "MISS", "X-Served-By": "cache-sin"}
+            self.http_version = "HTTP/2"
+
+        def iter_raw(self, chunk_size: int = 8192):
+            yield b"ok"
+
+    class FakeStreamCM:
+        def __init__(self, resp: FakeResp) -> None:
+            self._resp = resp
+
+        def __enter__(self) -> FakeResp:
+            return self._resp
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            pass
+
+    stream_actions: list[object] = [
+        FakeStreamCM(FakeResp(503)),
+        FakeStreamCM(FakeResp(200)),
+        FakeTimeoutException("timed out"),
+        FakeStreamCM(FakeResp(200)),
+    ]
+
+    class FakeHttpxClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def stream(self, _method: str, _url: str, **_kwargs: object):
+            action = stream_actions.pop(0)
+            if isinstance(action, Exception):
+                raise action
+            return action
+
+        def close(self) -> None:
+            nonlocal client_closed_count
+            client_closed_count += 1
+
+    fake_httpx = SimpleNamespace(
+        Limits=FakeLimits,
+        Timeout=FakeTimeout,
+        Client=FakeHttpxClient,
+        HTTPStatusError=FakeHTTPStatusError,
+        TransportError=FakeTransportError,
+        TimeoutException=FakeTimeoutException,
+        RemoteProtocolError=FakeRemoteProtocolError,
+        ReadError=FakeReadError,
+        StreamError=FakeStreamError,
+    )
+    monkeypatch.setattr(crawler_http, "_import_httpx_http2", lambda: fake_httpx)
+
+    sleeps: list[float] = []
+    cfg = Config(
+        use_http2=True,
+        arxiv_min_interval=0.0,
+        arxiv_min_idle_gap=0.0,
+        max_retries=1,
+    )
+    client = HostClient(
+        "https://export.arxiv.org",
+        RateLimiter(0.0, sleep=sleeps.append),
+        cfg,
+    )
+
+    resp_after_5xx = client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
+    assert resp_after_5xx.status_code == 200
+    assert list(resp_after_5xx.iter_content(chunk_size=1024)) == [b"ok"]
+    resp_after_5xx.close()
+    assert client.session_recycles == 1
     assert client_closed_count == 1
+
+    resp_after_timeout = client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
+    assert resp_after_timeout.status_code == 200
+    assert list(resp_after_timeout.iter_content(chunk_size=1024)) == [b"ok"]
+    resp_after_timeout.close()
+    assert client.session_recycles == 2
+    assert client_closed_count == 2
+    client._session.close()  # noqa: SLF001
+    assert client_closed_count == 3

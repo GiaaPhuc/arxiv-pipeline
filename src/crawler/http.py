@@ -109,12 +109,18 @@ class _HttpxResponseAdapter:
         self._httpx = httpx_mod
         self._inner = response
         self._stream_cm = stream_cm
+        self._stream_exhausted: bool = stream_cm is None
         self._closed = False
         self.status_code: int = int(response.status_code)
         self.headers = response.headers
         self.url: str = str(getattr(response, "url", ""))
         raw_ver = getattr(response, "http_version", None)
         self.http_version: str = raw_ver if isinstance(raw_ver, str) and raw_ver else "HTTP/2"
+
+    @property
+    def needs_session_recycle(self) -> bool:
+        """True when a streaming HTTP/2 body was not consumed to clean EOF."""
+        return self._stream_cm is not None and not self._stream_exhausted
 
     @property
     def content(self) -> bytes:
@@ -139,6 +145,7 @@ class _HttpxResponseAdapter:
             for chunk in self._inner.iter_raw(chunk_size=chunk_size):
                 if chunk:
                     yield chunk
+            self._stream_exhausted = True
         except self._httpx.TimeoutException as exc:
             raise requests.exceptions.Timeout(str(exc)) from exc
         except (
@@ -680,15 +687,18 @@ class HostClient:
             handoff = False
             try:
                 self._log_request("GET", url)
+                opened_session = self._session
                 t0 = clock()
                 try:
-                    response = self._session.get(url, **kwargs)
+                    response = opened_session.get(url, **kwargs)
                 except (requests.ConnectionError, requests.Timeout) as exc:
                     self._requests_since_recycle += 1
                     self.note_stream_break()
                     # Transient network failure: back off and retry within the budget.
                     if attempt >= self._config.max_retries:
                         raise
+                    if self.using_http2:
+                        self.recycle_session()
                     logger.warning("GET %s failed (%s); retry %d", url, type(exc).__name__, attempt)
                     self._sleep_for_retry(attempt)
                     continue
@@ -709,13 +719,26 @@ class HostClient:
                 self._requests_since_recycle += 1
                 self._update_thermal_on_response(response.status_code, header_elapsed)
                 self._log_request("GET", url, response.status_code)
+
+                def _on_stream_close(
+                    resp: Any = response,
+                    sess: Any = opened_session,
+                ) -> None:
+                    if (
+                        getattr(resp, "needs_session_recycle", False) is True
+                        and self._session is sess
+                    ):
+                        self.recycle_session()
+                    else:
+                        self._maybe_recycle_after_request()
+
                 if response.status_code in _STOP_STATUSES:
                     if stream:
                         handoff = True
                         return _StreamResponse(
                             response,
                             self.limiter,
-                            on_close=self._maybe_recycle_after_request,
+                            on_close=_on_stream_close,
                         )
                     return response
                 if (
@@ -723,6 +746,11 @@ class HostClient:
                     and attempt < self._config.max_retries
                 ):
                     response.close()
+                    if (
+                        getattr(response, "needs_session_recycle", False) is True
+                        and self._session is opened_session
+                    ):
+                        self.recycle_session()
                     self._sleep_for_retry(attempt)
                     continue
                 if stream:
@@ -730,7 +758,7 @@ class HostClient:
                     return _StreamResponse(
                         response,
                         self.limiter,
-                        on_close=self._maybe_recycle_after_request,
+                        on_close=_on_stream_close,
                     )
                 return response
             finally:

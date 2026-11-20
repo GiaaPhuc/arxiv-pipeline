@@ -20,6 +20,8 @@ from itertools import chain, islice
 from pathlib import Path
 from typing import Any
 
+import requests
+
 if not __package__:
     _here = Path(__file__).resolve()
     sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != _here.parent]
@@ -31,11 +33,13 @@ from crawler.config import Config  # noqa: E402
 from crawler.http import HostClient, make_arxiv_client, parse_cdn_headers  # noqa: E402
 from crawler.manifest import atomic_write  # noqa: E402
 from crawler.source import (  # noqa: E402
+    _content_length_bytes,
     _early_abort_content_type_magic,
     _response_http_version,
 )
 
 _DEFAULT_PROBE_MAX_BYTES = 4 * 1024 * 1024
+_DEFAULT_PROBE_TIMEOUT: tuple[float, float] = (10.0, 20.0)
 _MIN_SPEED_SAMPLE_BYTES = 4096
 
 
@@ -125,9 +129,16 @@ def score_preflight_samples(samples: list[ProbeSample]) -> PreflightReport:
         est_hours = 7.8
 
     ttfb_ok = miss_count == 0 or miss_ttfb_median_ms <= 600.0
+    failed_probes = sum(1 for s in samples if not 200 <= s.http_status < 300)
     if not ok_samples:
         grade = "C"
         recommendation = "Preflight probes failed — check connectivity or retry shortly."
+    elif samples and failed_probes > 0 and len(ok_samples) * 2 < len(samples):
+        grade = "C"
+        recommendation = (
+            f"Preflight probes had timeouts/errors ({failed_probes}/{len(samples)} failed) — "
+            "on Colab, Disconnect and delete runtime for a cleaner VM."
+        )
     elif est_hours <= 8.5 and ttfb_ok:
         grade = "A"
         recommendation = "Excellent — start 5000-ID crawl immediately."
@@ -173,8 +184,21 @@ def run_preflight(
         arxiv_id = ids.split_version(ids.normalize_id(raw_id))[0]
         path = f"/src/{arxiv_id}v1"
         t_start = clock_fn()
-        response = client.get(path, stream=True)
+        session_before = getattr(client, "_session", None)
+        response: Any = None
+        ttfb = 0.0
+        cache_status = "UNKNOWN"
+        served_by = ""
+        http_version = "HTTP/2" if bool(getattr(client, "using_http2", False)) else "HTTP/1.1"
+        wire_bytes = 0
+        t_body: float | None = None
         try:
+            response = client.get(
+                path,
+                stream=True,
+                headers={"Range": f"bytes=0-{byte_cap - 1}"},
+                timeout=_DEFAULT_PROBE_TIMEOUT,
+            )
             raw_hdr = getattr(client, "last_header_elapsed", None)
             ttfb = (
                 max(float(raw_hdr), 0.0)
@@ -218,13 +242,14 @@ def run_preflight(
                 )
                 continue
 
-            wire_bytes = 0
+            content_len = _content_length_bytes(response)
+            bounded_body = content_len is not None and content_len <= byte_cap
             t_body = clock_fn()
             for chunk in response.iter_content(chunk_size=65536):
                 if not chunk:
                     continue
                 wire_bytes += len(chunk)
-                if wire_bytes >= byte_cap:
+                if not bounded_body and wire_bytes >= byte_cap:
                     break
             body_seconds = max(clock_fn() - t_body, 0.0)
             samples.append(
@@ -240,8 +265,35 @@ def run_preflight(
                     body_seconds=body_seconds,
                 )
             )
+        except requests.RequestException as exc:
+            body_seconds = max(clock_fn() - t_body, 0.0) if t_body is not None else 0.0
+            if response is not None:
+                response.close()
+                response = None
+            if hasattr(client, "recycle_session") and (
+                session_before is None or getattr(client, "_session", None) is session_before
+            ):
+                client.recycle_session()
+            print(
+                f"[preflight] probe {arxiv_id} failed ({type(exc).__name__}: {exc}); continuing",
+                file=sys.stderr,
+            )
+            samples.append(
+                ProbeSample(
+                    arxiv_id=arxiv_id,
+                    version=1,
+                    http_status=0,
+                    http_version=http_version,
+                    cache_status=cache_status,
+                    served_by=served_by,
+                    ttfb_seconds=ttfb,
+                    wire_bytes=wire_bytes,
+                    body_seconds=body_seconds,
+                )
+            )
         finally:
-            response.close()
+            if response is not None:
+                response.close()
 
     return score_preflight_samples(samples)
 
@@ -344,7 +396,10 @@ def _select_probe_ids(args: argparse.Namespace, count: int) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     count = int(args.count) if args.count is not None else (4 if args.mode == "preflight" else 10)
-    config = Config.from_env(use_http2=bool(args.http2))
+    overrides: dict[str, Any] = {"max_retries": 1}
+    if args.http2:
+        overrides["use_http2"] = True
+    config = Config.from_env(**overrides)
     if not config.contact:
         print(
             "error: set CRAWLER_CONTACT (e-mail or URL for the User-Agent) before probing",

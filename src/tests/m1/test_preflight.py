@@ -152,13 +152,16 @@ def test_run_preflight_byte_cap_and_pdf_early_reject() -> None:
         "/src/2408.00002v1": TarResp(),
     }
 
+    seen_calls: list[dict[str, object]] = []
+
     class FakeClient:
         using_http2 = True
         last_header_elapsed = 0.15
         last_http_version = "HTTP/2"
         limiter = SimpleNamespace(_clock=lambda: next(clock_ticks, 2.0))
 
-        def get(self, path: str, stream: bool = True):
+        def get(self, path: str, stream: bool = True, **kwargs: object):
+            seen_calls.append({"path": path, "stream": stream, **kwargs})
             return responses_by_path[path]
 
     report = preflight.run_preflight(
@@ -167,6 +170,10 @@ def test_run_preflight_byte_cap_and_pdf_early_reject() -> None:
         max_bytes_per_probe=256 * 1024,
     )
     assert len(report.samples) == 2
+    assert len(seen_calls) == 2
+    expected_range = f"bytes=0-{256 * 1024 - 1}"
+    assert all(c["headers"] == {"Range": expected_range} for c in seen_calls)
+    assert all(c["timeout"] == (10.0, 20.0) for c in seen_calls)
     s_pdf, s_tar = report.samples
     assert s_pdf.early_rejected_by_header is True
     assert s_pdf.wire_bytes == 0
@@ -217,7 +224,7 @@ def test_run_ab_transport_benchmark_disjoint_split_and_json_output(tmp_path) -> 
             limiter = SimpleNamespace(_clock=clock)
             _session = SimpleNamespace(close=lambda: None)
 
-            def get(self, path: str, stream: bool = True):
+            def get(self, path: str, stream: bool = True, **_kwargs: object):
                 seen_paths["h2" if is_h2 else "h1"].append(path)
                 return BenchResp()
 
@@ -277,7 +284,7 @@ def test_preflight_cli_main_preflight_and_ab(tmp_path, monkeypatch, capsys) -> N
             last_http_version="HTTP/2" if is_h2 else "HTTP/1.1",
             limiter=SimpleNamespace(_clock=clock),
             _session=SimpleNamespace(close=lambda: None),
-            get=lambda _path, stream=True: CliResp(),
+            get=lambda _path, stream=True, **_kwargs: CliResp(),
         )
 
     monkeypatch.setattr(preflight, "make_arxiv_client", fake_factory)
@@ -319,3 +326,61 @@ def test_preflight_cli_main_preflight_and_ab(tmp_path, monkeypatch, capsys) -> N
     out_ab = capsys.readouterr().out
     assert "[A/B Benchmark]" in out_ab
     assert ab_out.is_file()
+
+
+def test_run_preflight_handles_read_timeout_gracefully(capsys) -> None:
+    import requests
+
+    closed_count = 0
+    recycled_count = 0
+    ticks = [0.0]
+
+    def clock() -> float:
+        val = ticks[0]
+        ticks[0] += 0.25
+        return val
+
+    class TimeoutResp:
+        status_code = 200
+        http_version = "HTTP/2"
+        headers = {
+            "Content-Type": "application/x-eprint-tar",
+            "Content-Length": "4194304",
+            "X-Cache": "MISS",
+            "X-Served-By": "cache-sin",
+        }
+
+        def iter_content(self, chunk_size: int = 65536):
+            yield b"a" * 65536
+            raise requests.exceptions.Timeout("The read operation timed out")
+
+        def close(self) -> None:
+            nonlocal closed_count
+            closed_count += 1
+
+    class FlakyClient:
+        using_http2 = True
+        last_header_elapsed = 0.20
+        last_http_version = "HTTP/2"
+        limiter = SimpleNamespace(_clock=clock)
+
+        def get(self, _path: str, stream: bool = True, **_kwargs: object):
+            return TimeoutResp()
+
+        def recycle_session(self) -> None:
+            nonlocal recycled_count
+            recycled_count += 1
+
+    report = preflight.run_preflight(
+        FlakyClient(),  # type: ignore[arg-type]
+        ["2408.00001", "2408.00002"],
+        max_bytes_per_probe=256 * 1024,
+    )
+    err = capsys.readouterr().err
+    assert "failed" in err
+    assert report.grade == "C"
+    assert len(report.samples) == 2
+    assert all(s.http_status == 0 for s in report.samples)
+    assert all(s.wire_bytes == 65536 for s in report.samples)
+    assert recycled_count == 2
+    assert closed_count == 2
