@@ -108,6 +108,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="extract tar.gz/gzip streams in-flight directly to .vK.part/tex (O(1) RAM)",
     )
+    p.add_argument(
+        "--no-traffic-shaping",
+        action="store_true",
+        help="disable v3.17 heavy interleaving & byte-budget governor",
+    )
     return p.parse_args(argv)
 
 
@@ -162,6 +167,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["use_http2"] = True
     if args.in_flight_extract:
         overrides["in_flight_extract"] = True
+    if args.no_traffic_shaping:
+        overrides["traffic_shaping"] = False
     config = Config.from_env(**overrides)
     try:
         all_ids = list(_expand(args.ranges, args.limit))
@@ -177,7 +184,8 @@ def main(argv: list[str] | None = None) -> int:
             f"backup: every {config.backup_every_ids} ids -> {config.backup_dir or '-'}; "
             f"bib fallback: {config.enable_bib_fallback}; S2 batch size: {config.s2_batch_size}; "
             f"OAI dates: {config.enable_oai_dates}; max stream mbps: {config.max_stream_mbps}; "
-            f"http2: {config.use_http2}; in-flight extract: {config.in_flight_extract}"
+            f"http2: {config.use_http2}; in-flight extract: {config.in_flight_extract}; "
+            f"traffic shaping: {config.traffic_shaping}"
         )
         return 0
     if not config.contact:

@@ -119,18 +119,25 @@ _EST_VERSIONS_PER_5000_IDS = 8265.0  # measured V_bar = 1.653 versions/paper acr
 _QUEUE_TIMEOUT_429_SECONDS = 9.0  # TTFB >= 9s before 429 indicates origin queue timeout
 _HIT_THROTTLE_WARN_MBPS = 3.0  # Fastly RAM HIT < 3.0 MiB/s signals genuine edge/IP throttling
 _HIT_THROTTLE_MIN_BYTES = 20 * 1024 * 1024  # min HIT volume before engaging defensive soft-pacing
+_HIT_THROTTLE_RECOVERY_MBPS = (
+    2.0  # v3.17.1: only severe HIT < 2.0 MiB/s counts toward 300s recovery
+)
 _HIT_THROTTLE_RECOVERY_WINDOWS = 2  # v3.17: 2 consecutive throttled HIT windows trigger cooldown
 _HIT_THROTTLE_RECOVERY_COOLDOWN_SECONDS = 300.0  # v3.17: 5-min breather to flush edge throttle
+_HIT_THROTTLE_MAX_RECOVERY_COOLDOWNS = 3  # v3.17.1: hard cap on 300s recovery sleeps per session
 _SOFT_PACING_FLOOR_SECONDS = 3.80  # gentle Start-to-Start floor under genuine edge throttling
 _SOFT_PACING_CAP_SECONDS = 4.50
+_SOFT_PACING_HOLD_REQUESTS = 50  # v3.17.1: hold soft-pacing before RateLimiter steps back down
 _DECLUSTER_MIN_BLOCK = 16  # v3.17: keep small test batches untouched, decluster >= 16 papers
 _HEAVY_INTERLEAVE_THRESHOLD_BYTES = 25 * 1024 * 1024  # v3.17: interleave remaining v2..vN >= 25 MiB
 _HEAVY_INTERLEAVE_GAP_VERSIONS = 15  # v3.17: interleave ~15 light versions between heavy ones
+_HEAVY_INTERLEAVE_MIN_GAP_UNDER_PRESSURE = 3  # v3.17.1: min light gap even when heavy queue is full
 _HEAVY_INTERLEAVE_MAX_QUEUE = 32  # v3.17: bounded interleave buffer (never hoard until end of run)
 _BYTE_BUDGET_WINDOW_SECONDS = 180.0  # v3.17: 3-minute sliding byte-budget window
 _BYTE_BUDGET_SUSTAINED_BPS = 2.0 * 1024 * 1024  # v3.17: 2.0 MiB/s sustained safe refill rate
 _BYTE_BUDGET_YELLOW_BYTES = 220 * 1024 * 1024  # v3.17: pause heavy drain when window >= 220 MiB
 _BYTE_BUDGET_RED_BYTES = 360 * 1024 * 1024  # v3.17: emergency breather when window > 360 MiB
+_BYTE_BUDGET_MIN_TRIGGER_BYTES = 1 * 1024 * 1024  # v3.17.1: small/0-B reqs never trigger breather
 _BYTE_BUDGET_MIN_BREATHER_SECONDS = 10.0  # v3.17: minimum recovery sleep when exceeding red cap
 _BYTE_BUDGET_MAX_BREATHER_SECONDS = 60.0  # v3.17: hard cap on sliding-window recovery sleep
 _FINAL_STATUS_NAMES = frozenset(s.value for s in Status if s.is_final)
@@ -206,6 +213,7 @@ def _record_and_check_byte_budget(
     if (
         not run.config.traffic_shaping
         or run.config.arxiv_min_interval < 3.0
+        or wire_bytes < _BYTE_BUDGET_MIN_TRIGGER_BYTES
         or window_bytes <= _BYTE_BUDGET_RED_BYTES
     ):
         return window_bytes, 0.0
@@ -215,6 +223,19 @@ def _record_and_check_byte_budget(
         _BYTE_BUDGET_MAX_BREATHER_SECONDS,
     )
     return window_bytes, round(breather, 2)
+
+
+def _debit_byte_budget(run: _Run, nbytes: int) -> None:
+    """Debit recovered byte budget from oldest samples after sleeping a breather (v3.17.1)."""
+    remaining = int(nbytes)
+    while remaining > 0 and run.byte_budget_window:
+        ts, sample_bytes = run.byte_budget_window[0]
+        if sample_bytes <= remaining:
+            run.byte_budget_window.popleft()
+            remaining -= sample_bytes
+        else:
+            run.byte_budget_window[0] = (ts, sample_bytes - remaining)
+            remaining = 0
 
 
 class StopCrawl(Exception):
@@ -363,6 +384,9 @@ class _Run:
     byte_budget_window: deque[tuple[float, int]] = field(default_factory=deque)
     consecutive_hit_throttle_windows: int = 0
     pending_throttle_cooldown_seconds: float = 0.0
+    pending_byte_budget_breather_seconds: float = 0.0
+    soft_pacing_hold_remaining: int = 0
+    hit_recovery_cap_warned: bool = False
     last_download_finished_at: float | None = None
     last_backup_signature: tuple[int, int] = (-1, -1)
     last_backup_at: float = 0.0
@@ -509,8 +533,11 @@ def _record_download_telemetry(
     served_by: str = "",
     http_version: str = "HTTP/1.1",
     early_rejected_by_header: bool = False,
-) -> None:
-    """Track wire-vs-wait, CDN HIT/MISS breakdown, and self-healing soft-pacing."""
+) -> bool:
+    """Track wire-vs-wait, CDN HIT/MISS breakdown, and self-healing soft-pacing.
+
+    Returns ``True`` when soft-pacing recommends recycling the HTTP session.
+    """
     wire_sec = max(float(ttfb), 0.0) + max(float(body_seconds), 0.0)
     body_sec = max(float(body_seconds), 0.0)
     nbytes = max(int(wire_bytes), 0)
@@ -567,15 +594,24 @@ def _record_download_telemetry(
         est_5000_h = avg_cycle * _EST_VERSIONS_PER_5000_IDS / 3600.0
 
         hit_samples = [s for s in samples if s[4] in {"HIT", "SHIELD_HIT"}]
+        edge_hit_samples = [s for s in samples if s[4] == "HIT"]
         miss_samples = [s for s in samples if s[4] == "MISS"]
         hit_count = len(hit_samples)
+        edge_hit_count = len(edge_hit_samples)
         miss_count = len(miss_samples)
         hit_bytes_win = sum(s[3] for s in hit_samples)
         hit_body_win = sum(s[2] for s in hit_samples)
+        edge_hit_bytes = sum(s[3] for s in edge_hit_samples)
+        edge_hit_body = sum(s[2] for s in edge_hit_samples)
         miss_bytes_win = sum(s[3] for s in miss_samples)
         miss_body_win = sum(s[2] for s in miss_samples)
         hit_mbps = (
             (hit_bytes_win / (1024 * 1024)) / max(hit_body_win, 0.001) if hit_count > 0 else 0.0
+        )
+        edge_hit_mbps = (
+            (edge_hit_bytes / (1024 * 1024)) / max(edge_hit_body, 0.001)
+            if edge_hit_count > 0
+            else 0.0
         )
         miss_mbps = (
             (miss_bytes_win / (1024 * 1024)) / max(miss_body_win, 0.001) if miss_count > 0 else 0.0
@@ -602,10 +638,11 @@ def _record_download_telemetry(
             proto,
             pop,
         )
+        needs_recycle = False
         if (
             run.config.arxiv_min_interval >= 3.0
-            and hit_bytes_win >= _HIT_THROTTLE_MIN_BYTES
-            and hit_mbps < _HIT_THROTTLE_WARN_MBPS
+            and edge_hit_bytes >= _HIT_THROTTLE_MIN_BYTES
+            and edge_hit_mbps < _HIT_THROTTLE_WARN_MBPS
         ):
             target = round(
                 min(
@@ -615,14 +652,18 @@ def _record_download_telemetry(
                 2,
             )
             run.arxiv.limiter.enter_ramp_up(start_interval=target)
+            run.soft_pacing_hold_remaining = _SOFT_PACING_HOLD_REQUESTS
             _inc(run, "defensive_soft_pacing_triggers")
-            run.arxiv.recycle_session()
-            run.consecutive_hit_throttle_windows += 1
+            needs_recycle = True
+            if edge_hit_mbps < _HIT_THROTTLE_RECOVERY_MBPS:
+                run.consecutive_hit_throttle_windows += 1
+            else:
+                run.consecutive_hit_throttle_windows = 0
             _diag(
                 run,
                 "defensive_soft_pacing",
-                hit_mbps=round(hit_mbps, 3),
-                hit_bytes=hit_bytes_win,
+                hit_mbps=round(edge_hit_mbps, 3),
+                hit_bytes=edge_hit_bytes,
                 miss_mbps=round(miss_mbps, 3),
                 target_interval=target,
                 consecutive_windows=run.consecutive_hit_throttle_windows,
@@ -631,11 +672,13 @@ def _record_download_telemetry(
             )
             logger.warning(
                 "Fastly edge HIT throughput degraded (%.2f MiB/s < %.1f MiB/s over %d MiB); "
-                "engaging defensive soft-pacing Start-to-Start %.2fs (pop=%s, window %d/%d)",
-                hit_mbps,
+                "engaging defensive soft-pacing Start-to-Start %.2fs for %d reqs "
+                "(pop=%s, recovery window %d/%d)",
+                edge_hit_mbps,
                 _HIT_THROTTLE_WARN_MBPS,
-                hit_bytes_win // (1024 * 1024),
+                edge_hit_bytes // (1024 * 1024),
                 target,
+                _SOFT_PACING_HOLD_REQUESTS,
                 pop,
                 run.consecutive_hit_throttle_windows,
                 _HIT_THROTTLE_RECOVERY_WINDOWS,
@@ -644,25 +687,39 @@ def _record_download_telemetry(
                 run.config.auto_resume_rate_limit
                 and run.consecutive_hit_throttle_windows >= _HIT_THROTTLE_RECOVERY_WINDOWS
             ):
-                run.pending_throttle_cooldown_seconds = _HIT_THROTTLE_RECOVERY_COOLDOWN_SECONDS
-                run.consecutive_hit_throttle_windows = 0
-                _diag(
-                    run,
-                    "hit_throttle_recovery_scheduled",
-                    hit_mbps=round(hit_mbps, 3),
-                    cooldown_seconds=_HIT_THROTTLE_RECOVERY_COOLDOWN_SECONDS,
-                    pop=pop,
-                    proto=proto,
-                )
-                logger.warning(
-                    "Fastly edge HIT remained throttled across %d windows; "
-                    "scheduling %.0fs recovery cooldown (pop=%s)",
-                    _HIT_THROTTLE_RECOVERY_WINDOWS,
-                    _HIT_THROTTLE_RECOVERY_COOLDOWN_SECONDS,
-                    pop,
-                )
+                with run.counters_lock:
+                    recovery_count = int(run.counters.get("hit_recovery_cooldowns", 0))
+                if recovery_count < _HIT_THROTTLE_MAX_RECOVERY_COOLDOWNS:
+                    run.pending_throttle_cooldown_seconds = _HIT_THROTTLE_RECOVERY_COOLDOWN_SECONDS
+                    run.consecutive_hit_throttle_windows = 0
+                    _diag(
+                        run,
+                        "hit_throttle_recovery_scheduled",
+                        hit_mbps=round(edge_hit_mbps, 3),
+                        cooldown_seconds=_HIT_THROTTLE_RECOVERY_COOLDOWN_SECONDS,
+                        pop=pop,
+                        proto=proto,
+                    )
+                    logger.warning(
+                        "Fastly edge HIT remained severely throttled (< %.1f MiB/s) across %d "
+                        "windows; scheduling %.0fs recovery cooldown (pop=%s)",
+                        _HIT_THROTTLE_RECOVERY_MBPS,
+                        _HIT_THROTTLE_RECOVERY_WINDOWS,
+                        _HIT_THROTTLE_RECOVERY_COOLDOWN_SECONDS,
+                        pop,
+                    )
+                else:
+                    run.consecutive_hit_throttle_windows = 0
+                    if not run.hit_recovery_cap_warned:
+                        run.hit_recovery_cap_warned = True
+                        logger.warning(
+                            "HIT recovery cap reached (%d/%d); soft-pacing only (pop=%s)",
+                            recovery_count,
+                            _HIT_THROTTLE_MAX_RECOVERY_COOLDOWNS,
+                            pop,
+                        )
         else:
-            if hit_bytes_win >= _HIT_THROTTLE_MIN_BYTES:
+            if edge_hit_bytes >= _HIT_THROTTLE_MIN_BYTES:
                 run.consecutive_hit_throttle_windows = 0
             if (
                 run.config.arxiv_min_interval >= 3.0
@@ -682,6 +739,8 @@ def _record_download_telemetry(
                     miss_mbps,
                     bottleneck_note,
                 )
+        return needs_recycle
+    return False
 
 
 def _post_process_arxiv_2xx(
@@ -701,6 +760,9 @@ def _post_process_arxiv_2xx(
     early_rejected_by_header: bool = False,
 ) -> None:
     """Common post-download 2xx accounting, adaptive recovery, breather, and socket recycle."""
+    hold = run.soft_pacing_hold_remaining > 0
+    if hold:
+        run.soft_pacing_hold_remaining -= 1
     run.consecutive_arxiv_429 = 0
     run.consecutive_stream_failures = 0
     run.arxiv.thermal_score = 0.0
@@ -709,8 +771,9 @@ def _post_process_arxiv_2xx(
         if run.arxiv_ok_since_429 >= _ARXIV_OK_STREAK_TO_DECAY:
             run.arxiv_429_streak -= 1
             run.arxiv_ok_since_429 = 0
-            run.arxiv.limiter.note_success()
-    else:
+            if not hold:
+                run.arxiv.limiter.note_success()
+    elif not hold:
         run.arxiv.limiter.note_success()
 
     header_elapsed = float(getattr(run.arxiv, "last_header_elapsed", 0.0) or 0.0)
@@ -721,7 +784,7 @@ def _post_process_arxiv_2xx(
     )
     run.last_download_finished_at = req_finished
     run.last_version_wire_bytes = max(int(wire_bytes), 0)
-    _record_download_telemetry(
+    needs_recycle = _record_download_telemetry(
         run,
         wire_bytes=wire_bytes,
         ttfb=header_elapsed,
@@ -748,9 +811,9 @@ def _post_process_arxiv_2xx(
             arxiv_id,
             version,
         )
-        run.arxiv.recycle_session()
+        needs_recycle = True
     elif wire_bytes >= _GIANT_RECYCLE_BYTES:
-        run.arxiv.recycle_session()
+        needs_recycle = True
     if breather > 0.0:
         run.arxiv.limiter.schedule_retry_backoff(breather)
     if range_resumed:
@@ -776,7 +839,7 @@ def _post_process_arxiv_2xx(
         wire_bytes=wire_bytes,
     )
     if budget_breather > 0.0:
-        run.arxiv.recycle_session()
+        needs_recycle = True
         _inc(run, "byte_budget_breathers")
         _inc(run, "arxiv_cooldown_seconds", budget_breather)
         _diag(
@@ -789,7 +852,7 @@ def _post_process_arxiv_2xx(
         )
         logger.warning(
             "sliding byte-budget cap exceeded (%d MiB in %.0fs > %d MiB); "
-            "recycling session and sleeping %.1fs recovery breather (%sv%d)",
+            "recycling session and scheduling %.1fs recovery breather (%sv%d)",
             window_bytes // (1024 * 1024),
             _BYTE_BUDGET_WINDOW_SECONDS,
             _BYTE_BUDGET_RED_BYTES // (1024 * 1024),
@@ -797,8 +860,22 @@ def _post_process_arxiv_2xx(
             arxiv_id,
             version,
         )
-        _sleep_interruptible(run.stop, budget_breather)
-        run.last_download_finished_at = None
+        run.pending_byte_budget_breather_seconds = max(
+            run.pending_byte_budget_breather_seconds, budget_breather
+        )
+    if needs_recycle:
+        run.arxiv.recycle_session()
+
+
+def _maybe_run_byte_budget_breather(run: _Run) -> None:
+    """Sleep scheduled byte-budget breather AFTER extract job is enqueued (v3.17.1)."""
+    breather = run.pending_byte_budget_breather_seconds
+    if breather <= 0.0:
+        return
+    run.pending_byte_budget_breather_seconds = 0.0
+    _sleep_interruptible(run.stop, breather)
+    _debit_byte_budget(run, int(breather * _BYTE_BUDGET_SUSTAINED_BPS))
+    run.last_download_finished_at = None
 
 
 def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResult:
@@ -1258,6 +1335,7 @@ def _download_and_enqueue_version(
         run.versions_since_heavy = 0
     else:
         run.versions_since_heavy += 1
+    _maybe_run_byte_budget_breather(run)
     return wire_bytes
 
 
@@ -1708,6 +1786,7 @@ def _handle_auto_resume_cooldown(
     retry_after: float | None = None,
     proactive_seconds: float | None = None,
     stream_cooldown_seconds: float | None = None,
+    recovery_seconds: float | None = None,
 ) -> None:
     """Drain extract queue, start background backup if changed, and sleep cooldown."""
     run.proactive_cooldown_papers = 0
@@ -1759,7 +1838,21 @@ def _handle_auto_resume_cooldown(
             )
             run.checkpoint_thread = thread
             thread.start()
-    if proactive_seconds is not None:
+    if recovery_seconds is not None:
+        cooldown = max(float(recovery_seconds), 0.0)
+        _inc(run, "arxiv_cooldown_seconds", cooldown)
+        _diag(
+            run,
+            "hit_recovery_cooldown",
+            context=context,
+            cooldown_seconds=cooldown,
+        )
+        logger.warning(
+            "Fastly HIT recovery cooldown %s: sleeping %.0fs",
+            context,
+            cooldown,
+        )
+    elif proactive_seconds is not None:
         cooldown = max(float(proactive_seconds), 0.0)
         run.arxiv.limiter.reset_interval()
         _inc(run, "arxiv_thermal_cooldowns")
@@ -1827,6 +1920,7 @@ def _handle_auto_resume_cooldown(
     run.consecutive_arxiv_429 = 0
     run.consecutive_stream_failures = 0
     run.last_download_finished_at = None
+    run.pending_byte_budget_breather_seconds = 0.0
     run.arxiv.limiter._retry_backoff = 0.0
 
 
@@ -2034,6 +2128,7 @@ def _flush_metrics(run: _Run, *, final_resources: dict[str, float] | None = None
         counters_snapshot["s2_min_interval"] = float(run.config.s2_min_interval)
         counters_snapshot["in_flight_extract"] = bool(run.config.in_flight_extract)
         counters_snapshot["use_http2"] = bool(run.config.use_http2)
+        counters_snapshot["traffic_shaping"] = bool(run.config.traffic_shaping)
         return metrics.flush_run(
             run.metrics_path,
             run.base_metrics,
@@ -2106,11 +2201,32 @@ def _should_drain_one_heavy(run: _Run) -> bool:
     """Return True when the interleaved heavy-version queue may safely pop one job."""
     if not run.heavy_interleave_queue or run.stop.is_set():
         return False
+    window = _rolling_byte_budget_bytes(run, now=time.monotonic())
     if len(run.heavy_interleave_queue) >= _HEAVY_INTERLEAVE_MAX_QUEUE:
-        return True
+        return (
+            run.versions_since_heavy >= _HEAVY_INTERLEAVE_MIN_GAP_UNDER_PRESSURE
+            and window < _BYTE_BUDGET_RED_BYTES
+        )
     if run.versions_since_heavy < _HEAVY_INTERLEAVE_GAP_VERSIONS:
         return False
-    return _rolling_byte_budget_bytes(run, now=time.monotonic()) < _BYTE_BUDGET_YELLOW_BYTES
+    return window < _BYTE_BUDGET_YELLOW_BYTES
+
+
+def _round_robin_by_paper(jobs: Iterable[_HeavyVersionJob]) -> deque[_HeavyVersionJob]:
+    """Interleave queued versions across distinct papers round-robin (v3.17.1)."""
+    buckets: dict[str, deque[_HeavyVersionJob]] = {}
+    for job in jobs:
+        buckets.setdefault(job.paper.arxiv_id, deque()).append(job)
+    out: deque[_HeavyVersionJob] = deque()
+    active = list(buckets.values())
+    while active:
+        next_active: list[deque[_HeavyVersionJob]] = []
+        for bucket in active:
+            out.append(bucket.popleft())
+            if bucket:
+                next_active.append(bucket)
+        active = next_active
+    return out
 
 
 def _handle_defer_rate_limit(run: _Run, exc: _DeferRateLimit) -> None:
@@ -2145,8 +2261,10 @@ def _maybe_run_hit_recovery_cooldown(run: _Run) -> None:
         run,
         "degraded Fastly edge HIT recovery",
         0,
-        proactive_seconds=cooldown,
+        recovery_seconds=cooldown,
     )
+    run.arxiv.limiter.enter_ramp_up(start_interval=_SOFT_PACING_FLOOR_SECONDS)
+    run.soft_pacing_hold_remaining = _SOFT_PACING_HOLD_REQUESTS
 
 
 def _drain_heavy_queue(
@@ -2156,6 +2274,8 @@ def _drain_heavy_queue(
     drain_all: bool = False,
 ) -> bool:
     """Drain one ready interleaved heavy version (or all pending ones at end of pass)."""
+    if drain_all and run.heavy_interleave_queue:
+        run.heavy_interleave_queue = _round_robin_by_paper(run.heavy_interleave_queue)
     drained_any = False
     while run.heavy_interleave_queue and not run.stop.is_set():
         if not drain_all and not _should_drain_one_heavy(run):
@@ -2173,6 +2293,7 @@ def _drain_heavy_queue(
             run.versions_since_heavy = 0
             _maybe_run_hit_recovery_cooldown(run)
         except _DeferRateLimit as exc:
+            run.versions_since_heavy = 0
             deferred_ids.append(hjob.paper.arxiv_id)
             run.heavy_interleave_queue = deque(
                 qjob

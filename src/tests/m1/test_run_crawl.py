@@ -192,3 +192,38 @@ def test_setup_logging_quiets_httpx_and_traffic_shaping_env_toggle(tmp_path, mon
     assert Config.from_env().traffic_shaping is True
     monkeypatch.setenv("CRAWLER_TRAFFIC_SHAPING", "0")
     assert Config.from_env().traffic_shaping is False
+
+
+def test_no_traffic_shaping_cli_flag_dry_run_and_forward(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("CRAWLER_CONTACT", "test@example.com")
+    dry_args = [
+        "--ranges",
+        str(RANGES),
+        "--limit",
+        "1",
+        "--data-dir",
+        str(tmp_path / "d"),
+        "--no-traffic-shaping",
+        "--dry-run",
+    ]
+    assert run_crawl.main(dry_args) == 0
+    assert "traffic shaping: False" in capsys.readouterr().out
+
+    captured: dict[str, bool] = {}
+
+    def fake_run(_ids, config):
+        captured["traffic_shaping"] = config.traffic_shaping
+        return {"ok": 1}
+
+    monkeypatch.setattr(pipeline, "run", fake_run)
+    run_args = [
+        "--ranges",
+        str(RANGES),
+        "--limit",
+        "1",
+        "--data-dir",
+        str(tmp_path / "d2"),
+        "--no-traffic-shaping",
+    ]
+    assert run_crawl.main(run_args) == 0
+    assert captured == {"traffic_shaping": False}

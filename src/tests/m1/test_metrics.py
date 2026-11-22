@@ -443,6 +443,7 @@ def test_merge_with_base_accumulates_traffic_shaping_v317_fields() -> None:
         },
     )
     assert s1["sessions"][0]["traffic_shaping"] == {
+        "enabled": False,
         "heavy_versions_interleaved": 4,
         "byte_budget_breathers": 1,
         "hit_recovery_cooldowns": 1,
@@ -452,6 +453,7 @@ def test_merge_with_base_accumulates_traffic_shaping_v317_fields() -> None:
         {"download": 4.0, "extract": 0.5},
         {"ram_peak_bytes": 600.0, "ram_mean_bytes": 300.0, "ram_samples": 2.0},
         crawl_counters={
+            "traffic_shaping": True,
             "heavy_versions_interleaved": 3,
             "byte_budget_breathers": 2,
             "hit_recovery_cooldowns": 0,
@@ -461,6 +463,7 @@ def test_merge_with_base_accumulates_traffic_shaping_v317_fields() -> None:
     assert s2["arxiv"]["byte_budget_breathers"] == 3
     assert s2["arxiv"]["hit_recovery_cooldowns"] == 1
     assert s2["sessions"][1]["traffic_shaping"] == {
+        "enabled": True,
         "heavy_versions_interleaved": 3,
         "byte_budget_breathers": 2,
         "hit_recovery_cooldowns": 0,

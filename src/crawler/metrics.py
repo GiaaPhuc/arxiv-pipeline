@@ -514,6 +514,7 @@ def merge_with_base(
             "defensive_soft_pacing_triggers": sess_soft_pacing,
         },
         "traffic_shaping": {
+            "enabled": bool(s2_in.get("traffic_shaping", False)),
             "heavy_versions_interleaved": sess_heavy_interleaved,
             "byte_budget_breathers": sess_budget_breathers,
             "hit_recovery_cooldowns": sess_hit_recoveries,
