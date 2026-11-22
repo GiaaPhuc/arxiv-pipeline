@@ -2763,3 +2763,73 @@ def test_v3171_single_recycle_per_request(tmp_path):
         assert dummy_run.pending_byte_budget_breather_seconds > 0.0
     finally:
         manifest.close()
+
+
+def test_v3171_throughput_log_separates_edge_hit_and_shield_hit(tmp_path, caplog):
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=3.05,
+        auto_resume_rate_limit=True,
+    )
+    manifest = pipeline.Manifest(tmp_path / "data" / "manifest.sqlite")
+    dummy_run = pipeline._Run(
+        config=cfg,
+        manifest=manifest,
+        arxiv=pipeline.make_arxiv_client(cfg),
+        s2=pipeline.make_s2_client(cfg),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    try:
+        caplog.clear()
+        with caplog.at_level("INFO", logger="crawler.pipeline"):
+            for _ in range(50):
+                pipeline._record_download_telemetry(
+                    dummy_run,
+                    wire_bytes=2 * 1024 * 1024,
+                    ttfb=0.05,
+                    body_seconds=0.80,  # 2.50 MiB/s pure edge HIT
+                    cycle_seconds=3.10,
+                    cache_status="HIT",
+                    served_by="cache-iad",
+                    http_version="HTTP/2",
+                )
+            for _ in range(50):
+                pipeline._record_download_telemetry(
+                    dummy_run,
+                    wire_bytes=2 * 1024 * 1024,
+                    ttfb=0.15,
+                    body_seconds=0.20,  # 10.00 MiB/s SHIELD_HIT
+                    cycle_seconds=3.10,
+                    cache_status="SHIELD_HIT",
+                    served_by="cache-iad",
+                    http_version="HTTP/2",
+                )
+        infos = [r.message for r in caplog.records if "throughput (last 100 reqs)" in r.message]
+        warns = [r.message for r in caplog.records if "engaging defensive soft-pacing" in r.message]
+        assert len(infos) == 1
+        assert "HIT=50% (2.50 MiB/s) | SHIELD=50% (10.00 MiB/s)" in infos[0]
+        assert len(warns) == 1
+        assert "2.50 MiB/s" in warns[0]
+        assert dummy_run.counters["defensive_soft_pacing_triggers"] == 1
+
+        caplog.clear()
+        with caplog.at_level("INFO", logger="crawler.pipeline"):
+            for _ in range(100):
+                pipeline._record_download_telemetry(
+                    dummy_run,
+                    wire_bytes=2 * 1024 * 1024,
+                    ttfb=0.15,
+                    body_seconds=1.50,  # 1.33 MiB/s slow SHIELD_HIT ignores HIT soft-pacing
+                    cycle_seconds=3.50,
+                    cache_status="SHIELD_HIT",
+                    served_by="cache-iad",
+                    http_version="HTTP/2",
+                )
+        infos = [r.message for r in caplog.records if "throughput (last 100 reqs)" in r.message]
+        assert len(infos) == 1
+        assert "HIT=0% (0.00 MiB/s) | SHIELD=100% (1.33 MiB/s)" in infos[0]
+        assert dummy_run.counters["defensive_soft_pacing_triggers"] == 1
+    finally:
+        manifest.close()

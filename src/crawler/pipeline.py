@@ -593,46 +593,55 @@ def _record_download_telemetry(
         avg_cycle = sum_cycle / n
         est_5000_h = avg_cycle * _EST_VERSIONS_PER_5000_IDS / 3600.0
 
-        hit_samples = [s for s in samples if s[4] in {"HIT", "SHIELD_HIT"}]
         edge_hit_samples = [s for s in samples if s[4] == "HIT"]
+        shield_hit_samples = [s for s in samples if s[4] == "SHIELD_HIT"]
         miss_samples = [s for s in samples if s[4] == "MISS"]
-        hit_count = len(hit_samples)
         edge_hit_count = len(edge_hit_samples)
+        shield_hit_count = len(shield_hit_samples)
         miss_count = len(miss_samples)
-        hit_bytes_win = sum(s[3] for s in hit_samples)
-        hit_body_win = sum(s[2] for s in hit_samples)
         edge_hit_bytes = sum(s[3] for s in edge_hit_samples)
         edge_hit_body = sum(s[2] for s in edge_hit_samples)
+        shield_hit_bytes = sum(s[3] for s in shield_hit_samples)
+        shield_hit_body = sum(s[2] for s in shield_hit_samples)
         miss_bytes_win = sum(s[3] for s in miss_samples)
         miss_body_win = sum(s[2] for s in miss_samples)
-        hit_mbps = (
-            (hit_bytes_win / (1024 * 1024)) / max(hit_body_win, 0.001) if hit_count > 0 else 0.0
-        )
         edge_hit_mbps = (
             (edge_hit_bytes / (1024 * 1024)) / max(edge_hit_body, 0.001)
             if edge_hit_count > 0
             else 0.0
         )
+        shield_hit_mbps = (
+            (shield_hit_bytes / (1024 * 1024)) / max(shield_hit_body, 0.001)
+            if shield_hit_count > 0
+            else 0.0
+        )
         miss_mbps = (
             (miss_bytes_win / (1024 * 1024)) / max(miss_body_win, 0.001) if miss_count > 0 else 0.0
         )
-        hit_pct = 100.0 * hit_count / n
+        edge_hit_pct = 100.0 * edge_hit_count / n
+        shield_hit_pct = 100.0 * shield_hit_count / n
         miss_pct = 100.0 * miss_count / n
+        shield_segment = (
+            f" | SHIELD={shield_hit_pct:.0f}% ({shield_hit_mbps:.2f} MiB/s)"
+            if shield_hit_count > 0
+            else ""
+        )
         with run.counters_lock:
             proto = str(run.counters.get("http_protocol", "HTTP/1.1"))
             pop = str(run.counters.get("cdn_pop", "")) or "-"
 
         logger.info(
             "throughput (last %d reqs): wire=%.2f MiB/s | ttfb_p50=%.0fms | "
-            "avg=%.2fs/req | est_5000id=%.2fh | HIT=%.0f%% (%.2f MiB/s) | "
+            "avg=%.2fs/req | est_5000id=%.2fh | HIT=%.0f%% (%.2f MiB/s)%s | "
             "MISS=%.0f%% (%.2f MiB/s) | proto=%s | pop=%s",
             n,
             wire_mbps,
             ttfb_p50_ms,
             avg_cycle,
             est_5000_h,
-            hit_pct,
-            hit_mbps,
+            edge_hit_pct,
+            edge_hit_mbps,
+            shield_segment,
             miss_pct,
             miss_mbps,
             proto,
@@ -735,7 +744,7 @@ def _record_download_telemetry(
                     _SLOW_WIRE_WARN_MBPS,
                     n,
                     ttfb_p50_ms,
-                    hit_pct,
+                    edge_hit_pct,
                     miss_mbps,
                     bottleneck_note,
                 )
