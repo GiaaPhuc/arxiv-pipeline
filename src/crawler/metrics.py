@@ -394,6 +394,9 @@ def merge_with_base(
     sess_429_queue = int(s2_in.get("arxiv_429_queue_timeout", 0))
     sess_429_fast = int(s2_in.get("arxiv_429_edge_fast", 0))
     sess_soft_pacing = int(s2_in.get("defensive_soft_pacing_triggers", 0))
+    sess_heavy_interleaved = int(s2_in.get("heavy_versions_interleaved", 0))
+    sess_budget_breathers = int(s2_in.get("byte_budget_breathers", 0))
+    sess_hit_recoveries = int(s2_in.get("hit_recovery_cooldowns", 0))
     sess_inflight = int(s2_in.get("in_flight_extractions", 0))
     merged_arxiv = {
         "http_429": int(prev_arxiv.get("http_429", 0)) + int(s2_in.get("arxiv_429", 0)),
@@ -426,6 +429,12 @@ def merge_with_base(
         "http_429_edge_fast": int(prev_arxiv.get("http_429_edge_fast", 0)) + sess_429_fast,
         "defensive_soft_pacing_triggers": int(prev_arxiv.get("defensive_soft_pacing_triggers", 0))
         + sess_soft_pacing,
+        "heavy_versions_interleaved": int(prev_arxiv.get("heavy_versions_interleaved", 0))
+        + sess_heavy_interleaved,
+        "byte_budget_breathers": int(prev_arxiv.get("byte_budget_breathers", 0))
+        + sess_budget_breathers,
+        "hit_recovery_cooldowns": int(prev_arxiv.get("hit_recovery_cooldowns", 0))
+        + sess_hit_recoveries,
         "in_flight_extractions": int(prev_arxiv.get("in_flight_extractions", 0)) + sess_inflight,
     }
     active_sec = sum(merged_stages.values())
@@ -503,6 +512,11 @@ def merge_with_base(
             "http_429_queue_timeout": sess_429_queue,
             "http_429_edge_fast": sess_429_fast,
             "defensive_soft_pacing_triggers": sess_soft_pacing,
+        },
+        "traffic_shaping": {
+            "heavy_versions_interleaved": sess_heavy_interleaved,
+            "byte_budget_breathers": sess_budget_breathers,
+            "hit_recovery_cooldowns": sess_hit_recoveries,
         },
         "papers_done": papers_done_val,
         "papers_skipped": papers_skipped_val,

@@ -429,3 +429,39 @@ def test_merge_with_base_accumulates_cdn_and_transport_v316_fields() -> None:
     assert s2["sessions"][1]["transport"]["http_protocol"] == "HTTP/1.1"
     assert s2["sessions"][1]["transport"]["use_http2"] is False
     assert s2["sessions"][1]["transport"]["cdn_pop"] == "cache-nrt"
+
+
+def test_merge_with_base_accumulates_traffic_shaping_v317_fields() -> None:
+    s1 = metrics.merge_with_base(
+        {},
+        {"download": 8.0, "extract": 1.0},
+        {"ram_peak_bytes": 500.0, "ram_mean_bytes": 250.0, "ram_samples": 2.0},
+        crawl_counters={
+            "heavy_versions_interleaved": 4,
+            "byte_budget_breathers": 1,
+            "hit_recovery_cooldowns": 1,
+        },
+    )
+    assert s1["sessions"][0]["traffic_shaping"] == {
+        "heavy_versions_interleaved": 4,
+        "byte_budget_breathers": 1,
+        "hit_recovery_cooldowns": 1,
+    }
+    s2 = metrics.merge_with_base(
+        s1,
+        {"download": 4.0, "extract": 0.5},
+        {"ram_peak_bytes": 600.0, "ram_mean_bytes": 300.0, "ram_samples": 2.0},
+        crawl_counters={
+            "heavy_versions_interleaved": 3,
+            "byte_budget_breathers": 2,
+            "hit_recovery_cooldowns": 0,
+        },
+    )
+    assert s2["arxiv"]["heavy_versions_interleaved"] == 7
+    assert s2["arxiv"]["byte_budget_breathers"] == 3
+    assert s2["arxiv"]["hit_recovery_cooldowns"] == 1
+    assert s2["sessions"][1]["traffic_shaping"] == {
+        "heavy_versions_interleaved": 3,
+        "byte_budget_breathers": 2,
+        "hit_recovery_cooldowns": 0,
+    }

@@ -180,3 +180,15 @@ def test_http2_and_in_flight_extract_dry_run_and_forward(tmp_path, monkeypatch, 
     ]
     assert run_crawl.main(run_args) == 0
     assert captured == {"use_http2": True, "in_flight_extract": True}
+
+
+def test_setup_logging_quiets_httpx_and_traffic_shaping_env_toggle(tmp_path, monkeypatch):
+    from crawler.config import Config
+
+    run_crawl._setup_logging(tmp_path)
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
+
+    assert Config.from_env().traffic_shaping is True
+    monkeypatch.setenv("CRAWLER_TRAFFIC_SHAPING", "0")
+    assert Config.from_env().traffic_shaping is False

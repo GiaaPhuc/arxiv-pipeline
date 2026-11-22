@@ -2016,3 +2016,384 @@ def test_v316_in_flight_stage_download_includes_rate_limit_wait(tmp_path, monkey
     finally:
         metrics.reset()
         manifest.close()
+
+
+# ---------------------------------------------------------------------------
+# v3.17.0: traffic-shaping interleaver, byte-budget governor & HIT recovery
+# ---------------------------------------------------------------------------
+
+
+def test_v317_decluster_papers_golden_ratio_bijection_and_dispersion():
+    from crawler.models import PaperMeta
+
+    def _mk_papers(count: int) -> list[PaperMeta]:
+        return [
+            PaperMeta(
+                arxiv_id=f"2408.{idx + 1:05d}",
+                title=f"Paper {idx + 1}",
+                authors=["Ann"],
+                submission_date="2024-08-01",
+                num_versions=1,
+            )
+            for idx in range(count)
+        ]
+
+    # Small blocks (< 16) keep original sequential order for deterministic unit tests:
+    small = _mk_papers(15)
+    assert [p.arxiv_id for p in pipeline._decluster_papers(small)] == [p.arxiv_id for p in small]
+
+    # Larger blocks (>= 16) preserve every paper exactly once (bijection):
+    for block_len in (16, 50, 250, 500):
+        block = _mk_papers(block_len)
+        reordered = pipeline._decluster_papers(block)
+        assert len(reordered) == block_len
+        assert {p.arxiv_id for p in reordered} == {p.arxiv_id for p in block}
+        assert reordered[0].arxiv_id == block[0].arxiv_id
+        assert [p.arxiv_id for p in reordered] != [p.arxiv_id for p in block]
+
+    # Consecutive 10-paper cluster in a 500-ID block is dispersed with minimum spacing >= 30:
+    block_500 = _mk_papers(500)
+    declustered_500 = pipeline._decluster_papers(block_500)
+    pos = {p.arxiv_id: idx for idx, p in enumerate(declustered_500)}
+    cluster_positions = sorted(pos[f"2408.{i:05d}"] for i in range(1, 11))
+    gaps = [cluster_positions[i + 1] - cluster_positions[i] for i in range(9)]
+    assert min(gaps) >= 30
+
+
+@responses.activate
+def test_v317_heavy_version_interleaving_separates_giant_versions_and_completes_paper(
+    tmp_path, monkeypatch
+):
+    archive = _tar_gz()
+    all_ids = [f"2408.{i:05d}" for i in range(1, 20)]  # 19 papers (>= 16; #1 stays at index 0)
+
+    def _custom_atom(request) -> tuple[int, dict, str]:
+        req_ids = parse_qs(urlsplit(request.url).query)["id_list"][0].split(",")
+        entries = []
+        for raw in req_ids:
+            base, _, ver_str = raw.partition("v")
+            dates = (
+                ["2024-08-01", "2024-08-02", "2024-08-03"]
+                if base == "2408.00001"
+                else ["2024-08-01"]
+            )
+            total = len(dates)
+            ver = int(ver_str) if ver_str else total
+            entries.append(
+                f"<entry><id>http://arxiv.org/abs/{base}v{ver}</id>"
+                f"<published>{dates[0]}T10:00:00Z</published>"
+                f"<updated>{dates[ver - 1]}T10:00:00Z</updated>"
+                f"<title>Paper {base}</title><author><name>Ann</name></author></entry>"
+            )
+        body = (
+            '<feed xmlns="http://www.w3.org/2005/Atom" '
+            'xmlns:arxiv="http://arxiv.org/schemas/atom">' + "".join(entries) + "</feed>"
+        )
+        return 200, {"Content-Type": "application/atom+xml"}, body
+
+    def _custom_s2_batch(request):
+        body = json.loads(request.body)
+        payload = []
+        for paper_id in body["ids"]:
+            base = paper_id.removeprefix("ARXIV:")
+            refs = _s2_batch_refs(base)
+            payload.append(
+                {
+                    "paperId": f"paper-{base}",
+                    "venue": "ICML",
+                    "referenceCount": len(refs),
+                    "references": refs,
+                }
+            )
+        return 200, {}, json.dumps(payload)
+
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_custom_atom)
+    responses.add_callback(
+        responses.POST,
+        f"{S2}/graph/v1/paper/batch",
+        callback=_custom_s2_batch,
+        content_type="application/json",
+    )
+    for base in all_ids:
+        total_v = 3 if base == "2408.00001" else 1
+        for ver in range(1, total_v + 1):
+            responses.add(responses.GET, f"{ARXIV}/src/{base}v{ver}", body=archive, status=200)
+
+    src_order: list[str] = []
+    real_download_source = pipeline.download_source
+
+    def spy_download_source(client, arxiv_id: str, version: int, *args, **kwargs):
+        src_order.append(f"{arxiv_id}v{version}")
+        res = real_download_source(client, arxiv_id, version, *args, **kwargs)
+        if arxiv_id == "2408.00001":
+            res.wire_bytes = 30 * 1024 * 1024  # >= 25 MiB threshold without allocating 30 MiB
+        return res
+
+    monkeypatch.setattr(pipeline, "download_source", spy_download_source)
+
+    cfg = _config(tmp_path, traffic_shaping=True, extract_workers=1)
+    summary = pipeline.run(all_ids, cfg)
+
+    assert summary["ok"] == 21
+    assert summary["failed"] == 0
+    assert src_order[0] == "2408.00001v1"
+    v1_pos = src_order.index("2408.00001v1")
+    v2_pos = src_order.index("2408.00001v2")
+    v3_pos = src_order.index("2408.00001v3")
+    assert v2_pos - v1_pos >= pipeline._HEAVY_INTERLEAVE_GAP_VERSIONS + 1
+    assert v3_pos > v2_pos
+    assert validate_corpus.validate(cfg.data_dir) == []
+    assert (cfg.data_dir / "papers" / "2408-00001" / pipeline.S2_RAW_NAME).is_file()
+
+    metrics_doc = _read(cfg.data_dir / "logs" / "metrics.json")
+    assert metrics_doc["arxiv"]["heavy_versions_interleaved"] == 2
+    assert metrics_doc["sessions"][0]["traffic_shaping"]["heavy_versions_interleaved"] == 2
+    assert metrics_doc["sessions"][0]["papers_done"] == 19
+
+
+@responses.activate
+def test_v317_heavy_interleaved_429_defer_cleans_duplicate_queue_and_recovers(
+    tmp_path, monkeypatch
+):
+    archive = _tar_gz()
+    all_ids = [f"2408.{i:05d}" for i in range(1, 20)]
+
+    def _custom_atom(request) -> tuple[int, dict, str]:
+        req_ids = parse_qs(urlsplit(request.url).query)["id_list"][0].split(",")
+        entries = []
+        for raw in req_ids:
+            base, _, ver_str = raw.partition("v")
+            dates = (
+                ["2024-08-01", "2024-08-02", "2024-08-03"]
+                if base == "2408.00001"
+                else ["2024-08-01"]
+            )
+            ver = int(ver_str) if ver_str else len(dates)
+            entries.append(
+                f"<entry><id>http://arxiv.org/abs/{base}v{ver}</id>"
+                f"<published>{dates[0]}T10:00:00Z</published>"
+                f"<updated>{dates[ver - 1]}T10:00:00Z</updated>"
+                f"<title>Paper {base}</title><author><name>Ann</name></author></entry>"
+            )
+        return (
+            200,
+            {"Content-Type": "application/atom+xml"},
+            '<feed xmlns="http://www.w3.org/2005/Atom" '
+            'xmlns:arxiv="http://arxiv.org/schemas/atom">' + "".join(entries) + "</feed>",
+        )
+
+    responses.add_callback(responses.GET, f"{ARXIV}/api/query", callback=_custom_atom)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00001v1", body=archive, status=200)
+    # First attempt at interleaved v2 gets 429; deferred pass recovers v2 + v3:
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00001v2", status=429)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00001v2", body=archive, status=200)
+    responses.add(responses.GET, f"{ARXIV}/src/2408.00001v3", body=archive, status=200)
+    for base in all_ids[1:]:
+        responses.add(responses.GET, f"{ARXIV}/src/{base}v1", body=archive, status=200)
+
+    real_download_source = pipeline.download_source
+    seen_calls: list[str] = []
+
+    def spy_download_source(client, arxiv_id: str, version: int, *args, **kwargs):
+        seen_calls.append(f"{arxiv_id}v{version}")
+        res = real_download_source(client, arxiv_id, version, *args, **kwargs)
+        if arxiv_id == "2408.00001" and res.http_status == 200:
+            res.wire_bytes = 30 * 1024 * 1024
+        return res
+
+    monkeypatch.setattr(pipeline, "download_source", spy_download_source)
+    monkeypatch.setattr(pipeline, "_sleep_interruptible", lambda _stop, _s: None)
+
+    cfg = _config(
+        tmp_path,
+        skip_s2=True,
+        auto_resume_rate_limit=True,
+        traffic_shaping=True,
+        extract_workers=1,
+    )
+    summary = pipeline.run(all_ids, cfg)
+
+    assert summary["ok"] == 21
+    assert summary["failed"] == 0
+    # v3 was pruned from heavy_interleave_queue when v2 deferred, so v3 is only downloaded ONCE:
+    assert seen_calls.count("2408.00001v2") == 2
+    assert seen_calls.count("2408.00001v3") == 1
+    assert (cfg.data_dir / "papers" / "2408-00001" / "v2" / "meta.json").is_file()
+    assert (cfg.data_dir / "papers" / "2408-00001" / "v3" / "meta.json").is_file()
+    metrics_doc = _read(cfg.data_dir / "logs" / "metrics.json")
+    assert metrics_doc["sessions"][0]["papers_done"] == 19
+
+
+def test_v317_sliding_window_byte_budget_governor_breathes_on_fast_burst_only(
+    tmp_path, monkeypatch
+):
+    from crawler.http import HostClient, RateLimiter
+    from crawler.models import PaperMeta
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(pipeline, "_sleep_interruptible", lambda _stop, s: sleeps.append(s))
+
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=3.05,
+        traffic_shaping=True,
+    )
+    limiter = RateLimiter(3.05, clock=lambda: 0.0, sleep=lambda _s: None, min_idle_gap=0.25)
+    client = HostClient(ARXIV, limiter, cfg)
+    manifest = pipeline.Manifest(tmp_path / "data" / "manifest.sqlite")
+    dummy_run = pipeline._Run(
+        config=cfg,
+        manifest=manifest,
+        arxiv=client,
+        s2=pipeline.make_s2_client(cfg),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    try:
+        # 1) Normal <= 360 MiB in 180s triggers zero emergency breathers:
+        assert pipeline._record_and_check_byte_budget(
+            dummy_run, now=10.0, wire_bytes=110 * 1024 * 1024
+        ) == (110 * 1024 * 1024, 0.0)
+        assert pipeline._record_and_check_byte_budget(
+            dummy_run, now=40.0, wire_bytes=110 * 1024 * 1024
+        ) == (220 * 1024 * 1024, 0.0)
+        assert pipeline._record_and_check_byte_budget(
+            dummy_run, now=70.0, wire_bytes=110 * 1024 * 1024
+        ) == (330 * 1024 * 1024, 0.0)
+
+        # Yellow zone (>= 220 MiB) holds _should_drain_one_heavy even if gap >= 15:
+        dummy_paper = PaperMeta("2408.00001", "t", [], "2024-08-01", num_versions=2)
+        dummy_run.heavy_interleave_queue.append(
+            pipeline._HeavyVersionJob(paper=dummy_paper, version=2, is_last_for_paper=True)
+        )
+        dummy_run.versions_since_heavy = 20
+        monkeypatch.setattr(pipeline.time, "monotonic", lambda: 80.0)
+        assert pipeline._should_drain_one_heavy(dummy_run) is False
+
+        # 2) Once > 180s have elapsed, old samples age out -> under yellow/red, queue drains freely:
+        assert pipeline._record_and_check_byte_budget(
+            dummy_run, now=260.0, wire_bytes=110 * 1024 * 1024
+        ) == (110 * 1024 * 1024, 0.0)
+        monkeypatch.setattr(pipeline.time, "monotonic", lambda: 265.0)
+        assert pipeline._should_drain_one_heavy(dummy_run) is True
+
+        # 3) Fast 4 x 130 MiB burst inside 80s triggers session recycle + capped recovery breather:
+        dummy_run.byte_budget_window.clear()
+        recycles_before = client.session_recycles
+        for t in (1000.0, 1025.0):
+            pipeline._post_process_arxiv_2xx(
+                dummy_run,
+                arxiv_id="2408.00001",
+                version=1,
+                wire_bytes=130 * 1024 * 1024,
+                raw_archive_bytes=130 * 1024 * 1024,
+                body_seconds=22.0,
+                req_started=t - 22.0,
+                req_finished=t,
+            )
+        assert sleeps == []
+        # 3rd 130 MiB pushes 3-min window to 390 MiB (+30 MiB over 360 MiB cap -> 15.0s breather):
+        pipeline._post_process_arxiv_2xx(
+            dummy_run,
+            arxiv_id="2408.00002",
+            version=1,
+            wire_bytes=130 * 1024 * 1024,
+            raw_archive_bytes=130 * 1024 * 1024,
+            body_seconds=22.0,
+            req_started=1050.0 - 22.0,
+            req_finished=1050.0,
+        )
+        assert sleeps == [15.0]
+        # 4th 130 MiB -> 520 MiB (+160 MiB over cap -> capped at 60.0s breather):
+        pipeline._post_process_arxiv_2xx(
+            dummy_run,
+            arxiv_id="2408.00003",
+            version=1,
+            wire_bytes=130 * 1024 * 1024,
+            raw_archive_bytes=130 * 1024 * 1024,
+            body_seconds=22.0,
+            req_started=1075.0 - 22.0,
+            req_finished=1075.0,
+        )
+        assert sleeps == [15.0, 60.0]
+        assert dummy_run.counters["byte_budget_breathers"] == 2
+        assert client.session_recycles > recycles_before
+        assert dummy_run.last_download_finished_at is None
+    finally:
+        manifest.close()
+
+
+def test_v317_hit_throttle_threshold_3mbps_and_two_window_auto_recovery(tmp_path, monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr(pipeline, "_sleep_interruptible", lambda _stop, s: sleeps.append(s))
+
+    cfg = Config(
+        data_dir=tmp_path / "data",
+        contact="test@example.com",
+        arxiv_min_interval=3.05,
+        auto_resume_rate_limit=True,
+    )
+    manifest = pipeline.Manifest(tmp_path / "data" / "manifest.sqlite")
+    dummy_run = pipeline._Run(
+        config=cfg,
+        manifest=manifest,
+        arxiv=pipeline.make_arxiv_client(cfg),
+        s2=pipeline.make_s2_client(cfg),
+        papers_dir=tmp_path / "data" / "papers",
+        tmp_dir=tmp_path / "data" / ".tmp",
+    )
+    try:
+        # Window #1: HIT = 2.50 MiB/s (< 3.0) triggers soft-pacing without scheduling 300s yet:
+        for _ in range(pipeline._THROUGHPUT_WINDOW_REQS):
+            pipeline._record_download_telemetry(
+                dummy_run,
+                wire_bytes=2 * 1024 * 1024,
+                ttfb=0.10,
+                body_seconds=0.80,  # 2.50 MiB/s
+                cycle_seconds=3.10,
+                cache_status="HIT",
+                served_by="cache-iad",
+                http_version="HTTP/2",
+            )
+        assert dummy_run.counters["defensive_soft_pacing_triggers"] == 1
+        assert dummy_run.consecutive_hit_throttle_windows == 1
+        assert dummy_run.pending_throttle_cooldown_seconds == 0.0
+
+        # Healthy HIT window (6.0 MiB/s) resets consecutive throttle counter back to 0:
+        for _ in range(pipeline._THROUGHPUT_WINDOW_REQS):
+            pipeline._record_download_telemetry(
+                dummy_run,
+                wire_bytes=3 * 1024 * 1024,
+                ttfb=0.05,
+                body_seconds=0.50,  # 6.00 MiB/s
+                cycle_seconds=3.10,
+                cache_status="HIT",
+                served_by="cache-iad",
+                http_version="HTTP/2",
+            )
+        assert dummy_run.consecutive_hit_throttle_windows == 0
+        assert dummy_run.pending_throttle_cooldown_seconds == 0.0
+
+        # Two consecutive throttled HIT windows schedule 300s recovery cooldown:
+        for _ in range(2 * pipeline._THROUGHPUT_WINDOW_REQS):
+            pipeline._record_download_telemetry(
+                dummy_run,
+                wire_bytes=2 * 1024 * 1024,
+                ttfb=0.10,
+                body_seconds=0.80,  # 2.50 MiB/s
+                cycle_seconds=3.10,
+                cache_status="HIT",
+                served_by="cache-iad",
+                http_version="HTTP/2",
+            )
+        assert dummy_run.counters["defensive_soft_pacing_triggers"] == 3
+        assert dummy_run.consecutive_hit_throttle_windows == 0
+        assert dummy_run.pending_throttle_cooldown_seconds == 300.0
+
+        pipeline._maybe_run_hit_recovery_cooldown(dummy_run)
+        assert sleeps == [300.0]
+        assert dummy_run.pending_throttle_cooldown_seconds == 0.0
+        assert dummy_run.counters["hit_recovery_cooldowns"] == 1
+    finally:
+        manifest.close()

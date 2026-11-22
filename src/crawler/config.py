@@ -20,6 +20,7 @@ Environment variables:
     CRAWLER_EXTRACT_MAX_QUEUE_BYTES max in-memory bytes queued for extraction (default 192 MiB)
     CRAWLER_USE_HTTP2           1/true to enable optional single-connection HTTP/2 for arXiv
     CRAWLER_IN_FLIGHT_EXTRACT   1/true for cut-through in-flight tar.gz/gzip extraction
+    CRAWLER_TRAFFIC_SHAPING     1/true (default) for heavy interleaving & byte-budget governor
 """
 
 from __future__ import annotations
@@ -75,6 +76,7 @@ class Config:
     in_flight_extract: bool = (
         False  # v3.16: opt-in cut-through stream extraction (O(1) RAM, zero temp disk I/O)
     )
+    traffic_shaping: bool = True  # v3.17: interleaving, declustering & sliding byte-budget governor
 
     @property
     def user_agent(self) -> str:
@@ -289,6 +291,13 @@ class Config:
         ).strip()
         in_flight_extract = in_flight_raw.lower() in {"1", "true", "yes", "on"}
 
+        traffic_shaping_raw = (
+            os.environ.get("CRAWLER_TRAFFIC_SHAPING")
+            or local_vars.get("CRAWLER_TRAFFIC_SHAPING")
+            or "1"
+        ).strip()
+        traffic_shaping = traffic_shaping_raw.lower() not in {"0", "false", "no", "off"}
+
         values = {
             "data_dir": Path(data_dir_raw),
             "contact": os.environ.get("CRAWLER_CONTACT") or local_vars.get("CRAWLER_CONTACT") or "",
@@ -313,6 +322,7 @@ class Config:
             "max_stream_mbps": max_stream_mbps,
             "use_http2": use_http2,
             "in_flight_extract": in_flight_extract,
+            "traffic_shaping": traffic_shaping,
         }
         values.update(overrides)
         return cls(**values)

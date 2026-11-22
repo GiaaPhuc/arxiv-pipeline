@@ -44,6 +44,7 @@ import gzip
 import hashlib
 import json
 import logging
+import math
 import os
 import queue
 import shutil
@@ -116,10 +117,22 @@ _SLOW_WIRE_WARN_MBPS = 3.5  # v3.15: warn when sustained wire throughput drops b
 _SLOW_WIRE_MIN_WINDOW_BYTES = 50 * 1024 * 1024  # avoid false slow-wire warnings on tiny-file runs
 _EST_VERSIONS_PER_5000_IDS = 8265.0  # measured V_bar = 1.653 versions/paper across 22.2k papers
 _QUEUE_TIMEOUT_429_SECONDS = 9.0  # TTFB >= 9s before 429 indicates origin queue timeout
-_HIT_THROTTLE_WARN_MBPS = 2.0  # Fastly RAM HIT < 2.0 MiB/s signals genuine edge/IP throttling
+_HIT_THROTTLE_WARN_MBPS = 3.0  # Fastly RAM HIT < 3.0 MiB/s signals genuine edge/IP throttling
 _HIT_THROTTLE_MIN_BYTES = 20 * 1024 * 1024  # min HIT volume before engaging defensive soft-pacing
+_HIT_THROTTLE_RECOVERY_WINDOWS = 2  # v3.17: 2 consecutive throttled HIT windows trigger cooldown
+_HIT_THROTTLE_RECOVERY_COOLDOWN_SECONDS = 300.0  # v3.17: 5-min breather to flush edge throttle
 _SOFT_PACING_FLOOR_SECONDS = 3.80  # gentle Start-to-Start floor under genuine edge throttling
 _SOFT_PACING_CAP_SECONDS = 4.50
+_DECLUSTER_MIN_BLOCK = 16  # v3.17: keep small test batches untouched, decluster >= 16 papers
+_HEAVY_INTERLEAVE_THRESHOLD_BYTES = 25 * 1024 * 1024  # v3.17: interleave remaining v2..vN >= 25 MiB
+_HEAVY_INTERLEAVE_GAP_VERSIONS = 15  # v3.17: interleave ~15 light versions between heavy ones
+_HEAVY_INTERLEAVE_MAX_QUEUE = 32  # v3.17: bounded interleave buffer (never hoard until end of run)
+_BYTE_BUDGET_WINDOW_SECONDS = 180.0  # v3.17: 3-minute sliding byte-budget window
+_BYTE_BUDGET_SUSTAINED_BPS = 2.0 * 1024 * 1024  # v3.17: 2.0 MiB/s sustained safe refill rate
+_BYTE_BUDGET_YELLOW_BYTES = 220 * 1024 * 1024  # v3.17: pause heavy drain when window >= 220 MiB
+_BYTE_BUDGET_RED_BYTES = 360 * 1024 * 1024  # v3.17: emergency breather when window > 360 MiB
+_BYTE_BUDGET_MIN_BREATHER_SECONDS = 10.0  # v3.17: minimum recovery sleep when exceeding red cap
+_BYTE_BUDGET_MAX_BREATHER_SECONDS = 60.0  # v3.17: hard cap on sliding-window recovery sleep
 _FINAL_STATUS_NAMES = frozenset(s.value for s in Status if s.is_final)
 _GIANT_DIAGNOSTIC_BYTES = 50 * 1024 * 1024  # U5: log packages >= 50 MiB to diagnostics.jsonl
 
@@ -151,6 +164,57 @@ def _compute_proportional_breather(
     if needed_extra <= 0.0:
         return 0.0
     return round(min(needed_extra, _PROPORTIONAL_BREATHER_CAP_SECONDS), 4)
+
+
+def _decluster_papers(papers: list[PaperMeta]) -> list[PaperMeta]:
+    """Spread same-day heavy-paper clusters across a block via golden-ratio stride (v3.17)."""
+    n = len(papers)
+    if n < _DECLUSTER_MIN_BLOCK:
+        return list(papers)
+    target = max(1, round(n * 0.6180339887498949))
+    step = target
+    for delta in range(n):
+        found = False
+        for cand in (target + delta, target - delta):
+            if 1 <= cand < n and math.gcd(cand, n) == 1:
+                step = cand
+                found = True
+                break
+        if found:
+            break
+    return [papers[(i * step) % n] for i in range(n)]
+
+
+def _rolling_byte_budget_bytes(run: _Run, *, now: float) -> int:
+    """Prune expired wire-byte samples (> 180s) and return active sliding-window volume."""
+    cutoff = now - _BYTE_BUDGET_WINDOW_SECONDS
+    while run.byte_budget_window and run.byte_budget_window[0][0] < cutoff:
+        run.byte_budget_window.popleft()
+    return sum(nbytes for _, nbytes in run.byte_budget_window)
+
+
+def _record_and_check_byte_budget(
+    run: _Run,
+    *,
+    now: float,
+    wire_bytes: int,
+) -> tuple[int, float]:
+    """Track 3-minute sliding wire volume and return ``(window_bytes, breather_seconds)``."""
+    if wire_bytes > 0:
+        run.byte_budget_window.append((now, int(wire_bytes)))
+    window_bytes = _rolling_byte_budget_bytes(run, now=now)
+    if (
+        not run.config.traffic_shaping
+        or run.config.arxiv_min_interval < 3.0
+        or window_bytes <= _BYTE_BUDGET_RED_BYTES
+    ):
+        return window_bytes, 0.0
+    excess = window_bytes - _BYTE_BUDGET_RED_BYTES
+    breather = min(
+        max(excess / _BYTE_BUDGET_SUSTAINED_BPS, _BYTE_BUDGET_MIN_BREATHER_SECONDS),
+        _BYTE_BUDGET_MAX_BREATHER_SECONDS,
+    )
+    return window_bytes, round(breather, 2)
 
 
 class StopCrawl(Exception):
@@ -238,6 +302,13 @@ class _S2Job:
     paper_dir: Path
 
 
+@dataclass(slots=True)
+class _HeavyVersionJob:
+    paper: PaperMeta
+    version: int
+    is_last_for_paper: bool = False
+
+
 @dataclass
 class _ExtractJob:
     paper: PaperMeta
@@ -286,6 +357,12 @@ class _Run:
     throughput_window: deque[tuple[float, float, float, int, str]] = field(
         default_factory=lambda: deque(maxlen=_THROUGHPUT_WINDOW_REQS)
     )
+    heavy_interleave_queue: deque[_HeavyVersionJob] = field(default_factory=deque)
+    versions_since_heavy: int = 0
+    last_version_wire_bytes: int = 0
+    byte_budget_window: deque[tuple[float, int]] = field(default_factory=deque)
+    consecutive_hit_throttle_windows: int = 0
+    pending_throttle_cooldown_seconds: float = 0.0
     last_download_finished_at: float | None = None
     last_backup_signature: tuple[int, int] = (-1, -1)
     last_backup_at: float = 0.0
@@ -318,6 +395,9 @@ class _Run:
             "cdn_miss_seconds": 0.0,
             "early_header_rejects": 0,
             "defensive_soft_pacing_triggers": 0,
+            "heavy_versions_interleaved": 0,
+            "byte_budget_breathers": 0,
+            "hit_recovery_cooldowns": 0,
             "in_flight_extractions": 0,
             "http_protocol": "HTTP/1.1",
             "cdn_pop": "",
@@ -536,6 +616,8 @@ def _record_download_telemetry(
             )
             run.arxiv.limiter.enter_ramp_up(start_interval=target)
             _inc(run, "defensive_soft_pacing_triggers")
+            run.arxiv.recycle_session()
+            run.consecutive_hit_throttle_windows += 1
             _diag(
                 run,
                 "defensive_soft_pacing",
@@ -543,36 +625,63 @@ def _record_download_telemetry(
                 hit_bytes=hit_bytes_win,
                 miss_mbps=round(miss_mbps, 3),
                 target_interval=target,
+                consecutive_windows=run.consecutive_hit_throttle_windows,
                 pop=pop,
                 proto=proto,
             )
             logger.warning(
                 "Fastly edge HIT throughput degraded (%.2f MiB/s < %.1f MiB/s over %d MiB); "
-                "engaging defensive soft-pacing Start-to-Start %.2fs (pop=%s)",
+                "engaging defensive soft-pacing Start-to-Start %.2fs (pop=%s, window %d/%d)",
                 hit_mbps,
                 _HIT_THROTTLE_WARN_MBPS,
                 hit_bytes_win // (1024 * 1024),
                 target,
                 pop,
+                run.consecutive_hit_throttle_windows,
+                _HIT_THROTTLE_RECOVERY_WINDOWS,
             )
-        elif (
-            run.config.arxiv_min_interval >= 3.0
-            and sum_bytes >= _SLOW_WIRE_MIN_WINDOW_BYTES
-            and wire_mbps < _SLOW_WIRE_WARN_MBPS
-        ):
-            bottleneck_note = " [origin Cache MISS bottleneck]" if miss_count > 0 else ""
-            logger.warning(
-                "slow wire throughput (%.2f MiB/s < %.1f MiB/s over last %d reqs, "
-                "ttfb_p50=%.0fms, hit=%.0f%%, miss=%.2f MiB/s); target ~8h/5000id "
-                "requires >= 5.0 MiB/s%s",
-                wire_mbps,
-                _SLOW_WIRE_WARN_MBPS,
-                n,
-                ttfb_p50_ms,
-                hit_pct,
-                miss_mbps,
-                bottleneck_note,
-            )
+            if (
+                run.config.auto_resume_rate_limit
+                and run.consecutive_hit_throttle_windows >= _HIT_THROTTLE_RECOVERY_WINDOWS
+            ):
+                run.pending_throttle_cooldown_seconds = _HIT_THROTTLE_RECOVERY_COOLDOWN_SECONDS
+                run.consecutive_hit_throttle_windows = 0
+                _diag(
+                    run,
+                    "hit_throttle_recovery_scheduled",
+                    hit_mbps=round(hit_mbps, 3),
+                    cooldown_seconds=_HIT_THROTTLE_RECOVERY_COOLDOWN_SECONDS,
+                    pop=pop,
+                    proto=proto,
+                )
+                logger.warning(
+                    "Fastly edge HIT remained throttled across %d windows; "
+                    "scheduling %.0fs recovery cooldown (pop=%s)",
+                    _HIT_THROTTLE_RECOVERY_WINDOWS,
+                    _HIT_THROTTLE_RECOVERY_COOLDOWN_SECONDS,
+                    pop,
+                )
+        else:
+            if hit_bytes_win >= _HIT_THROTTLE_MIN_BYTES:
+                run.consecutive_hit_throttle_windows = 0
+            if (
+                run.config.arxiv_min_interval >= 3.0
+                and sum_bytes >= _SLOW_WIRE_MIN_WINDOW_BYTES
+                and wire_mbps < _SLOW_WIRE_WARN_MBPS
+            ):
+                bottleneck_note = " [origin Cache MISS bottleneck]" if miss_count > 0 else ""
+                logger.warning(
+                    "slow wire throughput (%.2f MiB/s < %.1f MiB/s over last %d reqs, "
+                    "ttfb_p50=%.0fms, hit=%.0f%%, miss=%.2f MiB/s); target ~8h/5000id "
+                    "requires >= 5.0 MiB/s%s",
+                    wire_mbps,
+                    _SLOW_WIRE_WARN_MBPS,
+                    n,
+                    ttfb_p50_ms,
+                    hit_pct,
+                    miss_mbps,
+                    bottleneck_note,
+                )
 
 
 def _post_process_arxiv_2xx(
@@ -611,6 +720,7 @@ def _post_process_arxiv_2xx(
         else req_finished - req_started
     )
     run.last_download_finished_at = req_finished
+    run.last_version_wire_bytes = max(int(wire_bytes), 0)
     _record_download_telemetry(
         run,
         wire_bytes=wire_bytes,
@@ -660,6 +770,35 @@ def _post_process_arxiv_2xx(
             version=version,
             raw_archive_bytes=raw_archive_bytes,
         )
+    window_bytes, budget_breather = _record_and_check_byte_budget(
+        run,
+        now=req_finished,
+        wire_bytes=wire_bytes,
+    )
+    if budget_breather > 0.0:
+        run.arxiv.recycle_session()
+        _inc(run, "byte_budget_breathers")
+        _inc(run, "arxiv_cooldown_seconds", budget_breather)
+        _diag(
+            run,
+            "byte_budget_breather",
+            arxiv_id=arxiv_id,
+            version=version,
+            window_bytes=window_bytes,
+            breather_seconds=budget_breather,
+        )
+        logger.warning(
+            "sliding byte-budget cap exceeded (%d MiB in %.0fs > %d MiB); "
+            "recycling session and sleeping %.1fs recovery breather (%sv%d)",
+            window_bytes // (1024 * 1024),
+            _BYTE_BUDGET_WINDOW_SECONDS,
+            _BYTE_BUDGET_RED_BYTES // (1024 * 1024),
+            budget_breather,
+            arxiv_id,
+            version,
+        )
+        _sleep_interruptible(run.stop, budget_breather)
+        run.last_download_finished_at = None
 
 
 def _download_version(run: _Run, paper: PaperMeta, version: int) -> DownloadResult:
@@ -997,6 +1136,131 @@ def _extract_worker(run: _Run) -> None:
             run.extract_queue.task_done()
 
 
+def _download_and_enqueue_version(
+    run: _Run,
+    paper: PaperMeta,
+    version: int,
+    *,
+    is_last: bool,
+    is_first_of_paper: bool,
+) -> int:
+    """Download/extract one version and enqueue its extract job; return ``wire_bytes``."""
+    paper_dir = _paper_dir(run, paper.arxiv_id)
+    stashed_file = resume_partial_path(run.tmp_dir, paper.arxiv_id, version)
+    stashed_before = stashed_file.stat().st_size if stashed_file.is_file() else 0
+    use_in_flight = bool(
+        run.config.in_flight_extract and not run.in_deferred_pass and stashed_before == 0
+    )
+    part = paper_dir / f".v{version}.part"
+    run.last_version_wire_bytes = 0
+    try:
+        if use_in_flight:
+            meta = _download_and_extract_in_flight(run, paper, version, part)
+            _enqueue_extract_job(
+                run,
+                _ExtractJob(
+                    paper=paper,
+                    version=version,
+                    is_last_for_paper=is_last,
+                    prefilled_meta=meta,
+                    prefilled_part=part,
+                ),
+            )
+        else:
+            download = _download_version(run, paper, version)
+            _enqueue_extract_job(
+                run,
+                _ExtractJob(
+                    paper=paper,
+                    version=version,
+                    download=download,
+                    is_last_for_paper=is_last,
+                ),
+            )
+    except (StopCrawl, _DeferRateLimit):
+        if use_in_flight and part.exists():
+            shutil.rmtree(part, ignore_errors=True)
+        if is_first_of_paper:
+            with run.counters_lock:
+                run.paper_pending_versions.pop(paper.arxiv_id, None)
+        raise
+    except _STREAM_RETRY_ERRORS as exc:
+        if use_in_flight and part.exists():
+            shutil.rmtree(part, ignore_errors=True)
+        stashed_now = stashed_file.stat().st_size if stashed_file.is_file() else 0
+        can_defer_stream = run.config.auto_resume_rate_limit and (
+            not run.in_deferred_pass
+            or (
+                run.deferred_pass < _MAX_DEFERRED_PASSES
+                and (
+                    stashed_now >= stashed_before + _MIN_PROGRESS_BYTES
+                    or (stashed_file.is_file() and stashed_now >= _MIN_PROGRESS_BYTES)
+                )
+            )
+        )
+        if can_defer_stream:
+            run.consecutive_stream_failures += 1
+            if is_first_of_paper:
+                with run.counters_lock:
+                    run.paper_pending_versions.pop(paper.arxiv_id, None)
+            run.arxiv.limiter.note_429()
+            run.arxiv.recycle_session()
+            run.arxiv.limiter.schedule_retry_backoff(_STREAM_BREAK_BREATHER_SECONDS)
+            need_cd = run.consecutive_stream_failures >= _STREAM_FAILURES_FOR_COOLDOWN
+            _diag(
+                run,
+                "arxiv_stream_defer",
+                arxiv_id=paper.arxiv_id,
+                version=version,
+                consecutive_stream_failures=run.consecutive_stream_failures,
+                need_cooldown=need_cd,
+            )
+            logger.warning(
+                "stream %sv%d failed after retries (%s); deferring to queue (%s)",
+                paper.arxiv_id,
+                version,
+                type(exc).__name__,
+                "stream cooldown" if need_cd else "continuing next id",
+            )
+            raise _DeferRateLimit(
+                f"stream repeatedly broken for {paper.arxiv_id}v{version}",
+                need_cooldown=need_cd,
+                is_stream_failure=True,
+            ) from exc
+        if not run.config.auto_resume_rate_limit:
+            stashed_file.unlink(missing_ok=True)
+        logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
+        _enqueue_extract_job(
+            run,
+            _ExtractJob(
+                paper=paper,
+                version=version,
+                download_error=exc,
+                is_last_for_paper=is_last,
+            ),
+        )
+    except Exception as exc:  # one bad pair must never stop the batch
+        if use_in_flight and part.exists():
+            shutil.rmtree(part, ignore_errors=True)
+        resume_partial_path(run.tmp_dir, paper.arxiv_id, version).unlink(missing_ok=True)
+        logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
+        _enqueue_extract_job(
+            run,
+            _ExtractJob(
+                paper=paper,
+                version=version,
+                download_error=exc,
+                is_last_for_paper=is_last,
+            ),
+        )
+    wire_bytes = run.last_version_wire_bytes
+    if wire_bytes >= _HEAVY_INTERLEAVE_THRESHOLD_BYTES:
+        run.versions_since_heavy = 0
+    else:
+        run.versions_since_heavy += 1
+    return wire_bytes
+
+
 def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) -> bool:
     paper_dir = _paper_dir(run, paper.arxiv_id)
     _clean_stale(paper_dir)
@@ -1021,112 +1285,47 @@ def _process_paper(run: _Run, paper: PaperMeta, *, ids_seen: int | None = None) 
         if run.stop.is_set():
             return False
         is_last = idx == len(pending_versions) - 1
-        stashed_file = resume_partial_path(run.tmp_dir, paper.arxiv_id, version)
-        stashed_before = stashed_file.stat().st_size if stashed_file.is_file() else 0
-        use_in_flight = bool(
-            run.config.in_flight_extract and not run.in_deferred_pass and stashed_before == 0
+        wire_bytes = _download_and_enqueue_version(
+            run,
+            paper,
+            version,
+            is_last=is_last,
+            is_first_of_paper=(idx == 0),
         )
-        part = paper_dir / f".v{version}.part"
-        try:
-            if use_in_flight:
-                meta = _download_and_extract_in_flight(run, paper, version, part)
-                _enqueue_extract_job(
-                    run,
-                    _ExtractJob(
+        if (
+            run.config.traffic_shaping
+            and not run.in_deferred_pass
+            and wire_bytes >= _HEAVY_INTERLEAVE_THRESHOLD_BYTES
+            and idx < len(pending_versions) - 1
+        ):
+            remaining = pending_versions[idx + 1 :]
+            for rem_v in remaining:
+                run.heavy_interleave_queue.append(
+                    _HeavyVersionJob(
                         paper=paper,
-                        version=version,
-                        is_last_for_paper=is_last,
-                        prefilled_meta=meta,
-                        prefilled_part=part,
-                    ),
-                )
-            else:
-                download = _download_version(run, paper, version)
-                _enqueue_extract_job(
-                    run,
-                    _ExtractJob(
-                        paper=paper,
-                        version=version,
-                        download=download,
-                        is_last_for_paper=is_last,
-                    ),
-                )
-        except (StopCrawl, _DeferRateLimit):
-            if use_in_flight and part.exists():
-                shutil.rmtree(part, ignore_errors=True)
-            if idx == 0:
-                with run.counters_lock:
-                    run.paper_pending_versions.pop(paper.arxiv_id, None)
-            raise
-        except _STREAM_RETRY_ERRORS as exc:
-            if use_in_flight and part.exists():
-                shutil.rmtree(part, ignore_errors=True)
-            stashed_now = stashed_file.stat().st_size if stashed_file.is_file() else 0
-            can_defer_stream = run.config.auto_resume_rate_limit and (
-                not run.in_deferred_pass
-                or (
-                    run.deferred_pass < _MAX_DEFERRED_PASSES
-                    and (
-                        stashed_now >= stashed_before + _MIN_PROGRESS_BYTES
-                        or (stashed_file.is_file() and stashed_now >= _MIN_PROGRESS_BYTES)
+                        version=rem_v,
+                        is_last_for_paper=(rem_v == pending_versions[-1]),
                     )
                 )
-            )
-            if can_defer_stream:
-                run.consecutive_stream_failures += 1
-                if idx == 0:
-                    with run.counters_lock:
-                        run.paper_pending_versions.pop(paper.arxiv_id, None)
-                run.arxiv.limiter.note_429()
-                run.arxiv.recycle_session()
-                run.arxiv.limiter.schedule_retry_backoff(_STREAM_BREAK_BREATHER_SECONDS)
-                need_cd = run.consecutive_stream_failures >= _STREAM_FAILURES_FOR_COOLDOWN
-                _diag(
-                    run,
-                    "arxiv_stream_defer",
-                    arxiv_id=paper.arxiv_id,
-                    version=version,
-                    consecutive_stream_failures=run.consecutive_stream_failures,
-                    need_cooldown=need_cd,
-                )
-                logger.warning(
-                    "stream %sv%d failed after retries (%s); deferring to queue (%s)",
-                    paper.arxiv_id,
-                    version,
-                    type(exc).__name__,
-                    "stream cooldown" if need_cd else "continuing next id",
-                )
-                raise _DeferRateLimit(
-                    f"stream repeatedly broken for {paper.arxiv_id}v{version}",
-                    need_cooldown=need_cd,
-                    is_stream_failure=True,
-                ) from exc
-            if not run.config.auto_resume_rate_limit:
-                stashed_file.unlink(missing_ok=True)
-            logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
-            _enqueue_extract_job(
+            _inc(run, "heavy_versions_interleaved", len(remaining))
+            _diag(
                 run,
-                _ExtractJob(
-                    paper=paper,
-                    version=version,
-                    download_error=exc,
-                    is_last_for_paper=is_last,
-                ),
+                "heavy_version_interleaved",
+                arxiv_id=paper.arxiv_id,
+                version=version,
+                wire_bytes=wire_bytes,
+                queued_versions=remaining,
             )
-        except Exception as exc:  # one bad pair must never stop the batch
-            if use_in_flight and part.exists():
-                shutil.rmtree(part, ignore_errors=True)
-            resume_partial_path(run.tmp_dir, paper.arxiv_id, version).unlink(missing_ok=True)
-            logger.warning("%s v%d failed: %r", paper.arxiv_id, version, exc)
-            _enqueue_extract_job(
-                run,
-                _ExtractJob(
-                    paper=paper,
-                    version=version,
-                    download_error=exc,
-                    is_last_for_paper=is_last,
-                ),
+            logger.info(
+                "heavy archive %sv%d (%.1f MiB); interleaving remaining %d version(s) "
+                "across light papers (queue=%d)",
+                paper.arxiv_id,
+                version,
+                wire_bytes / (1024 * 1024),
+                len(remaining),
+                len(run.heavy_interleave_queue),
             )
+            break
     del ids_seen  # never sleep thermal cooldown after a completed download
     return True
 
@@ -1903,6 +2102,92 @@ def _crawl_s2_only(run: _Run, ids: list[str], started: float) -> None:
     )
 
 
+def _should_drain_one_heavy(run: _Run) -> bool:
+    """Return True when the interleaved heavy-version queue may safely pop one job."""
+    if not run.heavy_interleave_queue or run.stop.is_set():
+        return False
+    if len(run.heavy_interleave_queue) >= _HEAVY_INTERLEAVE_MAX_QUEUE:
+        return True
+    if run.versions_since_heavy < _HEAVY_INTERLEAVE_GAP_VERSIONS:
+        return False
+    return _rolling_byte_budget_bytes(run, now=time.monotonic()) < _BYTE_BUDGET_YELLOW_BYTES
+
+
+def _handle_defer_rate_limit(run: _Run, exc: _DeferRateLimit) -> None:
+    """Apply cooldown / stream breather or auto-resume increment for a deferred item."""
+    if exc.need_cooldown:
+        if exc.is_stream_failure:
+            _handle_auto_resume_cooldown(
+                run,
+                str(exc),
+                1,
+                stream_cooldown_seconds=60.0,
+            )
+        else:
+            _handle_auto_resume_cooldown(
+                run,
+                str(exc),
+                1,
+                retry_after=exc.retry_after,
+            )
+    else:
+        _inc(run, "arxiv_auto_resumes")
+
+
+def _maybe_run_hit_recovery_cooldown(run: _Run) -> None:
+    """Run scheduled 5-min recovery cooldown once after repeated Fastly edge HIT throttling."""
+    if run.pending_throttle_cooldown_seconds <= 0.0:
+        return
+    cooldown = run.pending_throttle_cooldown_seconds
+    run.pending_throttle_cooldown_seconds = 0.0
+    _inc(run, "hit_recovery_cooldowns")
+    _handle_auto_resume_cooldown(
+        run,
+        "degraded Fastly edge HIT recovery",
+        0,
+        proactive_seconds=cooldown,
+    )
+
+
+def _drain_heavy_queue(
+    run: _Run,
+    deferred_ids: list[str],
+    *,
+    drain_all: bool = False,
+) -> bool:
+    """Drain one ready interleaved heavy version (or all pending ones at end of pass)."""
+    drained_any = False
+    while run.heavy_interleave_queue and not run.stop.is_set():
+        if not drain_all and not _should_drain_one_heavy(run):
+            break
+        hjob = run.heavy_interleave_queue.popleft()
+        try:
+            _download_and_enqueue_version(
+                run,
+                hjob.paper,
+                hjob.version,
+                is_last=hjob.is_last_for_paper,
+                is_first_of_paper=False,
+            )
+            drained_any = True
+            run.versions_since_heavy = 0
+            _maybe_run_hit_recovery_cooldown(run)
+        except _DeferRateLimit as exc:
+            deferred_ids.append(hjob.paper.arxiv_id)
+            run.heavy_interleave_queue = deque(
+                qjob
+                for qjob in run.heavy_interleave_queue
+                if qjob.paper.arxiv_id != hjob.paper.arxiv_id
+            )
+            _handle_defer_rate_limit(run, exc)
+            if not drain_all:
+                break
+            continue
+        if not drain_all:
+            break
+    return drained_any
+
+
 def _crawl(run: _Run, ids: list[str], started: float) -> None:
     if run.config.s2_only:
         _crawl_s2_only(run, ids, started)
@@ -1931,6 +2216,8 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
                     retry_after=exc.retry_after,
                 )
                 continue
+            if run.config.traffic_shaping and not is_deferred:
+                planned = _decluster_papers(planned)
             for idx_paper, paper in enumerate(planned):
                 if run.stop.is_set():
                     return
@@ -1954,25 +2241,12 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
                                 0,
                                 proactive_seconds=run.config.arxiv_proactive_cooldown_seconds,
                             )
+                    _maybe_run_hit_recovery_cooldown(run)
+                    if not is_deferred:
+                        _drain_heavy_queue(run, deferred_ids, drain_all=False)
                 except _DeferRateLimit as exc:
                     deferred_ids.append(paper.arxiv_id)
-                    if exc.need_cooldown:
-                        if exc.is_stream_failure:
-                            _handle_auto_resume_cooldown(
-                                run,
-                                str(exc),
-                                1,
-                                stream_cooldown_seconds=60.0,
-                            )
-                        else:
-                            _handle_auto_resume_cooldown(
-                                run,
-                                str(exc),
-                                1,
-                                retry_after=exc.retry_after,
-                            )
-                    else:
-                        _inc(run, "arxiv_auto_resumes")
+                    _handle_defer_rate_limit(run, exc)
                     continue
             if not is_deferred:
                 seen += len(chunk)
@@ -1989,6 +2263,13 @@ def _crawl(run: _Run, ids: list[str], started: float) -> None:
                 time.monotonic() - started,
             )
             _maybe_checkpoint(run, seen)
+        if not is_deferred and run.heavy_interleave_queue and not run.stop.is_set():
+            logger.info(
+                "draining %d remaining interleaved heavy version(s) before pass end",
+                len(run.heavy_interleave_queue),
+            )
+            if _drain_heavy_queue(run, deferred_ids, drain_all=True):
+                _flush_metrics(run)
 
     _run_chunks(ids, is_deferred=False)
     deferred_pass = 0

@@ -126,6 +126,8 @@ def _setup_logging(data_dir: Path, s2_api_key: str | None = None) -> None:
         handlers=handlers,
         force=True,
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def _expand(ranges_path: Path, limit: int | None) -> Iterator[str]:
