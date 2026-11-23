@@ -79,7 +79,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         metavar="N",
-        help="batch size for S2 POST /graph/v1/paper/batch (default 25)",
+        help="batch size for S2 POST /graph/v1/paper/batch (default 150, max 500)",
     )
     p.add_argument(
         "--enable-oai-dates",
@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.enable_bib_fallback:
         overrides["enable_bib_fallback"] = True
     if args.s2_batch_size is not None:
-        overrides["s2_batch_size"] = args.s2_batch_size
+        overrides["s2_batch_size"] = min(max(args.s2_batch_size, 1), 500)
     if args.enable_oai_dates:
         overrides["enable_oai_dates"] = True
     if args.max_stream_mbps is not None:

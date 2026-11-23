@@ -1000,3 +1000,57 @@ def test_host_client_http2_recycles_on_5xx_and_timeout_retry(monkeypatch) -> Non
     assert client_closed_count == 2
     client._session.close()  # noqa: SLF001
     assert client_closed_count == 3
+
+
+def test_adaptive_s2_limiter_aimd_step_and_fast_recovery() -> None:
+    from crawler.http import AdaptiveRateLimiter
+
+    now = [0.0]
+    sleeps: list[float] = []
+    limiter = AdaptiveRateLimiter(
+        1.1,
+        max_interval=3.0,
+        success_streak_to_recover=5,
+        clock=lambda: now[0],
+        sleep=lambda s: sleeps.append(round(s, 4)) or now.__setitem__(0, now[0] + s),
+    )
+    limiter.note_429()
+    assert limiter._min_interval == 1.5  # noqa: SLF001
+    limiter.note_429()
+    assert limiter._min_interval == 1.9  # noqa: SLF001
+    for _ in range(5):
+        limiter.note_429()
+    assert limiter._min_interval == 3.0  # capped cleanly at max_interval  # noqa: SLF001
+
+    for _ in range(5):
+        limiter.note_success()
+    assert limiter._min_interval == 2.75  # noqa: SLF001
+    for _ in range(35):
+        limiter.note_success()
+    assert limiter._min_interval == 1.1  # recovers back to base_interval  # noqa: SLF001
+
+    zero_limiter = AdaptiveRateLimiter(0.0, clock=lambda: 0.0, sleep=lambda _s: None)
+    zero_limiter.note_429()
+    assert zero_limiter._min_interval == 0.0  # test-mode 0s limiter stays at 0  # noqa: SLF001
+
+
+def test_s2_api_key_stripped_and_batch_size_defaults_to_150_capped_500(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("S2_API_KEY", "  my-key-123 \n")
+    monkeypatch.setenv("CRAWLER_S2_BATCH_SIZE", "999")
+    cfg = Config.from_env()
+    assert cfg.s2_api_key == "my-key-123"
+    assert cfg.s2_batch_size == 500
+
+    monkeypatch.delenv("CRAWLER_S2_BATCH_SIZE")
+    assert Config.from_env().s2_batch_size == 150
+
+    client = make_s2_client(Config(s2_api_key="  padded-key \t"))
+    assert client._session.headers["x-api-key"] == "padded-key"  # noqa: SLF001
+    assert client.limiter._max_interval == 3.0  # noqa: SLF001
+
+    anon = make_s2_client(Config(s2_api_key="   \n"))
+    assert "x-api-key" not in anon._session.headers  # noqa: SLF001
+    assert anon.limiter._max_interval == 8.0  # noqa: SLF001

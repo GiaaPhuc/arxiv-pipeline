@@ -168,9 +168,13 @@ def _calls(prefix: str) -> list[str]:
     return [c.request.url for c in responses.calls if c.request.url.startswith(prefix)]
 
 
+_ORIG_S2_RETRY_AFTER = pipeline._s2_retry_after
+
+
 @pytest.fixture(autouse=True)
 def _fast_s2_backoff(monkeypatch):
     monkeypatch.setattr(pipeline, "_retry_after", lambda *_a, **_k: 0.0)
+    monkeypatch.setattr(pipeline, "_s2_retry_after", lambda *_a, **_k: 0.0)
 
 
 def _read(path: Path) -> object:
@@ -2833,3 +2837,302 @@ def test_v3171_throughput_log_separates_edge_hit_and_shield_hit(tmp_path, caplog
         assert dummy_run.counters["defensive_soft_pacing_triggers"] == 1
     finally:
         manifest.close()
+
+
+def _seed_discovered_papers(data_dir: Path, ids: list[str]) -> None:
+    from dataclasses import asdict
+
+    from crawler.ids import id_to_dirname
+    from crawler.models import PaperMeta, VersionMeta
+
+    manifest = pipeline.Manifest(data_dir / "manifest.sqlite")
+    try:
+        for arxiv_id in ids:
+            pdir = data_dir / "papers" / id_to_dirname(arxiv_id)
+            v1_tex = pdir / "v1" / "tex"
+            v1_tex.mkdir(parents=True, exist_ok=True)
+            (v1_tex / "main.tex").write_bytes(TEX)
+            paper = PaperMeta(
+                arxiv_id=arxiv_id,
+                title=f"Title {arxiv_id}",
+                authors=["Alice"],
+                submission_date="2024-08-01",
+                num_versions=1,
+            )
+            (pdir / "paper.json").write_text(json.dumps(asdict(paper)), encoding="utf-8")
+            vmeta = VersionMeta(arxiv_id=arxiv_id, version=1, status=Status.OK, kept_bytes=len(TEX))
+            payload = asdict(vmeta)
+            payload["status"] = Status.OK.value
+            (pdir / "v1" / "meta.json").write_text(json.dumps(payload), encoding="utf-8")
+            manifest.record(vmeta)
+    finally:
+        manifest.close()
+
+
+def test_s2_retry_after_uses_fast_stepped_backoff_and_honors_short_retry_after():
+    import requests
+
+    w0 = _ORIG_S2_RETRY_AFTER(None, rate_attempt=0)
+    w1 = _ORIG_S2_RETRY_AFTER(None, rate_attempt=1)
+    w2 = _ORIG_S2_RETRY_AFTER(None, rate_attempt=2)
+    w3 = _ORIG_S2_RETRY_AFTER(None, rate_attempt=3)
+    assert 2.2 <= w0 <= 3.0
+    assert 4.2 <= w1 <= 5.0
+    assert 8.2 <= w2 <= 9.0
+    assert 15.2 <= w3 <= 16.0
+
+    r_short = requests.Response()
+    r_short.headers["Retry-After"] = "3"
+    assert _ORIG_S2_RETRY_AFTER(r_short, rate_attempt=0) == 3.0
+
+    r_tiny = requests.Response()
+    r_tiny.headers["Retry-After"] = "0.1"
+    assert _ORIG_S2_RETRY_AFTER(r_tiny, rate_attempt=0) == 1.0
+
+    r_huge = requests.Response()
+    r_huge.headers["Retry-After"] = "999"
+    assert _ORIG_S2_RETRY_AFTER(r_huge, rate_attempt=0) == 120.0
+
+
+@responses.activate
+def test_s2_save_first_isolates_truncated_paper_429_without_reposting_batch(tmp_path):
+    data_dir = tmp_path / "data"
+    ids = ["2408.00001", "2408.00002"]
+    _seed_discovered_papers(data_dir, ids)
+
+    post_calls: list[list[str]] = []
+
+    def batch_cb(request):
+        post_calls.append(json.loads(request.body)["ids"])
+        return (
+            200,
+            {},
+            json.dumps(
+                [
+                    {
+                        "paperId": "p-1",
+                        "venue": "ICLR",
+                        "referenceCount": 1,
+                        "references": [
+                            {
+                                "paperId": "r1",
+                                "title": "Complete Ref",
+                                "authors": [],
+                                "year": 2023,
+                                "externalIds": {"ArXiv": "2301.00001"},
+                            }
+                        ],
+                    },
+                    {
+                        "paperId": "p-2",
+                        "venue": "NeurIPS",
+                        "referenceCount": 50,
+                        "references": [{"paperId": "only-one", "title": "One", "authors": []}],
+                    },
+                ]
+            ),
+        )
+
+    responses.add_callback(
+        responses.POST,
+        f"{S2}/graph/v1/paper/batch",
+        callback=batch_cb,
+        content_type="application/json",
+    )
+    ref_url = f"{S2}/graph/v1/paper/ARXIV:2408.00002/references"
+    responses.add(responses.GET, ref_url, status=429, body='{"message":"Too Many Requests"}')
+    responses.add(responses.GET, ref_url, status=200, json=_s2_refs("2408.00002"))
+
+    cfg = _config(tmp_path, s2_only=True, s2_batch_size=10)
+    pipeline.run(ids, cfg)
+
+    assert len(post_calls) == 1
+    assert len(_calls(ref_url)) == 2
+    assert (data_dir / "papers" / "2408-00001" / pipeline.S2_RAW_NAME).is_file()
+    assert (data_dir / "papers" / "2408-00002" / pipeline.S2_RAW_NAME).is_file()
+    assert len(_read(data_dir / "papers" / "2408-00001" / "v1" / "references.json")) == 1
+    assert len(_read(data_dir / "papers" / "2408-00002" / "v1" / "references.json")) == 2
+
+
+@responses.activate
+def test_s2_save_first_preserves_left_half_on_bisection_then_429(tmp_path):
+    data_dir = tmp_path / "data"
+    ids = ["2408.00001", "2408.00002"]
+    _seed_discovered_papers(data_dir, ids)
+
+    posted: list[list[str]] = []
+
+    def batch_cb(request):
+        req_ids = json.loads(request.body)["ids"]
+        posted.append(req_ids)
+        if len(req_ids) == 2:
+            return 400, {}, json.dumps({"message": "Response would exceed maximum size"})
+        if req_ids == ["ARXIV:2408.00001"]:
+            return (
+                200,
+                {},
+                json.dumps([{"paperId": "p1", "venue": "", "referenceCount": 0, "references": []}]),
+            )
+        # Right half hits 429 first, then succeeds on retry without re-posting 2408.00001:
+        right_attempts = sum(1 for batch in posted if batch == ["ARXIV:2408.00002"])
+        if right_attempts == 1:
+            return 429, {}, '{"message":"rate limited"}'
+        return (
+            200,
+            {},
+            json.dumps([{"paperId": "p2", "venue": "", "referenceCount": 0, "references": []}]),
+        )
+
+    responses.add_callback(
+        responses.POST,
+        f"{S2}/graph/v1/paper/batch",
+        callback=batch_cb,
+        content_type="application/json",
+    )
+
+    cfg = _config(tmp_path, s2_only=True, s2_batch_size=10)
+    pipeline.run(ids, cfg)
+
+    assert posted == [
+        ["ARXIV:2408.00001", "ARXIV:2408.00002"],
+        ["ARXIV:2408.00001"],
+        ["ARXIV:2408.00002"],
+        ["ARXIV:2408.00002"],
+    ]
+    assert (data_dir / "papers" / "2408-00001" / pipeline.S2_RAW_NAME).is_file()
+    assert (data_dir / "papers" / "2408-00002" / pipeline.S2_RAW_NAME).is_file()
+
+
+@responses.activate
+def test_s2_only_deferred_retry_recovers_failed_batch_and_is_bounded(tmp_path):
+    # Part A: 4 initial 429s -> deferred pass 1 recovers on attempt 5
+    data_a = tmp_path / "a" / "data"
+    _seed_discovered_papers(data_a, ["2408.00001"])
+    calls_a = {"n": 0}
+
+    def cb_a(_request):
+        calls_a["n"] += 1
+        if calls_a["n"] <= 4:
+            return 429, {}, '{"message":"rate limit"}'
+        return (
+            200,
+            {},
+            json.dumps([{"paperId": "p1", "venue": "", "referenceCount": 0, "references": []}]),
+        )
+
+    responses.add_callback(
+        responses.POST,
+        f"{S2}/graph/v1/paper/batch",
+        callback=cb_a,
+        content_type="application/json",
+    )
+    cfg_a = Config(
+        data_dir=data_a,
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        s2_only=True,
+        s2_batch_size=10,
+    )
+    pipeline.run(["2408.00001"], cfg_a)
+    assert calls_a["n"] == 5
+    assert (data_a / "papers" / "2408-00001" / pipeline.S2_RAW_NAME).is_file()
+
+    # Part B: persistent 429 stops cleanly after 1 initial + _S2_ONLY_MAX_DEFERRED_PASSES (2) passes
+    responses.reset()
+    data_b = tmp_path / "b" / "data"
+    _seed_discovered_papers(data_b, ["2408.00001"])
+    calls_b = {"n": 0}
+
+    def cb_b(_request):
+        calls_b["n"] += 1
+        return 429, {}, '{"message":"always throttled"}'
+
+    responses.add_callback(
+        responses.POST,
+        f"{S2}/graph/v1/paper/batch",
+        callback=cb_b,
+        content_type="application/json",
+    )
+    cfg_b = Config(
+        data_dir=data_b,
+        contact="test@example.com",
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        s2_only=True,
+        s2_batch_size=10,
+    )
+    pipeline.run(["2408.00001"], cfg_b)
+    expected_calls = pipeline._S2_MAX_BATCH_ATTEMPTS * (1 + pipeline._S2_ONLY_MAX_DEFERRED_PASSES)
+    assert calls_b["n"] == expected_calls
+    assert not (data_b / "papers" / "2408-00001" / pipeline.S2_RAW_NAME).exists()
+
+
+@responses.activate
+def test_s2_only_triggers_periodic_checkpoint_and_logs_429_detail_without_leaking_key(
+    tmp_path, monkeypatch, caplog
+):
+    data_dir = tmp_path / "data"
+    ids = ["2408.00001", "2408.00002", "2408.00004"]
+    _seed_discovered_papers(data_dir, ids)
+
+    bg_backups: list[str] = []
+
+    def spy_backup(_src: Path, _dst: Path, *, skip_if_unchanged: bool = False) -> None:
+        _ = skip_if_unchanged
+        bg_backups.append(threading.current_thread().name)
+
+    monkeypatch.setattr(pipeline, "backup_data_dir", spy_backup)
+
+    secret = "super-secret-s2-key-xyz"
+    state = {"n": 0}
+
+    def batch_cb(request):
+        state["n"] += 1
+        if state["n"] == 1:
+            return 429, {}, json.dumps({"message": f"Too Many Requests key={secret}"})
+        req_ids = [x.removeprefix("ARXIV:") for x in json.loads(request.body)["ids"]]
+        return (
+            200,
+            {},
+            json.dumps(
+                [
+                    {"paperId": f"p-{b}", "venue": "", "referenceCount": 0, "references": []}
+                    for b in req_ids
+                ]
+            ),
+        )
+
+    responses.add_callback(
+        responses.POST,
+        f"{S2}/graph/v1/paper/batch",
+        callback=batch_cb,
+        content_type="application/json",
+    )
+
+    cfg = Config(
+        data_dir=data_dir,
+        contact="test@example.com",
+        s2_api_key=secret,
+        arxiv_min_interval=0.0,
+        s2_min_interval=0.0,
+        max_retries=0,
+        s2_only=True,
+        s2_batch_size=2,
+        backup_dir=tmp_path / "backup.tar.gz",
+        backup_every_ids=2,
+    )
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="crawler.pipeline"):
+        pipeline.run(ids, cfg)
+
+    assert "checkpoint-worker" in bg_backups
+    warns = [r.message for r in caplog.records if "S2 429;" in r.message]
+    assert len(warns) == 1
+    assert "Too Many Requests" in warns[0]
+    assert secret not in warns[0]
+    diag_text = (data_dir / "logs" / "diagnostics.jsonl").read_text(encoding="utf-8")
+    assert "Too Many Requests" in diag_text
+    assert secret not in diag_text

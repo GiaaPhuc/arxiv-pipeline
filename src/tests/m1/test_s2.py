@@ -361,3 +361,154 @@ def test_batch_bisection_on_payload_too_large():
     assert len(out) == 2
     assert out["2310.00001"].found is True
     assert out["2310.00002"].found is True
+
+
+def test_references_truncated_ignores_minor_null_gap_and_catches_real_truncation():
+    from crawler.s2 import _references_truncated
+
+    assert _references_truncated({"referenceCount": 41, "references": [{}] * 38}) is False
+    assert _references_truncated({"referenceCount": 81, "references": [{}] * 78}) is False
+    assert _references_truncated({"referenceCount": 5, "references": [{}] * 3}) is False
+    assert _references_truncated({"referenceCount": 50, "references": [{}]}) is True
+    assert _references_truncated({"referenceCount": 10, "references": []}) is True
+    assert _references_truncated({"referenceCount": 650, "references": [{}] * 500}) is True
+    assert _references_truncated({"referenceCount": 5, "references": None}) is True
+
+
+@responses.activate
+def test_batch_bisection_on_http_400_size_exceeded_but_not_generic_400():
+    import json
+
+    import pytest
+
+    client = DummyS2Client()
+    mode = {"generic": False}
+
+    def batch_callback(request):
+        body = json.loads(request.body)
+        if len(body["ids"]) > 1:
+            if mode["generic"]:
+                return 400, {}, json.dumps({"message": "Bad query syntax"})
+            return 400, {}, json.dumps({"message": "Response would exceed maximum size"})
+        paper_id = body["ids"][0].removeprefix("ARXIV:")
+        return (
+            200,
+            {},
+            json.dumps(
+                [{"paperId": f"p-{paper_id}", "venue": "", "referenceCount": 0, "references": []}]
+            ),
+        )
+
+    responses.add_callback(
+        responses.POST,
+        "https://api.semanticscholar.org/graph/v1/paper/batch",
+        callback=batch_callback,
+        content_type="application/json",
+    )
+
+    out = fetch_references_batch(client, ["2310.00001", "2310.00002"])
+    assert set(out) == {"2310.00001", "2310.00002"}
+
+    mode["generic"] = True
+    with pytest.raises(requests.HTTPError):
+        fetch_references_batch(client, ["2310.00001", "2310.00002"])
+
+
+@responses.activate
+def test_batch_aggregate_10k_truncation_saves_complete_and_rebatches_tail():
+    import json
+
+    client = DummyS2Client()
+    posted_batches: list[list[str]] = []
+    saved_order: list[str] = []
+
+    def batch_callback(request):
+        ids = json.loads(request.body)["ids"]
+        posted_batches.append(ids)
+        if len(ids) == 3:
+            big_refs = [
+                {"paperId": f"r-{i}", "title": f"Ref {i}", "authors": [], "year": 2020}
+                for i in range(9500)
+            ]
+            return (
+                200,
+                {},
+                json.dumps(
+                    [
+                        {
+                            "paperId": "p1",
+                            "venue": "ICML",
+                            "referenceCount": 9500,
+                            "references": big_refs,
+                        },
+                        {"paperId": "p2", "venue": "ICLR", "referenceCount": 50, "references": []},
+                        {"paperId": "p3", "venue": "", "referenceCount": 40, "references": []},
+                    ]
+                ),
+            )
+        return (
+            200,
+            {},
+            json.dumps(
+                [
+                    {
+                        "paperId": f"p-{i}",
+                        "venue": "",
+                        "referenceCount": 1,
+                        "references": [{"paperId": f"ok-{i}", "title": "OK", "authors": []}],
+                    }
+                    for i, _ in enumerate(ids)
+                ]
+            ),
+        )
+
+    responses.add_callback(
+        responses.POST,
+        "https://api.semanticscholar.org/graph/v1/paper/batch",
+        callback=batch_callback,
+        content_type="application/json",
+    )
+
+    out = fetch_references_batch(
+        client,
+        ["2310.00001", "2310.00002", "2310.00003"],
+        on_result=lambda base, _res: saved_order.append(base),
+    )
+    assert posted_batches == [
+        ["ARXIV:2310.00001", "ARXIV:2310.00002", "ARXIV:2310.00003"],
+        ["ARXIV:2310.00002", "ARXIV:2310.00003"],
+    ]
+    assert saved_order == ["2310.00001", "2310.00002", "2310.00003"]
+    assert len(out["2310.00001"].references) == 9500
+    assert len(out["2310.00002"].references) == 1
+    assert len(out["2310.00003"].references) == 1
+
+
+@responses.activate
+def test_batch_on_result_and_defer_truncated_isolate_single_truncated_paper():
+    client = DummyS2Client()
+    responses.add(
+        responses.POST,
+        "https://api.semanticscholar.org/graph/v1/paper/batch",
+        json=[
+            {"paperId": "p1", "venue": "", "referenceCount": 0, "references": []},
+            {
+                "paperId": "p2",
+                "venue": "ICLR 2025",
+                "referenceCount": 50,
+                "references": [{"paperId": "only-one", "title": "One", "authors": []}],
+            },
+        ],
+    )
+    saved: list[str] = []
+    deferred: dict[str, str | None] = {}
+    out = fetch_references_batch(
+        client,
+        ["2310.00001", "2310.00002"],
+        on_result=lambda base, _res: saved.append(base),
+        defer_truncated=deferred,
+    )
+    assert saved == ["2310.00001"]
+    assert deferred == {"2310.00002": "ICLR 2025"}
+    assert list(out.keys()) == ["2310.00001"]
+    assert len(responses.calls) == 1

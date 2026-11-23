@@ -47,6 +47,7 @@ import logging
 import math
 import os
 import queue
+import random
 import shutil
 import tempfile
 import threading
@@ -74,7 +75,7 @@ from .http import (
 from .ids import id_to_dirname, normalize_id, split_version
 from .manifest import Manifest, atomic_write
 from .models import FileEntry, PaperMeta, Status, VersionMeta
-from .s2 import S2_BATCH_SIZE, S2Result, fetch_references_batch
+from .s2 import S2_BATCH_SIZE, S2Result, fetch_references, fetch_references_batch
 from .source import (
     _EARLY_ABORT_MAGICS,
     _MIN_PROGRESS_BYTES,
@@ -92,6 +93,14 @@ logger = logging.getLogger(__name__)
 S2_RAW_NAME = "s2_references.raw.json.gz"
 _S2_MAX_BATCH_ATTEMPTS = 4  # per batch, only consumed by HTTP 429
 _S2_MAX_RATE_LIMIT_WAIT = 30 * 60  # cumulative 429 wait without a success → stop S2 worker
+_S2_STEPPED_429_BACKOFF = (
+    2.0,
+    4.0,
+    8.0,
+    15.0,
+)  # S2 window is 1 req/s, never force 15->60s arXiv sleep
+_S2_ONLY_MAX_DEFERRED_PASSES = 2
+_S2_ONLY_DEFERRED_COOLDOWN_SECONDS = 30.0
 _S2_BATCH_FLUSH_SECONDS = 0.35  # wait briefly in fast tests so nearby papers share one batch POST
 _S2_LIVE_BATCH_FLUSH_SECONDS = 45.0  # v3.7: coalesce 10-14 live papers into one S2 batch POST
 _ARXIV_MAX_429_ATTEMPTS = 4  # wait Retry-After between attempts; then StopCrawl
@@ -434,6 +443,8 @@ class _Run:
         }
     )
     s2_rate_limit_wait: float = 0.0
+    s2_total_queued: int = 0
+    s2_checkpoint_last_done: int = 0
 
 
 # --------------------------------------------------------------------------- helpers
@@ -1955,24 +1966,69 @@ def _note_s2_success(run: _Run) -> None:
         limiter.note_success()
 
 
+def _s2_retry_after(
+    response: requests.Response | None,
+    *,
+    rate_attempt: int = 0,
+) -> float:
+    """Parse S2 ``Retry-After`` (>= 1 s) or fast jittered backoff ``2->4->8->15 s``."""
+    if response is not None and getattr(response, "headers", None):
+        raw = response.headers.get("Retry-After")
+        if raw is not None:
+            try:
+                return min(max(float(raw), 1.0), 120.0)
+            except (TypeError, ValueError):
+                pass
+    stepped = _S2_STEPPED_429_BACKOFF[min(max(rate_attempt, 0), len(_S2_STEPPED_429_BACKOFF) - 1)]
+    return min(round(stepped + random.uniform(0.2, 1.0), 2), 120.0)
+
+
+def _s2_response_snippet(
+    response: requests.Response | None,
+    *,
+    secret: str | None = None,
+    limit: int = 160,
+) -> str:
+    if response is None:
+        return ""
+    try:
+        raw = getattr(response, "text", "")
+    except Exception:
+        return ""
+    if not isinstance(raw, str):
+        return ""
+    cleaned = " ".join(raw.split())
+    if secret and secret.strip():
+        cleaned = cleaned.replace(secret.strip(), "***")
+    return cleaned[:limit]
+
+
 def _wait_s2_429(
     run: _Run,
     response: requests.Response | None,
     *,
     rate_attempt: int = 0,
 ) -> bool:
-    """Wait for Retry-After; return True if the run was stopped."""
-    wait = _retry_after(response, rate_attempt=rate_attempt)
+    """Wait for S2 Retry-After/fast backoff; return True if the run was stopped."""
+    wait = _s2_retry_after(response, rate_attempt=rate_attempt)
     _inc(run, "s2_429")
     _inc(run, "s2_retry_wait_seconds", wait)
     run.s2_rate_limit_wait += wait
     limiter = run.s2.limiter
     if isinstance(limiter, AdaptiveRateLimiter):
         limiter.note_429()
-    _diag(run, "s2_429", attempt=rate_attempt + 1, wait_seconds=wait)
+    snippet = _s2_response_snippet(response, secret=run.config.s2_api_key)
+    _diag(run, "s2_429", attempt=rate_attempt + 1, wait_seconds=wait, detail=snippet)
     if run.rate_state_path is not None and wait > 0:
         save_rate_state(run.rate_state_path, s2_cooldown_until=time.time() + wait)
-    logger.warning("S2 429; waiting %.0fs (Retry-After)", wait)
+    detail_msg = f" [{snippet}]" if snippet else ""
+    logger.warning(
+        "S2 429; waiting %.1fs (attempt %d/%d)%s",
+        wait,
+        rate_attempt + 1,
+        _S2_MAX_BATCH_ATTEMPTS,
+        detail_msg,
+    )
     try:
         return run.stop.wait(wait)
     finally:
@@ -2007,62 +2063,209 @@ def _collect_s2_batch(
     return jobs
 
 
-def _handle_s2_batch(run: _Run, jobs: list[_S2Job]) -> None:
-    """Fetch and store up to ``s2_batch_size`` papers; leave failed batches for next run."""
-    ids = [job.paper.arxiv_id for job in jobs]
-    paper_dirs = {job.paper.arxiv_id: job.paper_dir for job in jobs}
-    for _attempt in range(_S2_MAX_BATCH_ATTEMPTS):
+def _fetch_s2_truncated_with_retry(run: _Run, job: _S2Job, venue: str | None) -> bool:
+    """Fetch paginated S2 references for one truncated paper without discarding the batch."""
+    base = job.paper.arxiv_id
+    for attempt in range(_S2_MAX_BATCH_ATTEMPTS):
+        if run.stop.is_set() or run.s2_disabled:
+            return False
         try:
             with metrics.stage_timer("s2"):
-                results = fetch_references_batch(
+                result = fetch_references(
                     run.s2,
-                    ids,
-                    paper_dirs=paper_dirs,
+                    base,
+                    paper_dir=job.paper_dir,
                     enable_bib_fallback=run.config.enable_bib_fallback,
                 )
+            result.venue = venue
+            _store_s2(job, result)
             _note_s2_success(run)
             run.s2_rate_limit_wait = 0.0
-            _inc(run, "s2_batches")
-            for job in jobs:
-                base = job.paper.arxiv_id
-                result = results[base]
-                _store_s2(job, result)
-                _inc(run, "s2_ok" if result.found else "s2_not_indexed")
-            return
+            _inc(run, "s2_ok" if result.found else "s2_not_indexed")
+            return True
         except requests.HTTPError as exc:
             status = _http_status(exc)
             if status == 429:
-                if _wait_s2_429(run, exc.response, rate_attempt=_attempt):
-                    return
+                if _wait_s2_429(run, exc.response, rate_attempt=attempt):
+                    return False
                 if run.s2_rate_limit_wait >= _S2_MAX_RATE_LIMIT_WAIT:
                     logger.error(
                         "S2 rate-limit wait exceeded %.0fs; worker off for this run",
                         _S2_MAX_RATE_LIMIT_WAIT,
                     )
                     run.s2_disabled = True
-                    return
+                    return False
                 continue
             if status == 403:
                 logger.error("S2 answered 403 (invalid/expired key?); S2 worker switched off")
                 run.s2_disabled = True
-                return
-            logger.warning("S2 HTTP %s on batch; retried on next run", status)
-            return
+                return False
+            logger.warning("S2 HTTP %s on %s /references; retried later", status, base)
+            return False
         except (requests.RequestException, ValueError) as exc:
-            logger.warning("S2 batch failed (%r); retried on next run", exc)
-            return
+            logger.warning("S2 /references failed for %s (%r); retried later", base, exc)
+            return False
     logger.warning(
-        "S2 batch gave up after %d rate-limited attempts; retried on next run",
+        "S2 /references gave up after %d 429 attempts on %s",
         _S2_MAX_BATCH_ATTEMPTS,
+        base,
     )
+    return False
+
+
+def _handle_s2_batch(run: _Run, jobs: list[_S2Job]) -> list[_S2Job]:
+    """Fetch and store ``jobs`` Save-First; return any unfinished jobs for deferred retry."""
+    job_by_id = {job.paper.arxiv_id: job for job in jobs}
+    stored_ids: set[str] = set()
+    truncated_pending: dict[str, str | None] = {}
+
+    def _on_result(base: str, result: S2Result) -> None:
+        job = job_by_id.get(base)
+        if job is None or base in stored_ids:
+            return
+        _store_s2(job, result)
+        stored_ids.add(base)
+        _inc(run, "s2_ok" if result.found else "s2_not_indexed")
+
+    batch_exhausted = False
+    for _attempt in range(_S2_MAX_BATCH_ATTEMPTS):
+        remaining_ids = [
+            job.paper.arxiv_id
+            for job in jobs
+            if job.paper.arxiv_id not in stored_ids and job.paper.arxiv_id not in truncated_pending
+        ]
+        if not remaining_ids:
+            break
+        stored_before = len(stored_ids)
+        try:
+            with metrics.stage_timer("s2"):
+                results = fetch_references_batch(
+                    run.s2,
+                    remaining_ids,
+                    paper_dirs={i: job_by_id[i].paper_dir for i in remaining_ids},
+                    enable_bib_fallback=run.config.enable_bib_fallback,
+                    on_result=_on_result,
+                    defer_truncated=truncated_pending,
+                )
+            for base, result in results.items():
+                if base not in stored_ids:
+                    _on_result(base, result)
+            _note_s2_success(run)
+            run.s2_rate_limit_wait = 0.0
+            _inc(run, "s2_batches")
+            break
+        except requests.HTTPError as exc:
+            if len(stored_ids) > stored_before:
+                run.s2_rate_limit_wait = 0.0
+            status = _http_status(exc)
+            if status == 429:
+                if _wait_s2_429(run, exc.response, rate_attempt=_attempt):
+                    break
+                if run.s2_rate_limit_wait >= _S2_MAX_RATE_LIMIT_WAIT:
+                    logger.error(
+                        "S2 rate-limit wait exceeded %.0fs; worker off for this run",
+                        _S2_MAX_RATE_LIMIT_WAIT,
+                    )
+                    run.s2_disabled = True
+                    break
+                if _attempt == _S2_MAX_BATCH_ATTEMPTS - 1:
+                    batch_exhausted = True
+                continue
+            if status == 403:
+                logger.error("S2 answered 403 (invalid/expired key?); S2 worker switched off")
+                run.s2_disabled = True
+                break
+            logger.warning("S2 HTTP %s on batch; retried later", status)
+            break
+        except (requests.RequestException, ValueError) as exc:
+            logger.warning("S2 batch failed (%r); retried later", exc)
+            break
+
+    if batch_exhausted:
+        logger.warning(
+            "S2 batch gave up after %d rate-limited attempts; %d paper(s) left unfinished",
+            _S2_MAX_BATCH_ATTEMPTS,
+            len(jobs) - len(stored_ids) - len(truncated_pending),
+        )
+
+    for base, venue in list(truncated_pending.items()):
+        if run.stop.is_set() or run.s2_disabled:
+            break
+        if _fetch_s2_truncated_with_retry(run, job_by_id[base], venue):
+            stored_ids.add(base)
+
+    return [job for job in jobs if job.paper.arxiv_id not in stored_ids]
+
+
+def _s2_only_after_batch(
+    run: _Run,
+    *,
+    deferred_count: int,
+    last_flush: float,
+) -> float:
+    """Log progress, flush metrics, and trigger periodic checkpoints during ``--s2-only``."""
+    with run.counters_lock:
+        s2_ok = int(run.counters.get("s2_ok", 0))
+        s2_not_indexed = int(run.counters.get("s2_not_indexed", 0))
+        s2_429 = int(run.counters.get("s2_429", 0))
+        total_q = run.s2_total_queued
+    s2_done = s2_ok + s2_not_indexed
+    logger.info(
+        "s2-only progress: %d/%d done (ok=%d, not_indexed=%d, 429=%d, deferred=%d)",
+        s2_done,
+        total_q,
+        s2_ok,
+        s2_not_indexed,
+        s2_429,
+        deferred_count,
+    )
+    now = time.monotonic()
+    if now - last_flush >= 60.0:
+        _flush_metrics(run)
+        last_flush = now
+    if (
+        run.config.backup_dir is not None
+        and run.config.backup_every_ids > 0
+        and s2_done - run.s2_checkpoint_last_done >= run.config.backup_every_ids
+    ):
+        if run.checkpoint_thread is not None and run.checkpoint_thread.is_alive():
+            logger.info(
+                "previous checkpoint backup still running; skipping at %d s2 papers",
+                s2_done,
+            )
+        else:
+            run.s2_checkpoint_last_done = s2_done
+            thread = threading.Thread(
+                target=_run_checkpoint_bg,
+                args=(run, Path(run.config.data_dir), run.config.backup_dir, s2_done),
+                kwargs={"skip_if_unchanged": True},
+                name="checkpoint-worker",
+            )
+            run.checkpoint_thread = thread
+            thread.start()
+    return last_flush
+
+
+def _run_s2_chunk(run: _Run, jobs: list[_S2Job], *, label: str = "S2 worker") -> list[_S2Job]:
+    try:
+        return _handle_s2_batch(run, jobs)
+    except Exception:
+        logger.exception("%s error on batch starting with %s", label, jobs[0].paper.arxiv_id)
+        return list(jobs)
 
 
 def _s2_worker(run: _Run) -> None:
     flush_sec = (
-        _S2_LIVE_BATCH_FLUSH_SECONDS
-        if (run.config.arxiv_min_interval >= 3.0 and run.config.s2_min_interval >= 1.0)
-        else _S2_BATCH_FLUSH_SECONDS
+        _S2_BATCH_FLUSH_SECONDS
+        if run.config.s2_only
+        else (
+            _S2_LIVE_BATCH_FLUSH_SECONDS
+            if (run.config.arxiv_min_interval >= 3.0 and run.config.s2_min_interval >= 1.0)
+            else _S2_BATCH_FLUSH_SECONDS
+        )
     )
+    deferred_jobs: list[_S2Job] = []
+    last_flush = time.monotonic()
     while True:
         jobs = _collect_s2_batch(
             run.s2_queue,
@@ -2070,13 +2273,55 @@ def _s2_worker(run: _Run) -> None:
             max_batch_size=run.config.s2_batch_size,
         )
         if jobs is None:
-            return
+            break
         if run.stop.is_set() or run.s2_disabled or run.config.skip_s2:
             continue  # drain; papers without raw.gz are queued again on the next run
-        try:
-            _handle_s2_batch(run, jobs)
-        except Exception:
-            logger.exception("S2 worker error on batch starting with %s", jobs[0].paper.arxiv_id)
+        unfinished = _run_s2_chunk(run, jobs, label="S2 worker")
+        if run.config.s2_only:
+            if unfinished:
+                deferred_jobs.extend(unfinished)
+            last_flush = _s2_only_after_batch(
+                run,
+                deferred_count=len(deferred_jobs),
+                last_flush=last_flush,
+            )
+
+    if not (run.config.s2_only and deferred_jobs and not run.stop.is_set() and not run.s2_disabled):
+        return
+    for retry_pass in range(1, _S2_ONLY_MAX_DEFERRED_PASSES + 1):
+        if not deferred_jobs or run.stop.is_set() or run.s2_disabled:
+            break
+        if run.config.s2_min_interval >= 1.0:
+            logger.info(
+                "s2-only deferred retry pass %d/%d: cooling %.0fs before retrying %d paper(s)",
+                retry_pass,
+                _S2_ONLY_MAX_DEFERRED_PASSES,
+                _S2_ONLY_DEFERRED_COOLDOWN_SECONDS,
+                len(deferred_jobs),
+            )
+            if run.stop.wait(_S2_ONLY_DEFERRED_COOLDOWN_SECONDS):
+                break
+        else:
+            logger.info(
+                "s2-only deferred retry pass %d/%d: retrying %d paper(s)",
+                retry_pass,
+                _S2_ONLY_MAX_DEFERRED_PASSES,
+                len(deferred_jobs),
+            )
+        next_deferred: list[_S2Job] = []
+        batch_sz = max(int(run.config.s2_batch_size), 1)
+        for start in range(0, len(deferred_jobs), batch_sz):
+            if run.stop.is_set() or run.s2_disabled:
+                next_deferred.extend(deferred_jobs[start:])
+                break
+            chunk = deferred_jobs[start : start + batch_sz]
+            next_deferred.extend(_run_s2_chunk(run, chunk, label="S2 deferred worker"))
+            last_flush = _s2_only_after_batch(
+                run,
+                deferred_count=len(next_deferred),
+                last_flush=last_flush,
+            )
+        deferred_jobs = next_deferred
 
 
 # --------------------------------------------------------------------------- entry point
@@ -2196,8 +2441,10 @@ def _crawl_s2_only(run: _Run, ids: list[str], started: float) -> None:
             continue
         _clean_stale(paper_dir)
         if _paper_needs_s2(paper, paper_dir):
-            run.s2_queue.put(_S2Job(paper, paper_dir))
             queued += 1
+            with run.counters_lock:
+                run.s2_total_queued = queued
+            run.s2_queue.put(_S2Job(paper, paper_dir))
     logger.info(
         "s2-only mode: queued %d/%d discovered papers for Semantic Scholar in %.1f s",
         queued,

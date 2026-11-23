@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 from .http import HostClient
@@ -25,8 +27,13 @@ from .models import Reference
 
 logger = logging.getLogger(__name__)
 
-S2_BATCH_SIZE = 25
+S2_BATCH_SIZE = 150
 _REFERENCES_PAGE_LIMIT = 1000
+_SINGLE_PAPER_TRUNCATION_FLOOR = 500
+_TRUNCATION_SEVERE_RATIO = 0.5
+_TRUNCATION_MIN_REF_COUNT = 10
+_BATCH_AGGREGATE_TRUNCATION_REFS = 9500
+_SIZE_LIMIT_HINTS = ("maximum size", "exceed", "too large", "payload")
 
 _FIELDS = "title,authors,year,publicationDate,externalIds"
 _BATCH_FIELDS = (
@@ -77,14 +84,49 @@ def _parse_ref(item: dict) -> Reference:
     )
 
 
+def _is_size_limit_400(response: Any) -> bool:
+    """True when S2 returns HTTP 400 because the batch response exceeds 10 MB."""
+    if getattr(response, "status_code", None) != 400:
+        return False
+    text = getattr(response, "text", "")
+    if not isinstance(text, str):
+        return False
+    lower = text.lower()
+    return any(hint in lower for hint in _SIZE_LIMIT_HINTS)
+
+
 def _references_truncated(paper: dict) -> bool:
+    """Detect genuine S2 reference truncation while ignoring minor unlinked-ref mismatches."""
     ref_count = paper.get("referenceCount")
     refs = paper.get("references")
     if not isinstance(ref_count, int) or ref_count <= 0:
         return False
     if not isinstance(refs, list):
         return True
-    return ref_count > len(refs)
+    if len(refs) >= ref_count:
+        return False
+    if len(refs) >= _SINGLE_PAPER_TRUNCATION_FLOOR or len(refs) == 0:
+        return True
+    return ref_count >= _TRUNCATION_MIN_REF_COUNT and len(refs) < (
+        ref_count * _TRUNCATION_SEVERE_RATIO
+    )
+
+
+def _missing_paper_result(
+    base: str,
+    *,
+    paper_dirs: dict[str, Path] | None,
+    enable_bib_fallback: bool,
+) -> S2Result:
+    pdir = paper_dirs.get(base) if paper_dirs else None
+    local_refs = extract_local_references(pdir) if (enable_bib_fallback and pdir) else []
+    if local_refs:
+        return S2Result(
+            found=True,
+            references=local_refs,
+            raw={"source": "local_bib", "status": 200, "arxiv_id": base},
+        )
+    return S2Result(found=False, references=[], raw={"status": 404})
 
 
 def extract_local_references(paper_dir: Path | str | None) -> list[Reference]:
@@ -322,12 +364,17 @@ def fetch_references_batch(
     *,
     paper_dirs: dict[str, Path] | None = None,
     enable_bib_fallback: bool = False,
+    on_result: Callable[[str, S2Result], None] | None = None,
+    defer_truncated: dict[str, str | None] | None = None,
 ) -> dict[str, S2Result]:
     """Fetch references (and venue) for many base ids in one batch POST.
 
     Keys are normalized base arXiv ids. Missing papers (``null`` in the response) map to
-    ``found=False`` (or local .bib fallback if enabled). When nested references look truncated,
-    falls back to ``fetch_references``.
+    ``found=False`` (or local .bib fallback if enabled). Bisects automatically on 400
+    response-size errors, 413/5xx errors, or batch 10k-reference aggregate truncation.
+    When ``on_result`` is provided, complete items are persisted immediately before any
+    paginated fallback. When ``defer_truncated`` is provided, papers needing paginated
+    ``/references`` are recorded there as ``{base_id: venue}`` instead of fetched inline.
     """
     if not arxiv_ids:
         return {}
@@ -339,8 +386,10 @@ def fetch_references_batch(
         json={"ids": s2_ids},
     )
 
-    # Bisection on payload too large / server error when batch has multiple papers
-    if response.status_code in (413, 500, 502, 503, 504) and len(bases) > 1:
+    # Bisection on size-limit 400 / 413 / server errors when batch has multiple papers
+    if (response.status_code in (413, 500, 502, 503, 504) or _is_size_limit_400(response)) and len(
+        bases
+    ) > 1:
         logger.warning(
             "S2 batch POST returned HTTP %d for %d IDs; bisecting batch",
             response.status_code,
@@ -352,66 +401,107 @@ def fetch_references_batch(
             arxiv_ids[:mid],
             paper_dirs=paper_dirs,
             enable_bib_fallback=enable_bib_fallback,
+            on_result=on_result,
+            defer_truncated=defer_truncated,
         )
         right = fetch_references_batch(
             client,
             arxiv_ids[mid:],
             paper_dirs=paper_dirs,
             enable_bib_fallback=enable_bib_fallback,
+            on_result=on_result,
+            defer_truncated=defer_truncated,
         )
         return {**left, **right}
 
     if response.status_code == 404:
         out: dict[str, S2Result] = {}
         for base in bases:
-            pdir = paper_dirs.get(base) if paper_dirs else None
-            local_refs = extract_local_references(pdir) if (enable_bib_fallback and pdir) else []
-            if local_refs:
-                out[base] = S2Result(
-                    found=True,
-                    references=local_refs,
-                    raw={"source": "local_bib", "status": 200, "arxiv_id": base},
-                )
-            else:
-                out[base] = S2Result(found=False, references=[], raw={"status": 404})
+            result = _missing_paper_result(
+                base,
+                paper_dirs=paper_dirs,
+                enable_bib_fallback=enable_bib_fallback,
+            )
+            out[base] = result
+            if on_result is not None:
+                on_result(base, result)
         return out
 
     response.raise_for_status()
     rows = response.json()
     if not isinstance(rows, list) or len(rows) != len(bases):
         raise ValueError("Unexpected Semantic Scholar batch response length")
+
+    total_embedded_refs = sum(
+        len(item.get("references") or [])
+        for item in rows
+        if isinstance(item, dict) and isinstance(item.get("references"), list)
+    )
     out = {}
+    truncated_items: list[tuple[str, str | None]] = []
     for base, item in zip(bases, rows, strict=True):
         if item is None:
-            pdir = paper_dirs.get(base) if paper_dirs else None
-            local_refs = extract_local_references(pdir) if (enable_bib_fallback and pdir) else []
-            if local_refs:
-                out[base] = S2Result(
-                    found=True,
-                    references=local_refs,
-                    raw={"source": "local_bib", "status": 200, "arxiv_id": base},
-                )
-            else:
-                out[base] = S2Result(found=False, references=[], raw={"status": 404})
+            result = _missing_paper_result(
+                base,
+                paper_dirs=paper_dirs,
+                enable_bib_fallback=enable_bib_fallback,
+            )
+            out[base] = result
+            if on_result is not None:
+                on_result(base, result)
             continue
         if not isinstance(item, dict):
             raise ValueError(f"Unexpected batch element for {base}")
+        venue = _clean_venue(item.get("venue"))
         if _references_truncated(item):
-            fallback = fetch_references(
-                client,
-                base,
-                paper_dir=paper_dirs.get(base) if paper_dirs else None,
-                enable_bib_fallback=enable_bib_fallback,
-            )
-            fallback.venue = _clean_venue(item.get("venue"))
-            out[base] = fallback
+            truncated_items.append((base, venue))
             continue
         refs = item.get("references") or []
         parsed = [_parse_ref(x) for x in refs if isinstance(x, dict)]
-        out[base] = S2Result(
+        result = S2Result(
             found=True,
             references=parsed,
-            venue=_clean_venue(item.get("venue")),
+            venue=venue,
             raw={"source": "batch", "arxiv_id": base, "payload": item},
         )
+        out[base] = result
+        if on_result is not None:
+            on_result(base, result)
+
+    if (
+        len(truncated_items) > 1
+        and total_embedded_refs >= _BATCH_AGGREGATE_TRUNCATION_REFS
+        and len(truncated_items) < len(bases)
+    ):
+        logger.warning(
+            "S2 batch hit aggregate reference cap (%d embedded refs); re-batching %d tail paper(s)",
+            total_embedded_refs,
+            len(truncated_items),
+        )
+        tail_ids = [base for base, _ in truncated_items]
+        tail_results = fetch_references_batch(
+            client,
+            tail_ids,
+            paper_dirs=paper_dirs,
+            enable_bib_fallback=enable_bib_fallback,
+            on_result=on_result,
+            defer_truncated=defer_truncated,
+        )
+        out.update(tail_results)
+        return out
+
+    for base, venue in truncated_items:
+        if defer_truncated is not None:
+            defer_truncated[base] = venue
+            continue
+        fallback = fetch_references(
+            client,
+            base,
+            paper_dir=paper_dirs.get(base) if paper_dirs else None,
+            enable_bib_fallback=enable_bib_fallback,
+        )
+        fallback.venue = venue
+        out[base] = fallback
+        if on_result is not None:
+            on_result(base, fallback)
     return out

@@ -14,7 +14,7 @@ Environment variables:
     CRAWLER_AUTO_RESUME_RATE_LIMIT  1/true to defer 429-throttled ids and auto-resume after cooldown
     CRAWLER_SKIP_S2             1/true to skip S2 during crawl (backfill with --s2-only)
     CRAWLER_ENABLE_BIB_FALLBACK 1/true to fallback to local .bib/.bbl when S2 returns 404
-    CRAWLER_S2_BATCH_SIZE       batch size for S2 POST /graph/v1/paper/batch (default 25)
+    CRAWLER_S2_BATCH_SIZE       batch size for S2 POST /graph/v1/paper/batch (default 150, max 500)
     CRAWLER_ENABLE_OAI_DATES    1/true to use OAI-PMH arXivRaw for version dates
     CRAWLER_EXTRACT_WORKERS     number of parallel extract-worker threads (default 2)
     CRAWLER_EXTRACT_MAX_QUEUE_BYTES max in-memory bytes queued for extraction (default 192 MiB)
@@ -52,7 +52,7 @@ class Config:
     s2_only: bool = False  # U2: skip arXiv network calls and only backfill S2 references
     skip_s2: bool = False  # Trick 3: skip S2 calls (backfill later with --s2-only)
     enable_bib_fallback: bool = False  # Dual-engine fallback: extract .bib/.bbl when S2 404
-    s2_batch_size: int = 25  # Optimal S2 batch size (10-25 prevents 413/504 errors)
+    s2_batch_size: int = 150  # High-density S2 batch size (150 ids/req ~3.9 MB, auto-bisects)
     enable_oai_dates: bool = False  # OAI-PMH arXivRaw fallback for intermediate version dates
     arxiv_min_idle_gap: float = (
         0.25  # v3.15: 0.25s post-transfer cushion (preserves true Start-to-Start <= 2.80s)
@@ -205,10 +205,10 @@ class Config:
         s2_batch_raw = (
             os.environ.get("CRAWLER_S2_BATCH_SIZE") or local_vars.get("CRAWLER_S2_BATCH_SIZE") or ""
         )
-        s2_batch_size = 25
+        s2_batch_size = 150
         if s2_batch_raw:
             try:
-                s2_batch_size = max(int(s2_batch_raw), 1)
+                s2_batch_size = min(max(int(s2_batch_raw), 1), 500)
             except ValueError:
                 pass
 
@@ -298,10 +298,13 @@ class Config:
         ).strip()
         traffic_shaping = traffic_shaping_raw.lower() not in {"0", "false", "no", "off"}
 
+        raw_s2_key = os.environ.get("S2_API_KEY") or local_vars.get("S2_API_KEY") or ""
+        s2_api_key = raw_s2_key.strip() or None
+
         values = {
             "data_dir": Path(data_dir_raw),
             "contact": os.environ.get("CRAWLER_CONTACT") or local_vars.get("CRAWLER_CONTACT") or "",
-            "s2_api_key": os.environ.get("S2_API_KEY") or local_vars.get("S2_API_KEY") or None,
+            "s2_api_key": s2_api_key,
             "arxiv_min_interval": arxiv_min_interval,
             "arxiv_min_idle_gap": arxiv_min_idle_gap,
             "arxiv_socket_recycle_every": arxiv_socket_recycle_every,

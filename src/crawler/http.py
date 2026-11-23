@@ -513,21 +513,25 @@ class RateLimiter:
 
 
 class AdaptiveRateLimiter(RateLimiter):
-    """S2 limiter: End-to-Start interval, slow down after 429, ease back after streak."""
+    """S2 limiter: End-to-Start interval with AIMD backoff and quick streak recovery."""
 
     def __init__(
         self,
         min_interval: float,
         *,
-        max_interval: float = 5.0,
-        success_streak_to_recover: int = 50,
+        max_interval: float = 3.0,
+        success_streak_to_recover: int = 5,
+        adaptive_step: float = 0.4,
+        recover_step: float = 0.25,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = _default_sleep,
     ) -> None:
         super().__init__(min_interval, clock=clock, sleep=sleep)
         self._base_interval = min_interval
-        self._max_interval = max_interval
-        self._recover_streak = success_streak_to_recover
+        self._max_interval = max(float(max_interval), min_interval)
+        self._recover_streak = max(int(success_streak_to_recover), 1)
+        self._adaptive_step = max(float(adaptive_step), 0.0)
+        self._recover_step = max(float(recover_step), 0.0)
         self._success_streak = 0
 
     def wait(self) -> None:
@@ -556,9 +560,10 @@ class AdaptiveRateLimiter(RateLimiter):
 
     def note_429(self) -> None:
         self._success_streak = 0
-        self._min_interval = min(
-            max(self._min_interval * 2, self._base_interval * 2), self._max_interval
-        )
+        if self._base_interval > 0.0:
+            self._min_interval = round(
+                min(self._min_interval + self._adaptive_step, self._max_interval), 4
+            )
 
     def note_success(self) -> None:
         self._success_streak += 1
@@ -566,7 +571,9 @@ class AdaptiveRateLimiter(RateLimiter):
             self._success_streak >= self._recover_streak
             and self._min_interval > self._base_interval
         ):
-            self._min_interval = max(self._base_interval, self._min_interval * 0.5)
+            self._min_interval = round(
+                max(self._base_interval, self._min_interval - self._recover_step), 4
+            )
             self._success_streak = 0
 
 
@@ -610,8 +617,9 @@ class HostClient:
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         session.headers["User-Agent"] = self._config.user_agent
-        if self._is_s2 and self._config.s2_api_key:
-            session.headers["x-api-key"] = self._config.s2_api_key
+        s2_key = (self._config.s2_api_key or "").strip()
+        if self._is_s2 and s2_key:
+            session.headers["x-api-key"] = s2_key
         return session
 
     def recycle_session(self) -> None:
@@ -880,6 +888,7 @@ def make_arxiv_client(config: Config) -> HostClient:
 
 
 def make_s2_client(config: Config) -> HostClient:
-    max_interval = 5.0 if config.s2_api_key else 10.0
+    has_key = bool((config.s2_api_key or "").strip())
+    max_interval = 3.0 if has_key else 8.0
     limiter = AdaptiveRateLimiter(config.s2_min_interval, max_interval=max_interval)
     return HostClient(f"https://{S2_API_HOST}", limiter, config)
