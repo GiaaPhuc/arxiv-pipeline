@@ -1,4 +1,4 @@
-# Hướng dẫn crawl arXiv trên Google Colab (v3.15.0)
+# Hướng dẫn crawl arXiv trên Google Colab (v3.18)
 
 Tài liệu này dành cho người mới: chạy crawler Milestone 1 trên **Colab chỉ CPU**, không cần cài Python trên máy cá nhân.
 
@@ -32,7 +32,7 @@ Crawler **được thiết kế cho kiểu này**: bạn không cần một sess
 | Cùng một lệnh mỗi lần | `python run_crawl.py --ranges id_ranges.csv` (cùng `--data-dir` / `CRAWLER_DATA_DIR`) |
 | Sao lưu tự động | Pipeline tự động nén `data/` lên Drive mỗi **1.000 ID mới** (hoặc tùy biến 300–1.000) và tự sao lưu lần cuối khi crawler thoát |
 
-Lần chạy sau: manifest **bỏ qua** cặp (bài, phiên bản) đã ở trạng thái cuối; **`failed`** và việc **S2 chưa xong** được **xếp lại hàng đợi**. Dừng bằng **Interrupt** / Ctrl+C vẫn an toàn — dữ liệu đã ghi vẫn giữ, chạy lại lệnh để tiếp. Phiên bản **v3.12.0** tích hợp sẵn cơ chế **Dual-Engine Reference Fallback** (`.bib/.bbl`), **OAI-PMH date recovery** và **Batch Bisection 25 bài** giúp dữ liệu thu được đạt độ toàn vẹn cao nhất.
+Lần chạy sau: manifest **bỏ qua** cặp (bài, phiên bản) đã ở trạng thái cuối; **`failed`** và việc **S2 chưa xong** được **xếp lại hàng đợi**. Dừng bằng **Interrupt** / Ctrl+C vẫn an toàn — dữ liệu đã ghi vẫn giữ, chạy lại lệnh để tiếp. Phiên bản **v3.18** tích hợp sẵn **HTTP/2 kết nối đơn + Zero-Body Early-Reject**, **Cut-Through In-Flight Extraction `O(1)` RAM**, **Traffic-Shaping Interleaver**, **Dual-Engine Reference Fallback** (`.bib/.bbl`), **OAI-PMH date recovery** và **S2 High-Density Batch Bisection (`150` bài) + Save-First Isolation** giúp dữ liệu thu được đạt độ toàn vẹn và hiệu năng cao nhất.
 
 ### Hai kịch bản dừng / chạy tiếp (Colab)
 
@@ -119,8 +119,13 @@ else:
          "1"  # Dual-engine trích xuất .bib/.bbl cục bộ khi S2 404
      )
      os.environ["CRAWLER_ENABLE_OAI_DATES"] = "1"  # OAI-PMH arXivRaw khôi phục ngày trung gian
-     os.environ["CRAWLER_S2_BATCH_SIZE"] = "25"  # mẻ 25 chống lỗi 413/504
+     os.environ["CRAWLER_S2_BATCH_SIZE"] = (
+         "150"  # v3.18: High-Density batch 150 (~3.9 MB, tự bisection khi >10 MB/10k refs)
+     )
      os.environ["CRAWLER_MAX_STREAM_MBPS"] = "6.0"  # v3.15: mượt 6.0 MiB/s (~7.7h/5000 ID)
+     os.environ["CRAWLER_USE_HTTP2"] = "1"  # v3.16: HTTP/2 kết nối đơn + RST_STREAM early abort
+     os.environ["CRAWLER_IN_FLIGHT_EXTRACT"] = "1"  # v3.16: giải nén 1-pass trên luồng (RAM O(1))
+     os.environ["CRAWLER_TRAFFIC_SHAPING"] = "1"  # v3.17: interleave bài nặng + byte-budget 360 MiB/180s
      ```
    - Định nghĩa các hàm `backup_now()` và `restore_now()`.
 
@@ -155,29 +160,37 @@ Hàm này tự động xử lý thông minh:
 
 ### Bước 5 — Chạy crawl
 
+**(Tùy chọn) Kiểm tra định tuyến Fastly POP/VM trước phiên dài (`crawler/preflight.py`):**
+```bash
+!python crawler/preflight.py --ranges id_ranges.csv --offset 12000 --count 4 --http2
+```
+
 **1. Chạy thử nghiệm Pilot (30 ID đầu tiên):**
 ```bash
 !python run_crawl.py --ranges id_ranges.csv --limit 30 \
-    --auto-resume-rate-limit --enable-bib-fallback --enable-oai-dates
+    --auto-resume-rate-limit --enable-bib-fallback --enable-oai-dates \
+    --max-stream-mbps 6.0 --http2 --in-flight-extract
 ```
 
 **2. Crawl chính thức toàn bộ dải:**
 Bỏ tham số `--limit` để crawler chạy toàn bộ:
 ```bash
 !python run_crawl.py --ranges id_ranges.csv \
-    --auto-resume-rate-limit --enable-bib-fallback --enable-oai-dates
+    --auto-resume-rate-limit --enable-bib-fallback --enable-oai-dates \
+    --max-stream-mbps 6.0 --http2 --in-flight-extract
 ```
 
 **3. Tùy chọn cào tách biệt trong giờ cao điểm (bỏ qua S2 để cào gói arXiv trước):**
-Nếu mạng chậm hoặc S2 chập chờn, bạn có thể thêm cờ `--skip-s2` để tập trung cào toàn bộ gói arXiv siêu tốc:
+Nếu mạng chậm hoặc S2 chập chờn, bạn có thể thêm cờ `--skip-s2` để tập trung cào toàn bộ gói arXiv siêu tốc (thêm `--snapshot ...` ở lần chạy đầu):
 ```bash
 !python run_crawl.py --ranges id_ranges.csv \
-    --auto-resume-rate-limit --enable-oai-dates --skip-s2
+    --auto-resume-rate-limit --enable-oai-dates --skip-s2 \
+    --max-stream-mbps 6.0 --http2 --in-flight-extract
 ```
 
-**4. Cào bù trích dẫn Semantic Scholar (S2) sau khi đã cào xong arXiv:**
+**4. Cào bù trích dẫn Semantic Scholar (S2) sau khi đã cào xong arXiv (`v3.18` Batch 150):**
 ```bash
-!python run_crawl.py --ranges id_ranges.csv --s2-only --enable-bib-fallback
+!python run_crawl.py --ranges id_ranges.csv --s2-only --enable-bib-fallback --s2-batch-size 150
 ```
 
 - **Khi đang crawl:** Cứ mỗi **1.000 ID mới** (hoặc cấu hình tùy ý), crawler tự động snapshot SQLite WAL và đóng gói đè an toàn vào `arxiv-data.tar.gz` trên Drive.
@@ -251,7 +264,7 @@ Trên Google Drive cá nhân (`MyDrive/`):
 | `Mountpoint must not already contain files` | Lỗi do Drive mount bị treo từ phiên trước. Bấm **Runtime → Restart session**, rồi chạy lại từ ô Setup |
 | `validate_corpus` / `export_data` lỗi | Do corpus **chưa crawl xong** (dừng giữa chừng, thiếu S2 hoặc thiếu ngày trung gian). Kiểm tra qua `crawler/audit_corpus.py` trước khi xuất |
 | S2 404 (bài mới chưa index) | Kích hoạt `--enable-bib-fallback` để bóc tách `.bib/.bbl` cục bộ, hoặc chạy offline: `python crawler/enrich_references.py --data-dir /content/data` |
-| S2 lỗi 413 hoặc 504 | v3.12 đã mặc định lô 25 bài và tự chia đôi lô (**Batch Bisection**) đệ quy để cô lập bài lỗi, không làm gián đoạn cả lô |
+| S2 lỗi 400 / 413 / 504 | `v3.18` mặc định lô 150 bài và tự chia đôi lô (**Batch Bisection**) đệ quy khi vượt trần 10 MB / 10.000 refs + lưu **Save-First** từng bài xong |
 | Thiếu ngày phiên bản trung gian | Kích hoạt cờ `--enable-oai-dates` để crawler tự động truy vấn OAI-PMH `arXivRaw` bù đắp ngày chính xác cho các bản $v_2 \dots v_N$ |
 | S2 chậm / nghẽn mạng giờ cao điểm | Thêm cờ `--skip-s2` để ưu tiên cào gói arXiv siêu tốc, sau đó chạy bù trích dẫn bằng `--s2-only` |
 | Session Colab bị chết giữa chừng | Mở lại Colab, chạy Setup → `restore_now()` → chạy lại lệnh crawl ở Bước 5 |
@@ -260,7 +273,7 @@ Trên Google Drive cá nhân (`MyDrive/`):
 
 ## Quy tắc lịch sự (bắt buộc)
 
-- arXiv **chỉ** qua `export.arxiv.org`, **≥ 3,5 giây** trên Colab giữa các request, **một** kết nối duy nhất.
+- arXiv **chỉ** qua `export.arxiv.org`, **Start-to-Start ≥ 3,0 giây** (mặc định `3,05 s + jitter 0..0,10 s`), **một** kết nối duy nhất.
 - Semantic Scholar **≥ 1,1 giây** giữa các request (limiter tự động thích ứng khi gặp 429).
 - User-Agent luôn có thông tin liên hệ từ `CRAWLER_CONTACT`.
 

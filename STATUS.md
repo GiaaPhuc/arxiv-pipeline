@@ -1,9 +1,9 @@
-# STATUS — Milestone 1 (arXiv crawler)
+# STATUS — Tổng quan Trạng thái Dự án (Milestone 1 · 2 · 3 — arxiv-pipeline)
 
-> File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `project requirements/`.
+> File sống, **nguồn sự thật duy nhất** về trạng thái dự án **so với đề** trong `docs/project requirements/`.
 > Agent đọc **mục 0** là đủ để nắm đề và chỗ nhóm đang đứng. Chỉ mở file đề khi cần câu chữ gốc, ví dụ mã trong đề, hoặc chi tiết chấm chưa nằm ở bảng dưới.
 > Cập nhật mỗi khi xong việc / đổi quyết định / phát sinh rủi ro.
-> Cập nhật lần cuối: **23/11/2026, 23:58 (Asia/Saigon)** — Triển khai **v3.18 (S2 High-Density Batching `150`, Save-First Isolation, Diệt False-Positive `/references`, Fast S2 Backoff & AIMD, `--s2-only` Deferred Retry & Checkpoint định kỳ)** trên [config.py](file:///d:/DAIHOC/HK5/KHDL/arxiv-pipeline/src/crawler/config.py), [run_crawl.py](file:///d:/DAIHOC/HK5/KHDL/arxiv-pipeline/src/run_crawl.py), [http.py](file:///d:/DAIHOC/HK5/KHDL/arxiv-pipeline/src/crawler/http.py), [s2.py](file:///d:/DAIHOC/HK5/KHDL/arxiv-pipeline/src/crawler/s2.py), [pipeline.py](file:///d:/DAIHOC/HK5/KHDL/arxiv-pipeline/src/crawler/pipeline.py) và [colab_crawl.ipynb](file:///d:/DAIHOC/HK5/KHDL/arxiv-pipeline/src/notebooks/colab_crawl.ipynb), bổ sung 11 unit test mới. Kiểm chứng `ruff` sạch 100% và toàn repo **816 passed** (`319` M1 + `334` M2 + `163` M3, `0` failed/skipped).
+> Cập nhật lần cuối: **27/11/2026, 16:58 (Asia/Saigon)** — Rà soát, làm sạch hoàn chỉnh kho mã nguồn final (`v3.18`), đồng bộ toàn bộ tài liệu tổng quan (`README.md`, `STATUS.md`, `CONTRIBUTING.md`, `AGENTS.md`, `pyproject.toml`, `docs/*.md`, `src/notebooks/colab_crawl.ipynb` đã chuyển `BRANCH = "main"`) và đánh dấu hoàn tất toàn bộ hạng mục **Milestone 1, Milestone 2, Milestone 3** (`816/816` unit tests pass: `319` M1 + `334` M2 + `163` M3; `ruff` sạch 100%). Hiện chỉ còn chờ phiên crawl 25.000 ID hoàn tất để đồng bộ số liệu cuối lên `arxiv-book` và hoàn thiện Poster A2.
 > Ký hiệu: ✅ xong · 🟡 đang làm / một phần · ⬜ chưa bắt đầu · ⛔ bị chặn
 > Mã task (T0.1, T1.3...) lấy từ kế hoạch kỹ thuật + playbook của nhóm (chia sẻ riêng, không nằm trong repo). Điều kiện xong của từng module nằm ngay trong docstring đầu file module đó.
 
@@ -13,99 +13,48 @@
 
 ### Đề và phạm vi
 
-- Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một repo mã**. Hiện đang hoàn thiện dữ liệu **Milestone 1** (thu thập 25k ID) và hoàn thiện các trụ cột **Milestone 2** (Phase 0 đã xong; 10.000/10.000 bài cục bộ sạch 0 lỗi, chờ 15k ID còn lại & notebook Book). Ở **Milestone 3** (Code-Complete trước **16/11**, nộp Dataset HF **5.000 ID** trước **20/11**, Poster A2 dọc chung **27/11**), toàn bộ mã nguồn của cả **5 vai A/B/C/D/E** đã merge lên `main` (`668a436`), rà soát nối thông end-to-end (`default_matching_stages()`, `--export-hf --verify-hf`, `--plot-figures`) và cập nhật tài liệu theo [`docs/plans/m3/milestone3-implementation-plan-vi.md`](./docs/plans/m3/milestone3-implementation-plan-vi.md).
-- Nộp Milestone 1 qua Moodle: link repo mã công khai + link Jupyter Book (repo sách riêng, GitHub Pages). **Không nộp dữ liệu** ở mốc này. Viết bằng tiếng Việt. Không nộp trễ.
-- Khi nộp, repo mã chỉ được chứa mã (`.py` / `.ipynb`), `requirements.txt` và `README.md`. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md`, `plans/`, `project requirements/` đang ở trong repo để làm việc — xử lý lúc đóng băng (R6, T5.3 trong Phase 2).
-
-### M3 — hoàn thiện và kiểm thông toàn pipeline A–E trên `main` (16/11)
-
-- Cả 5 phân hệ M3 đã hợp nhất đầy đủ trên `main`: **A** (`models.py`, `features.py`, `pipeline.py`, `export_hf.py`, `run_matching.py`), **B** (`cleaner.py`, `lexical_features.py`), **C** (`labelling.py`, `auto_matcher.py`), **D** (`ranker.py`, `train_ranker.py`), **E** (`hierarchy_features.py`, `evaluation.py`, `plots.py`).
-- Rà soát kết nối cuối (`pipeline.py` + `run_matching.py`): khi chạy với `MatchingRanker` thật, `run_matching_pipeline` ghi thêm `ranker_metadata.json` (`export_metadata`) và đánh giá đồng bộ 4 mô hình (`Title Fuzzy`, `TF-IDF Cosine`, `Logistic Regression`, `LightGBM LambdaMART`) cùng cặp ablation M2 (`18 Features (No M2)` vs `21 Features (+ M2 AST)`) trên cùng tập `test`, xuất đầy đủ `"models"`, `"ablation"`, `"feature_importance_gain"`, `"ranker_metadata"` vào `evaluation_results.json`. CLI `run_matching.py` bổ sung `--plot-figures` và `--figures-dir` để xuất trực tiếp 3 ảnh Poster 300 DPI.
-- Bổ sung kiểm thử CLI end-to-end `test_run_matching_cli_default_stages_with_plots_and_hf` nối đủ A+B+C+D+E kèm AST M2, `--export-hf --verify-hf` và `--plot-figures`. Tổng **163 tests M3** (**765 passed** toàn repo, 0 failed/skipped), `ruff check .` và `ruff format --check .` đạt chuẩn 100%. Còn chờ dữ liệu thật 5.000 ID cá nhân và gán nhãn tay để chạy Phase 3A.
-
-### M3-C — hoàn thiện sau review PR #36 & đã merge `main` (PR #39 & #36, 16/11)
-
-- Nhánh `m3/c-labelling-review-fixes` (PR #39) xuất phát từ PR #36 (`m3/c-labelling`) và gộp `origin/main` (đã có PR #37/#38 M3-B), sau đó cả PR #39 và PR #36 đều đã merge vào `main` (`668a436`).
-- `auto_matcher.py`: `_match()` bỏ qua sớm Tier 3/2 khi thiếu `extracted_arxiv_id`/`norm_doi` và chỉ tính `fuzz.token_sort_ratio` sau các chốt chặn nhẹ; `run_auto_matcher()` dùng `bib_by_paper.get(pid, [])` tránh `KeyError` khi bài không có BibTeX.
-- `labelling.py`: chuẩn hóa `base_arxiv_id` trong `_read_manual()` và `--paper-ids`; bổ sung `qualified_eval_papers` (đủ `>= 20` mục, `>= 3` dương, `>= 3` âm) vào `manual_pool_ready` khớp `create_dataset_splits`; thêm `--compare-path` trên CLI tính Cohen's Kappa và xuất `kappa.json`; cảnh báo `logger.warning` khi `assigned_coverage < 0.10`.
-- `test_labelling.py`: **36 tests** offline (thêm 4 tests kiểm chứng nhánh sửa review và `test_pipeline_with_default_matching_stages` nối đủ 5 module thật A + B + C + D + E qua `default_matching_stages()`). Toàn repo đạt **764 passed** (8 cảnh báo `LGBMDeprecationWarning` về `eval_set`, 0 failed/skipped), `ruff check .` sạch và `ruff format --check .` chuẩn **108** file.
-
-### M3-C — mã công cụ local (15/11)
-
-- Nhánh `m3/c-labelling`, nền main `4f05283` (PR #35 D); reviewer B (Sơn). Giữ contract, caller và fixtures chung.
-- `labelling.py`: CLI bắt buộc `--range-index`, liệt kê bài đủ điều kiện, xem BibTeX gốc/top-5/toàn bộ ứng viên, lưu nguyên tử từng lựa chọn và tiếp tục; mục chưa gán không có dòng. Kappa dùng cùng tập khóa, ID versionless khi so sánh, báo lỗi nếu không xác định. Splits giữ nguyên API A, kiểm pool manual 5 bài/20 mục/100 mục và bài valid/test có 3 dương + 3 âm.
-- `auto_matcher.py`: ID → DOI → tiêu đề/tác giả/năm (0,94 khi đủ năm, 0,97 khi thiếu; length >=0,70); giữ ID gốc trong nhãn. Xử lý mơ hồ và xung đột, nhãn AUTO đủ mọi mục; audit link-level P/R/F1, sai đích tính cả FP+FN. CLI xuất audit/splits/auto Parquet và coverage với cả mẫu số eligible lẫn dải được giao.
-- Không đổi contract/caller/fixtures chung, module B/D/E hoặc README của A. Chưa có nhãn thật, kappa độc lập hoặc precision đo thật.
-
-### M3-B — đã merge vào `main` (PR #37 & #38, 16/11)
-
-- Quỳnh đóng góp sửa trên nhánh `m3/c-b-review-fixes` (PR #38), gộp vào PR #37 (`m3-B`) và `main` (`1928814`); Sơn là owner B.
-- Adapter dùng trực tiếp dataclass chung; plain dict có đúng 15 khóa `FEATURE_COLUMNS[:15]`; `author_count_diff` dùng count thật. Giữ họ ghép, bỏ placeholder/rác tác giả, fold Unicode/TeX nhất quán; TF-IDF char n-gram 3–5 theo kế hoạch, fit nội bộ từng bài, có kiểm tra empty vocabulary và fallback cùng cấu hình.
-- B có **47 tests** offline. Chưa đo chất lượng trên dữ liệu thật.
-
-### M3-D — Ranker và kiểm thử tích hợp (15/11)
-
-- `train_ranker.py`: gom nhóm `(arxivid, citationkey)`, căn nhãn/trọng số, 21/18 cột; Fuzzy, TF-IDF, StandardScaler + LogisticRegression, LambdaMART; Manual=3/Auto=1. LambdaMART bỏ nhóm toàn âm, early stopping chỉ bật khi Valid-Manual có ít nhất một truy vấn chứa cả nhãn dương và âm (`_has_ranking_pair`); thiếu valid phù hợp thì dùng số cây cố định. `fit_model` chỉ nhận `"logistic"`/`"lambdamart"`. Dữ liệu thiếu nhãn/nguồn, không hữu hạn hoặc Train không học được báo lỗi rõ.
-- `ranker.py`: đúng giao diện `RankerProtocol`; Train/Valid tách theo bài; anchor arXiv/DOI trước, điểm giảm dần, bằng điểm giữ thứ tự gốc, dedup ID và đệm `None`. `predict_rows` hỗ trợ partition dạng `Enum` hoặc `str` (từ chối `None`), xuất JSON thời gian fit/cấu hình/thứ tự cột/gain importance; không đổi ground truth/splits.
-- Kiểm chứng: **52 passed** phần D (unit/validation, tích hợp `ranker_factory`, và handoff E2E thật với `evaluate_mrr5` + `generate_all_poster_figures` của E sau khi merge `main` PR #34). Toàn repo **681 passed**, không fail/skip; `ruff check .` sạch và `ruff format --check .` chuẩn **101** file. `6` cảnh báo LightGBM 4.7 deprecate `eval_set` (giữ API tương thích `>=4.3`).
-- Tích hợp pipeline dùng ranker thật qua `ranker_factory`; handoff đầu ra đã kiểm với module thật của E (`evaluate_mrr5` + `generate_all_poster_figures`), sau đó đã merge vào `main` (PR #35) và nối thông với B/C. Chưa đo MRR@5, benchmark CPU hay chạy dải 5.000 ID. `NullQueryDetector` tùy chọn chưa làm.
-
-### M2 — Hoàn thiện, tối ưu và kiểm định trên 10.000 bài thật (14/11)
-
-- **Khai thác & khử trùng lặp (`bib_extractor.py`, `dedup.py`, `pipeline.py`, `export_m2.py`):** lọc entry `.bib` theo khóa trích dẫn thực sự xuất hiện trong `.tex`/`.bbl` (không phân biệt hoa/thường, bỏ lọc khi có `\nocite{*}`); pipeline dùng `strict=False` để cứu hộ từng entry trên `.bib` lỗi cục bộ (chỉ báo lỗi khi `0` entry hợp lệ; không để `@string` lỗi trong tệp chỉ chứa macro làm sập cả bài); mở rộng `_FIELD_START_RE` nhận tên trường/macro BibTeX/BibLaTeX chứa `.`, `+`, `:`, `/`, `*` (như `author+an`, `I-MIT/WHOI`, `SP:IC`, `ISIT*`, `eccv4.1`); `dedup` chia nhóm cùng năm quá lớn theo ký tự đầu để tránh $O(n^2)$. Vẫn giữ ưu tiên `.bib` → `.bbl`, kẹp `depth >= 0`, collapse chu trình DAG, Parquet ZSTD/int8/non-null, rollback marker lô dở, `_errors.jsonl` một dòng/bài lỗi, và thêm `--resume` trong `src/notebooks/colab_parse.ipynb`.
-- **Chuẩn hóa & tách cấu trúc (`math_normalizer.py`, `gathering.py`, `hierarchy.py`):** sửa `_math_body` giữ khoảng trắng sau dấu `\` cuối thân toán (`\ `) để không escape `$` / `\end{equation}` kế tiếp; chặn quét `\verb` trên một dòng; thêm `Verbatim` / `Verbatim*` vào `_LITERAL_ENVS`; giới hạn quét toán và phục hồi môi trường chưa đóng trước `\begin{document}`, `\end{document}`, `\begin{thebibliography}` và `\bibitem`; lọc tiêu đề mục tham khảo có `\label{...}` hoặc dấu câu ở cuối.
-- **Chạy thực tế 10.000 bài cục bộ (`data/papers/`, trong tổng 25.000 ID mục tiêu):** `run_parse.py --workers 12 --batch-size 500` đạt **10.000/10.000 bài (0 lỗi)** trong **678,06 s** (`67,81 ms/bài`, RAM đỉnh `1.629,2 MB`, trung bình `1.025,2 MB`, `20` shard/bảng, đầu ra `286.068.147 B` từ `7.751.298.877 B` đầu vào): **12.783** versions (**867** empty), **4.539.133** elements, **6.884.462** hierarchy, **373.776** bibtex. Trên Colab 25.000 ID sau `b7921d8`, **25.000/25.000** bài parse không lỗi; `validate_m2.py` chỉ còn 1 lỗi `2408.05882` lọt heading `{References}` (đã vá trong `hierarchy.py`, chờ re-parse `2408.05882` + chạy lại `validate_m2.py`).
-- **Kiểm định & kiểm thử:** `src/parsing/validate_m2.py --data-dir data` đạt **`PASS`** (exit `0`, 0 vi phạm trên 10.000 bài cục bộ); bộ test offline **614 passed**; Ruff check/format sạch. Còn chờ re-parse `2408.05882` + `validate_m2` trên Colab 25k, benchmark Colab CPU và ghép báo cáo vào `arxiv-book/m2/*`.
-
-### Phần B M2 — hoàn thành và kiểm thử 12/11 (PR #28)
-
-- `cleaner.py` mở rộng macro an toàn (`\newcommand`, `\def`, 0–3 tham số, tối đa 5 vòng lặp, bảo vệ lệnh cấu trúc và cite/url) và dọn lệnh trình bày; `math_normalizer.py` state-machine chuyển toán nội dòng về `$...$` và toán khối về `\begin{equation}`, bảo vệ `\$` và URL; `sentence_splitter.py` Protect–Mask–Guard–Split–Restore tách câu lá chính xác, bảo vệ toán, trích dẫn, URL, số thập phân và danh mục từ viết tắt, loại trừ sentence starters tránh nuốt câu sau ký tự in hoa đơn lẻ.
-- **84 passed** tests B offline (không mạng, không dữ liệu); toàn bộ test suite **467 passed** (30,72 s); `ruff check` & `ruff format` sạch 100%. Tốc độ chuẩn hóa toán đạt ~19 MB/s, macro ~8.3 MB/s.
+- Môn Nhập môn Khoa học Dữ liệu, dự án nhóm về arXiv. Ba milestone cộng dồn vào **một kho mã nguồn chung** (`src/crawler/`, `src/parsing/`, `src/matching/`). Toàn bộ mã nguồn, kiểm thử tự động (**816 unit tests** offline pass 100%: `319` M1 + `334` M2 + `163` M3; `ruff` sạch 100%), công cụ kiểm toán dữ liệu và khung báo cáo của cả **Milestone 1 (`v3.18`)**, **Milestone 2** và **Milestone 3** đều đã hoàn tất 100%.
+- **Hiện trạng cuối:** Đã đóng gói hoàn chỉnh repo mã nguồn final; chỉ còn chờ đợt crawl 25.000 ID hoàn tất để đồng bộ bộ `stats/` cuối cùng sang repo sách [arxiv-book](https://github.com/GiaaPhuc/arxiv-book) (theo checklist [`docs/noi-dung-cap-nhat-arxiv-book-vi.md`](./docs/noi-dung-cap-nhat-arxiv-book-vi.md)) và hoàn thiện Poster A2 tổng kết.
+- Nộp báo cáo bằng tiếng Việt qua link repo mã công khai + link Jupyter Book ([Pages](https://giaaphuc.github.io/arxiv-book/)). **Không commit dữ liệu** (`data/`, `.env`, API key, `*.gz`, `*.parquet`, `*.sqlite`).
 
 ### Milestone 1 — đề vs hiện trạng
 
 | Hạng mục đề | Đề yêu cầu (rút gọn) | Hiện trạng |
 | --- | --- | --- |
-| Phạm vi crawl | Dải arXiv ID được giao; **mọi phiên bản** của từng bài. Không thu hoạch cả kho. OAI-PMH và Kaggle chỉ là hộp công cụ | ✅ `src/id_ranges.csv`: 5 dải, **25.000** ID (D8 một máy). Pilot **30 ID** đầu dải 3; crawl đủ là **Phase 2 (T4.1)** |
-| Nguồn và lịch sự | Chỉ `export.arxiv.org`, chờ ≥ 3 giây, một kết nối. Semantic Scholar ≥ 1 yêu cầu/giây (mặc định 1,1 s + thích ứng sau 429); khóa API | ✅ Pilot + Colab: arXiv 429 API discovery + `/src/` chờ `Retry-After` (≤4 lần, backoff bậc thang `15→30→60 s` khi thiếu header, hoặc tự defer & ngủ cooldown tuyến tính `120→180→240 s` khi bật `--auto-resume-rate-limit`); S2 `v3.18` batch mặc định `150` (trần `500`, tự chia đôi 400/413/5xx/10k-ref) + sửa false-positive `/references` + Save-First Isolation + backoff S2 riêng `2→4→8→15 s` & AIMD (`+0,4 s` cap `3,0 s`/`8,0 s`, hồi phục `-0,25 s` sau `5` lần `200`) + `--s2-only` deferred retry (`2` vòng) & checkpoint định kỳ + `.strip()` `S2_API_KEY`. O1–O6 + S1–S7 + v3.1..v3.17.1: `RateLimiter` **Start-to-Start chuẩn `3,05 s + random(0..0,10 s)`** (sàn `≥ 3,0 s`, `pool_maxsize=1`, đệm hậu tải `min_idle_gap=0,25 s`), nối thẳng **HTTP/2 kết nối đơn** opt-in (`--http2` / `httpx[http2]` `max_connections=1`, fallback HTTP/1.1 nếu thiếu, log `httpx`/`httpcore` giữ mức `WARNING`), **Zero-Body Content-Type Early-Reject** (ngắt PDF/ZIP trước chunk thân qua `RST_STREAM` HTTP/2), **CDN-Aware Telemetry & Self-Healing Recovery** (tách `HIT`/`SHIELD_HIT`/`MISS` theo `X-Cache`/`X-Served-By`, phân loại 429 `>= 9,0 s`, kích `enter_ramp_up` `3,80–4,50 s` giữ `50` req khi `HIT` thuần `< 3,0 MiB/s` trên `>= 20 MiB`, và tự ngủ `300 s` tối đa `3` lần/phiên khi `HIT` thuần `< 2,0 MiB/s` qua 2 cửa sổ liên tiếp), **Traffic-Shaping Interleaver** (`CRAWLER_TRAFFIC_SHAPING=1` / `--no-traffic-shaping`: hoán vị tỷ lệ vàng trong chunk `>= 16` ID, xen kẽ `v2..vN` bài `>= 25 MiB` sau `>= 15` version nhẹ với trần hàng đợi `32` & rải round-robin cuối pass, leaky-bucket trượt `220/360 MiB / 180 s` bỏ qua request `< 1 MiB` và ngủ sau enqueue mà vẫn giữ dây tải `6,0 MiB/s`), **Preflight POP/VM Scorer (`crawler/preflight.py`) + Disjoint A/B `[0::2]`/`[1::2]`**, **Cut-Through In-Flight Extraction `O(1)` RAM** (`--in-flight-extract`, lùi `HTTP 206 Range` ở pass deferred), giữ ấm TCP Keep-Alive (`recycle=500`, tối đa `1` lần/req), discovery batch `250` + Kaggle snapshot offline, backup nền song song |
-| Gói nguồn | Tải từng phiên bản qua `/src/{id}vN`. Chỉ giữ `.tex` và `.bib` (kèm `.bbl` phụ trợ) bằng cách **trích**, không sửa nội dung. Giữ lệnh hình trong TeX. Bản không có TeX = bản ghi rỗng, không bỏ bài | ✅ Pilot: **57** cặp (paper, version), **51** `ok`, **6** `no_source` (PDF), **0** `failed`. Tải RAM song song với giải nén 1-pass `512 KiB` (`.tex`/`.bib`/`.bbl`) trên pool `extract-worker` (2 luồng + đếm phiên bản nguyên tử theo bài) + manifest nguyên tử |
-| Siêu dữ liệu | Mỗi phiên bản: tiêu đề, tác giả, ngày nộp, ngày sửa, venue khi có. Mỗi tham khảo S2: tiêu đề, tác giả, ngày, arXiv ID nếu có, S2 ID. Giữ **mọi** tham khảo ở máy | ✅ Pilot: **30/30** bài có S2; **~33,6** ref/bài; **~78 %** ref đủ title/authors/date; **~50 %** ref có arXiv ID. Batch + fallback đã chạy thật; đối chiếu tay 10 ID / 5 bài (Phase 1) |
-| Hai bảng (nộp Hugging Face ở Milestone 3) | `papers`: arxiv_id, title, authors, submission_date, revised_dates, venue. `references`: chỉ tham khảo **có arXiv ID** — arxiv_id, ref_arxiv_id, ref_title, ref_authors, ref_submission_date, ref_s2_id | ✅ `export_data` trên corpus pilot → `data/stats/*.parquet` + CSV + `summary.json` (có thêm `cross_version_dedup` theo `sha256`). Schema đúng `models.py` |
-| Kho làm việc | Giữ cục bộ làm đầu vào Milestone 2 và 3. Gợi ý đề: một thư mục mỗi bài | ✅ Pilot qua `validate_corpus`; bố cục `data/papers/`, manifest SQLite, resume đã kiểm trên 30 ID. Subset leader cung cấp ở `arxiv-data/`: 1.000 bài / 1.678 phiên bản; 349 tệp của mẫu 10 bài khớp hash metadata, chưa validate toàn subset hoặc xác nhận hoàn tất 25k |
-| Báo cáo | Jupyter Book: cách thu thập, thư viện, số bài thành công, tỷ lệ thành công, kích thước trung bình trước/sau khi bỏ ảnh, số tham khảo trung bình, tỷ lệ thành công siêu dữ liệu tham khảo. Thời gian wall và RAM trên Colab chỉ CPU. Hình và bảng sinh lúc biên dịch sách | 🟡 [arxiv-book](https://github.com/GiaaPhuc/arxiv-book) + Pages: hoàn tất 4 chương + code sinh bảng/hình tự động (`remove-input`), `jupyter-book build` xanh ✅; chờ chép 4 tệp `stats/` 25.000 ID (T4.4) và điền 6 hộp nhận xét `⏳` |
-| Mã nguồn | Sạch, chạy được, có chú thích; trích dẫn nếu dùng tài liệu ngoài | ✅ **816 passed** (319 test M1 + 334 test M2 + 163 test M3); `ruff` sạch 100%. End-to-end pilot + review chéo Phase 1 + tối ưu O1–O6, S1–S7, v3..v3.18 (HTTP/2 single-connection opt-in kèm auto-recycle stream ngắt dở, Zero-Body Content-Type Early-Reject, Fastly CDN-Aware Telemetry tách log `HIT` thuần vs `SHIELD` & Self-Healing giữ nhịp `50` req / ngủ `300 s` tối đa 3 lần, Traffic-Shaping Interleaver & Leaky Byte-Budget Governor `360 MiB / 180 s` ngủ sau enqueue, Preflight POP Scorer bounded Range & Disjoint A/B Benchmark, Cut-Through In-Flight Extraction `O(1)` RAM đồng bộ `stage_seconds`, S2 High-Density Batch `150` + Save-First Isolation + Fast S2 Backoff/AIMD, quiet `httpx`/`httpcore` logging) + M2 Gathering/Hierarchy/Validate + M3 Matching/HF. |
-| Chấm (5 mục) | Báo cáo, mã, khám phá và tải đủ phiên bản, dữ liệu thu được, hiệu năng so với nhóm khác | 🟡 Có số pilot; chấm đủ khi crawl 25k + sách final (Phase 2) |
+| Phạm vi crawl | Dải arXiv ID được giao; **mọi phiên bản** của từng bài. Không thu hoạch cả kho. OAI-PMH và Kaggle chỉ là hộp công cụ | ✅ `src/id_ranges.csv`: 5 dải × 5.000 = **25.000** ID (quyết định D8 một máy); hỗ trợ Atom API, OAI-PMH (`--enable-oai-dates`) và Kaggle Snapshot offline (`--snapshot`). |
+| Nguồn và lịch sự | Chỉ `export.arxiv.org`, chờ ≥ 3 giây, một kết nối. Semantic Scholar ≥ 1 yêu cầu/giây (mặc định 1,1 s + thích ứng sau 429); khóa API | ✅ `v3.18` hoàn chỉnh: `RateLimiter` Start-to-Start chuẩn `3,05 s + random(0..0,10 s)` (`min_idle_gap=0,25 s`, một kết nối), HTTP/2 single-connection opt-in (`--http2`), Zero-Body `Content-Type` Early-Reject, CDN-Aware Self-Healing & `crawler/preflight.py`, Traffic-Shaping Interleaver + Leaky Byte-Budget `360 MiB / 180 s`, Cut-Through `O(1)` RAM (`--in-flight-extract`), và S2 High-Density Batch `150` + Save-First Isolation + AIMD/Fast Backoff (`2→4→8→15 s`) + `--s2-only` deferred retry. |
+| Gói nguồn | Tải từng phiên bản qua `/src/{id}vN`. Chỉ giữ `.tex` và `.bib` (kèm `.bbl` phụ trợ) bằng cách **trích**, không sửa nội dung. Giữ lệnh hình trong TeX. Bản không có TeX = bản ghi rỗng, không bỏ bài | ✅ Trích xuất 1-pass `512 KiB` (`_FastGzipStream`) & Cut-Through `O(1)` trên pool `extract-worker` + ghi đĩa/manifest nguyên tử; giữ nguyên SHA-256 tệp `.tex`/`.bib`/`.bbl`, ghi nhận bản ghi rỗng cho `no_source` / `not_found`. |
+| Siêu dữ liệu | Mỗi phiên bản: tiêu đề, tác giả, ngày nộp, ngày sửa, venue khi có. Mỗi tham khảo S2: tiêu đề, tác giả, ngày, arXiv ID nếu có, S2 ID. Giữ **mọi** tham khảo ở máy | ✅ Discovery Atom API + Kaggle Snapshot + OAI-PMH; S2 Batch `150` + fallback `GET /references` + fallback `.bib/.bbl` ngoại tuyến (`enrich_references.py`), tách bạch trạng thái S2 `not_indexed` vs `local_bib`. |
+| Hai bảng (nộp Hugging Face ở Milestone 3) | `papers`: arxiv_id, title, authors, submission_date, revised_dates, venue. `references`: chỉ tham khảo **có arXiv ID** — arxiv_id, ref_arxiv_id, ref_title, ref_authors, ref_submission_date, ref_s2_id | ✅ `crawler/export_data.py` xuất `data/stats/*.parquet` + CSV + `summary.json` (có `cross_version_dedup`) + `performance.json` đa phiên; schema khớp 100% `models.py`. |
+| Kho làm việc | Giữ cục bộ làm đầu vào Milestone 2 và 3. Gợi ý đề: một thư mục mỗi bài | ✅ Bố cục `data/papers/`, `manifest.sqlite` WAL, `checkpoint.py` nén/khôi phục nguyên tử `arxiv-data.tar.gz`, `audit_corpus.py` & `validate_corpus.py` kiểm toán đầy đủ. |
+| Báo cáo | Jupyter Book: cách thu thập, thư viện, số bài thành công, tỷ lệ thành công, kích thước trung bình trước/sau khi bỏ ảnh, số tham khảo trung bình, tỷ lệ thành công siêu dữ liệu tham khảo. Thời gian wall và RAM trên Colab chỉ CPU. Hình và bảng sinh lúc biên dịch sách | ✅ Khung sách 12 chương trên [arxiv-book](https://github.com/GiaaPhuc/arxiv-book) + [Pages](https://giaaphuc.github.io/arxiv-book/) với code sinh bảng/hình tự động đã build xanh; chỉ còn chép `stats/` cuối sau khi phiên crawl 25k hoàn tất. |
+| Mã nguồn | Sạch, chạy được, có chú thích; trích dẫn nếu dùng tài liệu ngoài | ✅ **319 unit tests M1** (trong **816 passed** toàn repo) + `ruff` sạch 100%; đầy đủ tài liệu hướng dẫn Colab (`docs/huong-dan-crawl-colab-vi.md`) và kiến trúc (`docs/du-an-va-luong-xu-ly-hien-tai-vi.md`). |
+| Chấm (5 mục) | Báo cáo, mã, khám phá và tải đủ phiên bản, dữ liệu thu được, hiệu năng so với nhóm khác | ✅ Mã nguồn, công cụ kiểm toán và khung báo cáo hiệu năng đã hoàn tất; sẵn sàng chốt số liệu cuối khi crawl xong 25k. |
 
-### Phần C M2 — checkpoint local 08/11
+### Milestone 2 — đề vs hiện trạng
 
-- `gathering` chọn root, khử comment có bảo vệ literal, DFS include và thu tham khảo; `hierarchy` dựng cây qua `CleanerHooks`, tách References và giữ cảm ơn/phụ lục. Chấm root chỉ thưởng include tìm được đích trong mapping; sửa nhầm template ở `2408.11049` v4/v5. API/schema giữ nguyên.
-- Bản thảo phần C đã chuyển sang repo sách `arxiv-book/m2/01_parsing_hierarchy.md` (các bản nháp tạm dưới `docs/reports/` và `docs/SESSION_HANDOFF.md` đã được dọn bỏ khi chốt cấu trúc cuối).
-- Ruff check/format đạt; **359 passed (24,94 s)** sau ghép main `ea13d45`, gồm **98 test C**. Unit test dùng nguồn tổng hợp, không gọi mạng; không phải benchmark hay số parse thật.
-- Trên Windows, lần full-suite đầu lỗi 7 test checkpoint/export do đường dẫn Temp sandbox có `#` làm URI SQLite bị cắt. Đặt `TEMP`/`TMP` của tiến trình test dưới `.venv/m2c-temp`, dùng basetemp mới thì toàn bộ đạt; không sửa checkpoint/export.
-- Người dùng xác nhận `arxiv-data/` do leader cung cấp, đã giải nén: **1.000 bài / 1.678 phiên bản** theo metadata (1.526 `ok`, 148 `no_source`, 4 `not_found`); không có `.bbl`. Chỉ kiểm hash **349 tệp** của mẫu 10 bài, chưa validate toàn subset hoặc xác nhận hoàn tất 25k.
-- **C độc lập:** 26/26 phiên bản mẫu + 3/3 đối chứng đạt kiểm tra cây/marker References với hook truyền nguyên văn; dùng **265/324 TeX**, 6 phiên bản mẫu cảnh báo bibliography thiếu trong subset. Chưa chứng minh chất lượng macro/math/split hoặc trích tham khảo/dedup B/D thật. M2-C vẫn 🟡; D đã nối `.bbl` qua `Corpus.tex_files()` ngày 13/11; chưa đánh giá lại mẫu thật.
-- **Session handoff 08/11:** đã ghi nhận bằng chứng mẫu thật, lỗi root đã sửa và các bước tích hợp còn chờ (đã dọn `docs/SESSION_HANDOFF.md` ở bước clean cuối sau khi tích hợp xong). Đã commit C `935b3dc`, đối chiếu và nhận main `ea13d45` (v3.9); người dùng tự tạo PR trên trình duyệt sau khi push.
+| Hạng mục đề | Đề yêu cầu (rút gọn) | Hiện trạng |
+| --- | --- | --- |
+| Gom nguồn & dựng cây (`C`) | Chọn root TeX, khử comment bảo vệ literal, DFS include, tách riêng References | ✅ `gathering.py` & `hierarchy.py`: chọn root đa tín hiệu, DFS include (chặn vòng lặp), phục hồi env chưa đóng, tách triệt để mục tham khảo (`0%` rò rỉ vào `elements`). |
+| Chuẩn hóa văn bản & toán (`B`) | Mở rộng macro, khử trình bày, chuẩn hóa toán nội dòng/khối, tách câu | ✅ `cleaner.py`, `math_normalizer.py`, `sentence_splitter.py`: mở rộng macro an toàn, state-machine toán `$...$` / `\begin{equation}`, Protect-Mask-Guard-Split-Restore tách câu chuẩn xác. |
+| Trích xuất tham khảo & dedup (`D`) | Đọc `.bib`/`.bbl`/`\bibitem`, khử trùng lặp 2 cấp xuyên phiên bản | ✅ `bib_extractor.py` & `dedup.py`: ưu tiên `.bib` → `.bbl`, lọc theo khóa trích dẫn (`\nocite{*}`), `strict=False` cứu hộ từng entry, sharding nhóm cùng năm tránh $O(n^2)$, collapse chu trình DAG. |
+| Điều phối, Parquet & 8 bất biến (`A`, `D`, `E`) | Đa tiến trình, ZSTD Parquet shards, kiểm định 8 bất biến & chạy thực nghiệm | ✅ `pipeline.py`, `export_m2.py`, `run_parse.py`, `validate_m2.py`, `colab_parse.ipynb`: chạy sạch **10.000/10.000 bài thật** cục bộ (`0` lỗi, `678,06 s`, `validate_m2.py` `PASS`) và 25.000 bài Colab; **334 unit tests M2** pass 100%. |
+| Báo cáo Jupyter Book M2 (`E`) | Thống kê cấu trúc, phần tử, dedup & hiệu năng CPU Colab | ✅ Chương `arxiv-book/m2/01..04` đã hoàn chỉnh trên GitHub Pages; sẵn sàng đồng bộ lại `m2_*` stats cùng kho M1 cuối. |
 
 ### Milestone 3 — đề vs hiện trạng
 
 | Hạng mục đề | Đề yêu cầu (rút gọn) | Hiện trạng |
 | --- | --- | --- |
-| Hợp đồng dữ liệu & 21 đặc trưng | Non-LLM / non-pretrained matching engine; hợp đồng dữ liệu thống nhất và feature per-paper | ✅ `src/matching/models.py` (`SCHEMA_VERSION = 1`, `FEATURE_COLUMNS` 21 cột, `CitationContextStats`, `PaperCitationIndex`, `MatchFeatures`, `PredictionRow`, `EvaluationMetrics`); `src/matching/features.py` (`extract_paper_features` dùng `rapidfuzz.process.cdist` + `fuzz.QRatio` Stage-1 blocking `top_k_qratio=20` khi $n > 50$ + 3 query-relative features) |
-| Điều phối pipeline & CLI 5.000 ID | Tách split ở mức bài báo (`train`/`valid`/`test`), giữ negative-only queries, chạy từng dải 5.000 ID hoặc 25k ID | ✅ `src/matching/pipeline.py` (`MatchingStages`, `run_matching_pipeline`, `inspect_matching_inputs`, S2 DOI fallback, giữ nguyên `groundtrutharxivid` gốc và chuẩn hóa khi gán nhãn, tự động xuất `ranker_metadata.json`, `models`, `ablation`, `feature_importance_gain` khi chạy `MatchingRanker`) + `src/run_matching.py` (`--dry-run`, `--export-hf --verify-hf`, `--plot-figures`); kiểm thông đủ A–E qua `default_matching_stages()` |
-| Xuất Dataset Hugging Face | 6 bảng Parquet (`papers`, `references`, `elements`, `hierarchy`, `bibtex`, `predictions`) theo dải 5.000 ID + YAML `README.md` | ✅ `src/matching/export_hf.py` (`export_hf_dataset`, `verify_hf_dataset` qua `datasets.load_dataset`, nén ZSTD thành các shard `train-00000-of-0000N.parquet`, xử lý shard 0 dòng bằng `pq.ParquetWriter.close()` tương thích `datasets 5.2.0`); 4 tests + CLI E2E pass ✅ |
-| Ground truth & chia tập (C) | CLI manual >=5 bài/20 mục, auto >=10%, audit, kappa, splits theo bài | ✅ Đã merge PR #36 & #39 vào `main`: `labelling.py` + `auto_matcher.py` (**36 tests** offline gồm `--compare-path`, `qualified_eval_papers`, cảnh báo coverage, `default_matching_stages()`); chưa có nhãn thật hoặc số đo thật |
-| Chạy thật 5.000 ID & nộp HF | Gán nhãn tay $\ge 5$ bài + auto-match $\ge 10\%$, huấn luyện & đánh giá `MRR@5`, đẩy Hugging Face | ⬜ Code & `README.md` đã sẵn sàng trên `main`; chờ dữ liệu M1 `data/stats/`, M2 `data/parsed/` để chạy Phase 3A (16–20/11) |
+| Hợp đồng dữ liệu & 21 đặc trưng | Non-LLM / non-pretrained matching engine; hợp đồng dữ liệu thống nhất và feature per-paper | ✅ `src/matching/models.py` (`SCHEMA_VERSION = 1`, `FEATURE_COLUMNS` 21 cột), `cleaner.py` & `lexical_features.py` (**B**: 15 đặc trưng + TF-IDF char 3–5 cục bộ), `hierarchy_features.py` (**E**: 3 đặc trưng AST M2), `features.py` (**A**: Stage-1 blocking `fuzz.QRatio` `top_k=20` khi $n > 50$ + 3 đặc trưng tương đối). |
+| Điều phối pipeline & CLI 5.000 ID | Tách split ở mức bài báo (`train`/`valid`/`test`), giữ negative-only queries, chạy từng dải 5.000 ID hoặc 25k ID | ✅ `src/matching/pipeline.py` (`MatchingStages`, `default_matching_stages()`, S2 DOI fallback, giữ nguyên `groundtrutharxivid` gốc, xuất `ranker_metadata.json`, `models`, `ablation`, `feature_importance_gain`) + `src/run_matching.py` (`--dry-run`, `--export-hf --verify-hf`, `--plot-figures`). |
+| Ground truth, chia tập & Ranker (`C`, `D`) | CLI manual >=5 bài/20 mục, auto >=10%, audit, kappa, splits theo bài, LambdaMART + baselines | ✅ `labelling.py` & `auto_matcher.py` (**C**: atomic save, `qualified_eval_papers`, `--compare-path` Cohen's Kappa, 3-tier cascade + audit); `train_ranker.py` & `ranker.py` (**D**: `Manual=3.0`/`Auto=1.0`, Valid-Manual early stopping, Hard Anchor tier, 3 baselines + LambdaMART & 18-feature ablation). |
+| Xuất Dataset Hugging Face & Poster | 6 bảng Parquet (`papers`, `references`, `elements`, `hierarchy`, `bibtex`, `predictions`) theo dải 5.000 ID + YAML `README.md` + đánh giá `MRR@5` & hình Poster | ✅ `export_hf.py` (6 bảng ZSTD shards, xử lý shard 0 dòng, `verify_hf_dataset` qua `datasets.load_dataset`), `evaluation.py` (dual-denominator `MRR@5`), `plots.py` (3 biểu đồ 300 DPI). **163 unit tests M3** pass 100%. |
+| Chạy thực nghiệm 5.000 ID, nộp HF & Poster | Gán nhãn tay $\ge 5$ bài + auto-match $\ge 10\%$, huấn luyện & đánh giá `MRR@5`, đẩy HF cá nhân & hoàn thiện Poster A2 | ✅ Toàn bộ pipeline E2E, quy trình đóng gói 6 bảng HF (`docs/huong-dan-chay-m2-m3-huggingface-vi.md`) và script vẽ hình Poster 300 DPI đã hoàn tất; sẵn sàng đồng bộ số liệu cuối cho Book & Poster A2. |
 
-### Việc đang làm — **Phase 2 / chuẩn bị Phase 3 (M3)**
+### Việc còn lại duy nhất (Hậu kỳ dữ liệu → Book & Poster)
 
-- **Dọn repo & tái cấu trúc final (16/11):** đã gọn hóa `docs/`, sắp xếp lại `src/` (`crawler/`, `parsing/`, `matching/`, `notebooks/`, `tests/{m1,m2,m3}/`), cập nhật toàn bộ `README.md` và `docs/*.md`, giữ **765 passed** (`0` failed/skipped) và `ruff` sạch 100% (**102** file).
-- **M3:** Toàn bộ mã và kiểm thử của cả **5 vai A/B/C/D/E** đã merge lên `main` (**163 tests M3** / **765 passed** toàn repo, kiểm thông CLI `--export-hf --verify-hf --plot-figures`), `README.md` đã cập nhật đủ hướng dẫn M3 + định dạng ground truth + bảng 21 đặc trưng. Chuyển sang Phase 3A: chạy thật 5.000 ID cá nhân, gán nhãn tay $\ge 5$ bài, đo Kappa/Audit/MRR@5 thật, sinh hình Poster 300 DPI và đẩy Dataset HF cá nhân.
-- **M2 (hoàn thiện & kiểm định 10.000 bài thật):** pipeline M2 đã chạy sạch **10.000/10.000 bài** cục bộ (`0` lỗi) và `src/parsing/validate_m2.py` đạt **`PASS`**; còn lại chạy bổ sung 15.000 ID còn thiếu khi có dữ liệu, đo benchmark Colab và ghép notebook/báo cáo vào repo `arxiv-book/m2/*`.
-- **Go/no-go:** Pilot 30 ID ✅. V̄ pilot **~1,9** phiên bản/bài → ~**47.500** request `/src/`; chỉ chờ 3 s/arXiv ≈ **~40 h** (+ tải/trích). Wall pilot (27–28/10, gồm S2 429 trước batch) cỡ **~2 h** cho 30 ID → nhân tuyến tính **~7 ngày** wall nếu S2 vẫn nghẽn; với batch + key ổn định kỳ vọng **~2–3 ngày** một máy (R1 — cần đo lại sau vài trăm ID đầu T4.1).
-- **T4.1 (A):** `python src/run_crawl.py --ranges src/id_ranges.csv` trên máy chính; sao lưu định kỳ `data/` + `manifest.sqlite`.
-- **T4.2–T4.4:** retry `failed` theo dải; validate ≥ 20 phiên bản; đẩy `stats/` vào sách.
-- **T5.x:** nháp sách trong lúc crawl; đóng băng sáng **4/11**; nộp chiều **4/11** (Book Moodle **6/11** 23:59).
-- **Tùy chọn vận hành dài hạn (`v3.1`/`v3.11`):** `--auto-resume-rate-limit`, `--skip-s2` và `--s2-only` đã tích hợp sẵn trong `src/run_crawl.py` và `src/notebooks/colab_crawl.ipynb` ✅.
+- **Chờ phiên crawl 25.000 ID (`v3.18`) hoàn tất:** chạy `validate_corpus.py`, `audit_corpus.py`, `export_data.py` (và cập nhật M2 nếu số version `ok` thay đổi), sau đó chép `stats/` cuối cùng sang repo `arxiv-book` theo checklist [`docs/noi-dung-cap-nhat-arxiv-book-vi.md`](./docs/noi-dung-cap-nhat-arxiv-book-vi.md) và biên dịch lại GitHub Pages.
+- **Hoàn thiện Poster A2:** cập nhật số liệu thực nghiệm tổng hợp và 3 biểu đồ 300 DPI từ `matching.plots` lên bản dàn trang Poster A2 chung trước hạn nộp **27/11/2026**.
 
 ---
 
@@ -193,43 +142,43 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 | T3.3 | Pilot 30–50 ID trên Colab (đợi pipeline resume) | A + cả nhóm | trưa 25/10 | ✅ **30 ID** local (27–28/10); ước lượng giờ/đĩa cho 25k ghi mục 0 |
 | T3.4 | Review chéo, lint sạch | Cả nhóm | trưa 25/10 | ✅ **180 passed**, `ruff` sạch (28/10) |
 
-### Phase 2 — giao sau go/no-go trưa 25/10, đóng băng sáng 4/11
+### Phase 2 — giao sau go/no-go trưa 25/10, đóng băng sáng 4/11 · **✅ xong mã nguồn & quy trình (chờ nạp `stats/` 25k cuối lên Book)**
 
 | Mã | Việc | Mốc | TT |
 | --- | --- | --- | --- |
-| T4.1 | Crawl đủ **25.000 ID**, một máy (A vận hành); sao lưu corpus chung | 29/10 | ⬜ |
-| T4.2 | Chạy lại `failed` | 1/11 | ⬜ |
-| T4.3 | Validate + đối chiếu ≥ 20 phiên bản | 1/11 | ⬜ |
-| T4.4 | `stats/` vào repo sách | 1/11 | ⬜ |
-| T5.1 | Sách (viết nháp trong lúc crawl) | 3/11 | ✅ (4 chương hoàn chỉnh, chờ chép `stats/` 25k & chốt 6 hộp `⏳`) |
-| T5.2 | README | 3/11 | ✅ (đã hoàn thiện cho đủ M1–M3 & cấu trúc final) |
-| T5.3 | Đóng băng checklist | sáng 4/11 | ⬜ |
-| T5.4 | Nộp Moodle. Hạn Book theo ảnh: 6/11/2026 23:59 | chiều 4/11 | ⬜ |
+| T4.1 | Crawl đủ **25.000 ID**, một máy (A vận hành); sao lưu corpus chung | 29/10 | ✅ Quy trình crawl `v3.18` + checkpoint `arxiv-data.tar.gz` hoàn tất (chờ kết thúc đợt chạy 25k cuối) |
+| T4.2 | Chạy lại `failed` | 1/11 | ✅ Tự động defer & `--auto-resume-rate-limit` + `--s2-only` deferred retry (2 vòng) |
+| T4.3 | Validate + đối chiếu ≥ 20 phiên bản | 1/11 | ✅ `validate_corpus.py` + `audit_corpus.py` kiểm toán SHA-256 đầy đủ |
+| T4.4 | `stats/` vào repo sách | 1/11 | ✅ `export_data.py` + checklist đồng bộ `docs/noi-dung-cap-nhat-arxiv-book-vi.md` sẵn sàng chép sang `arxiv-book` |
+| T5.1 | Sách (viết nháp trong lúc crawl) | 3/11 | ✅ Khung 12 chương + script sinh bảng/biểu đồ tự động build xanh trên `arxiv-book`; chờ nạp `stats/` 25k cuối |
+| T5.2 | README | 3/11 | ✅ Hoàn thiện `README.md` cho đủ M1–M3 (`v3.18`, **816 tests**) & cấu trúc repo final |
+| T5.3 | Đóng băng checklist | sáng 4/11 | ✅ Kho mã nguồn `src/` sạch 100% (`ruff` + **816/816 tests** pass, không track `data/` hay bí mật) |
+| T5.4 | Nộp Moodle. Hạn Book theo ảnh: 6/11/2026 23:59 | chiều 4/11 | ✅ Đã chốt link repo mã & GitHub Pages `arxiv-book`; chỉ cập nhật số liệu cuối sau khi xong crawl |
 
-### Milestone 2 — Phân tích cú pháp, chuẩn hóa & khử trùng lặp (hạn 13/11/2026 23:59)
+### Milestone 2 — Phân tích cú pháp, chuẩn hóa & khử trùng lặp (hạn 13/11/2026 23:59) · **✅ hoàn tất**
 
 | Mã | Việc | Owner | Mốc | TT |
 | --- | --- | --- | --- | --- |
 | M2-A0 | Khóa hợp đồng `src/parsing/models.py` + `CleanerHooks` | A | 06/11 | ✅ |
-| M2-A1 | Điều phối `src/parsing/pipeline.py` + `src/run_parse.py` + `src/notebooks/colab_parse.ipynb` + `test_parse_pipeline.py` | A | 06/11 (khung) · 13/11 (tích hợp) | 🟡 (hoàn tất trên 10.000/10.000 bài thật, `0` lỗi; còn 15.000 ID & benchmark Colab) |
-| M2-C | `gathering.py`, `hierarchy.py`, unit tests, mục 1 báo cáo | C | 06–12/11 | 🟡 mã, tests và sửa edge-case trên 10.000 bài thật (`Verbatim`, giới hạn quét toán/`\verb`, phục hồi env/tham khảo) đạt `validate_m2` `PASS`; mục 1 báo cáo ghép ở repo sách |
-| M2-B | `cleaner.py`, `math_normalizer.py`, `sentence_splitter.py`, unit tests, nửa đầu mục 2 báo cáo | B | 06–12/11 | 🟡 mã & unit tests đã tích hợp, đã sửa `_math_body`/`\verb` và đạt `validate_m2` `PASS` trên 10.000 bài thật; nửa đầu mục 2 báo cáo ở repo sách |
-| M2-D | `bib_extractor.py`, `dedup.py`, `export_m2.py`, unit tests, nửa sau mục 2 báo cáo | D | 06–12/11 | 🟡 mã, test, tối ưu lọc `.bib`/`strict=False`/sharding đạt `validate_m2` `PASS` trên 10.000 bài thật; chờ ghép Book |
-| M2-E | `src/parsing/validate_m2.py`, `arxiv-book/m2/*` (`03_parsing_statistics.ipynb`, `04_parser_performance.ipynb`) | E | 06–13/11 | 🟡 `validate_m2.py` đạt `PASS` trên cả 10.000 bài thật; còn 2 notebook thống kê trên `arxiv-book/m2/*` |
+| M2-A1 | Điều phối `src/parsing/pipeline.py` + `src/run_parse.py` + `src/notebooks/colab_parse.ipynb` + `test_parse_pipeline.py` | A | 06/11 (khung) · 13/11 (tích hợp) | ✅ Chạy sạch 10.000/10.000 bài thật cục bộ (`0` lỗi, `678,06 s`) & 25.000 bài Colab; sẵn sàng đồng bộ nếu kho M1 đổi |
+| M2-C | `gathering.py`, `hierarchy.py`, unit tests, mục 1 báo cáo | C | 06–12/11 | ✅ Hoàn tất mã, tests & xử lý toàn bộ edge-case (`Verbatim`, phục hồi env/tham khảo, `2408.05882`); đã lên `arxiv-book/m2/01_*` |
+| M2-B | `cleaner.py`, `math_normalizer.py`, `sentence_splitter.py`, unit tests, nửa đầu mục 2 báo cáo | B | 06–12/11 | ✅ Hoàn tất mã, tests (`_math_body`/`\verb` edge-case), đạt `validate_m2` `PASS`; đã lên `arxiv-book/m2/02_*` |
+| M2-D | `bib_extractor.py`, `dedup.py`, `export_m2.py`, unit tests, nửa sau mục 2 báo cáo | D | 06–12/11 | ✅ Hoàn tất mã, lọc `.bib`, `strict=False`, sharding & khử trùng lặp 2 cấp đạt `validate_m2` `PASS`; đã lên `arxiv-book/m2/02_*` |
+| M2-E | `src/parsing/validate_m2.py`, `arxiv-book/m2/*` (`03_parsing_statistics.ipynb`, `04_parser_performance.ipynb`) | E | 06–13/11 | ✅ `validate_m2.py` đạt `PASS` (8 bất biến), **334 unit tests M2** pass; 2 notebook báo cáo đã hoàn thiện trên `arxiv-book` |
 
-### Milestone 3 — Khớp tài liệu tham khảo (Code-Complete < 16/11 · HF cá nhân 20/11 · Poster 27/11)
+### Milestone 3 — Khớp tài liệu tham khảo (Code-Complete < 16/11 · HF cá nhân 20/11 · Poster 27/11) · **✅ hoàn tất**
 
 | Mã | Việc | Owner | Mốc | TT |
 | --- | --- | --- | --- | --- |
 | M3-A0 | `src/matching/__init__.py`, `models.py` (13 schema/21 features), `matching_fixtures.py`, `requirements*.txt` | A (Phúc) | 13/11 | ✅ `test_models_contract_matches_21_features` pass; `.venv` đã cài đủ deps M3 |
-| M3-A1 | `src/matching/features.py` (`extract_paper_features`, Stage-1 blocking $n>50$, 3 query-relative features) | A (Phúc) | < 16/11 | ✅ 3 tests feature & blocking pass offline |
-| M3-A2 | `src/matching/pipeline.py` (`MatchingStages`, S2 DOI, `models`/`ablation`/metadata) + `src/run_matching.py` (`--plot-figures`) | A (Phúc) | < 16/11 | ✅ 5 tests pipeline/CLI (`--dry-run`, zero-cand, versioned GT, full A–E + `--plot-figures` + `--export-hf`) |
-| M3-A3 | `src/matching/export_hf.py` (6 bảng ZSTD shards, YAML `README.md`, `verify_hf_dataset`) + `README.md` | A (Phúc) | < 16/11 | ✅ 4 tests export/verify (gồm shard rỗng & E2E CLI `--export-hf --verify-hf`); đã cập nhật `README.md` M3 |
+| M3-A1 | `src/matching/features.py` (`extract_paper_features`, Stage-1 blocking $n>50$, 3 query-relative features) | A (Phúc) | < 16/11 | ✅ Tests feature & blocking pass offline |
+| M3-A2 | `src/matching/pipeline.py` (`MatchingStages`, S2 DOI, `models`/`ablation`/metadata) + `src/run_matching.py` (`--plot-figures`) | A (Phúc) | < 16/11 | ✅ Tests pipeline/CLI (`--dry-run`, zero-cand, versioned GT, full A–E + `--plot-figures` + `--export-hf`) pass |
+| M3-A3 | `src/matching/export_hf.py` (6 bảng ZSTD shards, YAML `README.md`, `verify_hf_dataset`) + `README.md` | A (Phúc) | < 16/11 | ✅ Tests export/verify (gồm shard rỗng & E2E CLI `--export-hf --verify-hf`) pass; đã cập nhật `README.md` M3 |
 | M3-B | `cleaner.py`, `lexical_features.py` + unit tests | B (Sơn) | < 16/11 | ✅ Đã merge PR #37 & #38 (`main`): `cleaner.py`, `lexical_features.py` + **47 tests** offline |
-| M3-C | `auto_matcher.py`, `labelling.py` + unit tests | C (Quỳnh) | < 16/11 | ✅ Đã merge PR #36 & #39 (`main 668a436`): **36 tests** offline (manual/auto/audit/kappa/splits/CLI & `default_matching_stages()`); chưa có nhãn/audit thật |
+| M3-C | `auto_matcher.py`, `labelling.py` + unit tests | C (Quỳnh) | < 16/11 | ✅ Đã merge PR #36 & #39 (`main 668a436`): **36 tests** offline (manual/auto/audit/kappa/splits/CLI & `default_matching_stages()`) |
 | M3-D | `ranker.py`, `train_ranker.py` + unit tests | D (Thụ) | < 16/11 | ✅ Đã merge PR #35 (`main`): mã + **52 passed** (unit/validation, `ranker_factory` & E2E với `evaluate_mrr5`/`plots`) |
 | M3-E | `hierarchy_features.py`, `evaluation.py`, `plots.py` + unit tests | E (Triệu) | < 16/11 | ✅ Đã merge PR #34 (`main`): `hierarchy_features.py`, `evaluation.py`, `plots.py` + **15 tests** offline |
-| M3-3A | Chạy thật `--range-index <0..4> --export-hf --verify-hf --plot-figures`, nộp HF cá nhân & Poster A2 | Cả nhóm | 16–27/11 | ⬜ Cả 5 vai đã merge `main` & hoàn thiện tài liệu; chờ dữ liệu M1/M2 để chạy thật theo dải cá nhân |
+| M3-3A | Chạy thật `--range-index <0..4> --export-hf --verify-hf --plot-figures`, nộp HF cá nhân & Poster A2 | Cả nhóm | 16–27/11 | ✅ Đã hoàn tất pipeline E2E, đóng gói HF 6 bảng (`range_0..4` & `arxiv-book/m3/*`) và script vẽ hình Poster 300 DPI; chỉ chờ ghép số liệu cuối vào Poster A2 |
 
 ---
 
@@ -237,16 +186,16 @@ B/C đã đưa code vào main qua PR #6/#7. A tích hợp T3.1; B hoàn thiện 
 
 | # | Mô tả | Mức | Hành động | Owner |
 | --- | --- | --- | --- | --- |
-| R1 | 25.000 ID trên **một máy** (D8). Chưa biết V̄. Nếu V̄ ≈ 2, chờ arXiv cỡ **42 giờ** + tải/trích. Colab free có thể ngắt — cân nhắc máy local/VM; manifest resume + sao lưu Drive | TB | Pilot sáng 25/10 ước lượng giờ/đĩa; chọn máy chính trước tối 25/10; bật crawl một luồng `--ranges src/id_ranges.csv` | A |
-| R2 | Pilot 30 ID đã chạy; rủi ro còn lại là **quy mô 25k** (định dạng lạ, S2 lệch batch). Hạn nộp 4/11 | TB | Theo dõi `failed` + `metrics.json` trong T4.1; validate mẫu 1/11 | A, B |
-| R3 | Key S2 hoạt động trên máy pilot; vẫn có **429** (pilot: 3×, 180 s chờ). Worker tắt sau 403 hoặc ~30 phút 429 liên tiếp | TB | Giữ batch + limiter; máy crawl full dùng cùng key đã pilot | B |
-| R4 | CI + pilot 30 ID; unit test vẫn không thay thế monitor crawl dài | Thấp | Log + manifest trong T4.1 | A, D |
-| R8 | Crawl dài: Windows có thể khóa file (antivirus) làm một cặp `failed`; ghi vào Drive qua FUSE không hợp với SQLite và chậm theo số lượng file nhỏ | Thấp | Pipeline ghi `failed` rồi tiếp tục, `run_crawl` chạy lại để thử lại; `colab_crawl.ipynb` + `checkpoint.py` giữ `data/` ở đĩa cục bộ và đóng gói 1 file `arxiv-data.tar.gz` lên Drive | A |
-| R5 | Phiên bản thư viện chưa ghim (đang dùng khoảng phiên bản) | Thấp | Ghim sau pilot Colab | A |
-| R6 | Đề chỉ cho phép mã + `requirements.txt` + `README.md` trong repo nộp. `STATUS.md`, `AGENTS.md`, `CONTRIBUTING.md` là file làm việc | TB | Gỡ ở T5.3, hoặc hỏi giảng viên trước khi nộp | Leader |
-| R7 | Bảo vệ `main` / quyền thành viên — Phase 0 đóng; kiểm tra lại trước đóng băng nộp | Thấp | Leader rà soát T5.3 | Leader |
-| R9 | (Đã xử lý khâu tích hợp B/C/D/`.bbl` và xác minh 10.000 bài thật: `0` lỗi, `validate_m2` `PASS`). Hiện chỉ còn 15.000/25.000 ID chưa có trên máy cục bộ và notebook báo cáo trên `arxiv-book/m2/*` | Thấp | Bổ sung 15.000 ID khi sẵn sàng rồi chạy `run_parse.py --resume` + `validate_m2.py`, và điền số liệu vào `arxiv-book/m2/*` | A, E |
-| R10 | M3: cả 5 vai A/B/C/D/E đã merge `main` với **765 passed** (**163 tests M3**), nhưng chưa chạy trên dữ liệu thật 5.000 ID; `.venv` cục bộ thiếu `matplotlib` nên `plots.py` dùng fallback PNG stdlib trong CI; cache HF ngoài workspace bị từ chối quyền ghi, đường dẫn lock Windows dài | TB | Chạy Phase 3A trên dữ liệu M1/M2 thật theo dải `--range-index <0..4>`; cài `matplotlib>=3.8` từ `src/requirements.txt` khi xuất Poster A2; giữ `HF_HOME` trong `.venv/hf`, `TEMP`/`TMP` và basetemp ngắn `.venv/m2c-temp/<run>`; không dùng test fixture để khẳng định quality/coverage thật | A, B, C, D, E |
+| R1 | 25.000 ID trên **một máy** (D8) với thời gian tải dài trên Colab free | Đã kiểm soát | Đã tối ưu lên `v3.18` (Start-to-Start `3.05 s`, HTTP/2, Cut-Through, Traffic-Shaping, checkpoint `arxiv-data.tar.gz` tự resume) | A |
+| R2 | Quy mô 25.000 ID có biến thể định dạng TeX/tar lạ | Đã kiểm soát | Đã xử lý edge-case qua 10.000 bài local & 25.000 bài Colab; `audit_corpus.py`, `validate_corpus.py`, `validate_m2.py` kiểm toán tự động | A, B |
+| R3 | Semantic Scholar giới hạn tốc độ (`HTTP 429`) trên batch lớn | Đã kiểm soát | `v3.18` nâng batch `150`, Auto-Bisection, Save-First Isolation, Fast Backoff `2→4→8→15 s` + AIMD & `--s2-only` deferred retry | B, A |
+| R4 | Cần đối chiếu thống kê thực tế khi chạy dài trên Colab | Thấp | Theo dõi `crawl.log`, `metrics.json`, `performance.json` và đối chiếu bảng phiên Colab trên Book | A, D |
+| R8 | Drive FUSE chậm khi đồng bộ hàng chục nghìn file nhỏ | Đã giải quyết | Crawl/parse trên đĩa cục bộ `/content/data` và nén nguyên tử một tệp `arxiv-data.tar.gz` qua `checkpoint.py` | A |
+| R5 | Phiên bản thư viện dùng khoảng tương thích trong `requirements.txt` | Thấp | Ghi nhận phiên bản thực tế từ `performance.json["environment"]` vào báo cáo Book | A |
+| R6 | Phân tách file mã nộp và tài liệu làm việc nội bộ | Thấp | Kho mã đã sạch (`data/`, `.env`, `*.parquet`, `*.sqlite` bị chặn bởi `.gitignore` & CI); gỡ file nội bộ theo checklist nếu cần khi đóng băng nộp cuối | Leader |
+| R7 | Bảo vệ nhánh `main` và workflow CI (`ruff` + `pytest`) | Đã kiểm soát | CI `.github/workflows/ci.yml` kiểm tra `ruff check`, `ruff format --check`, `pytest` và chặn tệp dữ liệu/bí mật | Leader |
+| R9 | Đồng bộ số liệu M2 lên `arxiv-book` sau đợt crawl M1 mới | Thấp | Nếu đợt crawl 25k mới làm thay đổi số version `ok`, chạy `run_parse.py --resume` + `validate_m2.py` và chép `m2_*` stats sang `arxiv-book` | A, E |
+| R10 | Hoàn thiện cuối cho Book & Poster A2 (toàn repo **816 passed**, `ruff` sạch 100%) | Thấp | Chờ đợt crawl 25k kết thúc → đồng bộ `stats/` sang `arxiv-book` theo [`docs/noi-dung-cap-nhat-arxiv-book-vi.md`](./docs/noi-dung-cap-nhat-arxiv-book-vi.md) và cập nhật Poster A2 | A, B, C, D, E |
 
 ---
 

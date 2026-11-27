@@ -514,6 +514,11 @@ Bộ công cụ kiểm toán `src/parsing/validate_m2.py` (Owner: E | Task: M2-E
 | **7** | **Citation Consistency** | Không chứa khóa trích dẫn trùng lặp bên trong các lệnh `\cite{...}`; mọi trích dẫn đều phải trỏ tới `citationkey` hợp lệ trong `bibtex`. |
 | **8** | **Version Coverage** | Số lượng phiên bản có cây trong `hierarchy` phải khớp chính xác với số phiên bản có TeX trong `Corpus` M1; các phiên bản rỗng/PDF (`no_source`) phải có 0 phần tử. |
 
+#### Kết quả Tích hợp, Xử lý Edge-Case & Kiểm định Thực nghiệm (10.000 bài thật)
+- **Tối ưu & khôi phục dữ liệu thật:** `Corpus.tex_files()` đọc cả `.bib` và `.bbl` (ưu tiên `.bib` khi trùng khóa cùng phiên bản), lọc `.bib` theo citation key xuất hiện trong `.tex`/`.bbl` (không phân biệt hoa/thường; giữ đủ khi có `\nocite{*}`), bật `strict=False` cứu hộ từng entry trên file `.bib` lỗi cục bộ, và chia nhóm cùng năm quá lớn theo ký tự đầu trong `dedup` để tránh suy biến $O(n^2)$. Ở tầng LaTeX, `_math_body()` giữ khoảng trắng sau `\` cuối thân toán (`\ `), `gathering.py` bổ sung `Verbatim`/`Verbatim*` và giới hạn quét toán/`\verb`, còn `hierarchy.py` phục hồi môi trường chưa đóng trước ranh giới tài liệu/tham khảo và lọc tiêu đề mục tham khảo có `\label{...}` hoặc dấu câu cuối.
+- **Độ tin cậy xuất lô & Resume:** Mỗi lô ghi marker `_export_pending.json` trước khi flush 3 bảng và CSV (tự rollback lô dở nếu khởi động lại), dùng CSV đã commit để đồng bộ `_done.txt`, và tự gỡ bài đã sửa khỏi `_errors.jsonl` khi retry thành công.
+- **Số đo thực nghiệm trên 10.000 bài cục bộ (`data/papers/`):** `python src/run_parse.py --data-dir data --workers 12 --batch-size 500` đạt **10.000/10.000 bài thành công (`0` lỗi)** trong **678,06 s** (`67,81 ms/bài`, RAM đỉnh `1.629,2 MB`, trung bình `1.025,2 MB`, đầu vào `7.751.298.877 B` → đầu ra Parquet `286.068.147 B` qua `20` shard/bảng): **12.783** versions (**867** empty), **4.539.133** elements, **6.884.462** hierarchy, **373.776** bibtex; `src/parsing/validate_m2.py --data-dir data` đạt **`PASS`** (exit `0`).
+
 ---
 
 ### 2.6. Hướng dẫn Lệnh Vận hành Milestone 2
@@ -716,11 +721,11 @@ Quy định phân công theo `CONTRIBUTING.md` và tiến độ thực tế qua 
 
 | Vai | Thành viên | Trách nhiệm chính M1 | Trách nhiệm chính M2 | Trách nhiệm chính M3 | Reviewer | Trạng thái |
 | :---: | :--- | :--- | :--- | :--- | :---: | :---: |
-| **A** | **Võ Gia Phúc (Leader)** | Điều phối pipeline, mạng HTTP, manifest, metrics, crawler operator. | Khóa hợp đồng `models.py`, điều phối `pipeline.py`, CLI `run_parse.py`, profiler. | Khóa `matching/models.py`, `features.py`, `pipeline.py`, `run_matching.py`, `export_hf.py`, `matching_fixtures.py`, `README.md`. | **E** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Mã & tích hợp A (`M3-A0..A3`) |
-| **B** | **Trần Thanh Sơn** | Xử lý dải ID, khám phá Atom API, tích hợp Semantic Scholar. | Làm sạch văn bản (`cleaner.py`), chuẩn hóa toán (`math_normalizer.py`), tách câu (`sentence_splitter.py`). | Tiền xử lý (`cleaner.py`), 15 đặc trưng lexical + TF-IDF (`lexical_features.py`). | **C** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Đã merge PR #37 & #38 lên `main` |
-| **C** | **Phạm Trường Quỳnh** | Fixture tổng hợp, tải và giải nén source TeX/bib/bbl. | Gom nguồn (`gathering.py`), dựng cây cấp bậc (`hierarchy.py`). | CLI gán nhãn & splits (`labelling.py`), Auto-matcher + audit (`auto_matcher.py`). | **B** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Đã merge PR #36 & #39 lên `main` |
-| **D** | **Trần Nguyễn Lâm Gia Thụ** | Xuất dữ liệu Parquet/CSV, đối soát corpus, notebook số liệu. | Trích tham khảo (`bib_extractor.py`), khử trùng lặp (`dedup.py`), xuất Parquet (`export_m2.py`). | Mô hình xếp hạng (`ranker.py`), huấn luyện có trọng số & ablation (`train_ranker.py`). | **E** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Đã merge PR #35 lên `main` |
-| **E** | **Thân Nguyễn Quang Triệu** | Xác thực corpus (`crawler/validate_corpus.py`), xây dựng Jupyter Book. | Kiểm toán 8 bất biến (`parsing/validate_m2.py`), viết notebook thống kê M2 trên sách. | Đặc trưng AST (`hierarchy_features.py`), đánh giá `MRR@5` (`evaluation.py`), hình poster (`plots.py`). | **D / A** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Đã merge PR #34 lên `main` |
+| **A** | **Võ Gia Phúc (Leader)** | Điều phối pipeline, mạng HTTP, manifest, metrics, crawler operator. | Khóa hợp đồng `models.py`, điều phối `pipeline.py`, CLI `run_parse.py`, profiler. | Khóa `matching/models.py`, `features.py`, `pipeline.py`, `run_matching.py`, `export_hf.py`, `matching_fixtures.py`, `README.md`. | **E** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Hoàn tất |
+| **B** | **Trần Thanh Sơn** | Xử lý dải ID, khám phá Atom API, tích hợp Semantic Scholar. | Làm sạch văn bản (`cleaner.py`), chuẩn hóa toán (`math_normalizer.py`), tách câu (`sentence_splitter.py`). | Tiền xử lý (`cleaner.py`), 15 đặc trưng lexical + TF-IDF (`lexical_features.py`). | **C** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Hoàn tất |
+| **C** | **Phạm Trường Quỳnh** | Fixture tổng hợp, tải và giải nén source TeX/bib/bbl. | Gom nguồn (`gathering.py`), dựng cây cấp bậc (`hierarchy.py`). | CLI gán nhãn & splits (`labelling.py`), Auto-matcher + audit (`auto_matcher.py`). | **B** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Hoàn tất |
+| **D** | **Trần Nguyễn Lâm Gia Thụ** | Xuất dữ liệu Parquet/CSV, đối soát corpus, notebook số liệu. | Trích tham khảo (`bib_extractor.py`), khử trùng lặp (`dedup.py`), xuất Parquet (`export_m2.py`). | Mô hình xếp hạng (`ranker.py`), huấn luyện có trọng số & ablation (`train_ranker.py`). | **E** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Hoàn tất |
+| **E** | **Thân Nguyễn Quang Triệu** | Xác thực corpus (`crawler/validate_corpus.py`), xây dựng Jupyter Book. | Kiểm toán 8 bất biến (`parsing/validate_m2.py`), viết notebook thống kê M2 trên sách. | Đặc trưng AST (`hierarchy_features.py`), đánh giá `MRR@5` (`evaluation.py`), hình poster (`plots.py`). | **D / A** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Hoàn tất |
 
 ---
 
@@ -760,45 +765,4 @@ Khi tổng hợp dữ liệu đưa vào báo cáo và poster, nhóm tập trung 
 
 ---
 
-*Tài liệu kỹ thuật được rà soát, tái cấu trúc và đồng bộ hóa chính xác 100% với mã nguồn `arxiv-pipeline` ngày **23/11/2026**.*
-
-
-## Tích hợp M2, Tối ưu & Kiểm định Corpus Thật (14/11/2026)
-
-`default_stages()` nối C gathering/hierarchy, B cleaner/math/split và D bib/dedup.
-`Corpus.tex_files()` đọc cả `.bbl`; khóa trùng cùng phiên bản ưu tiên `.bib`,
-giữ khai báo đầu khi cùng nguồn và ghi cảnh báo. Pipeline trích các citation key
-từ `.tex`/`.bbl` để lọc `.bib` (không phân biệt hoa/thường; bỏ lọc nếu có `\nocite{*}`)
-và bật `strict=False` để cứu hộ từng entry trên các file `.bib` lỗi cục bộ (chỉ báo
-lỗi khi không đọc được entry nào); `dedup` chia nhóm cùng năm quá lớn theo ký tự đầu để
-tránh suy biến $O(n^2)$. Pool nội dung bỏ cạnh gây chu trình, giữ nội dung con và các
-invariant DAG/duy nhất `(kind, content)`.
-
-Về biên phân tích LaTeX trên dữ liệu thật: `_math_body()` giữ khoảng trắng sau dấu
-`\` cuối thân toán (`\ `) để không escape ký tự đóng kế tiếp; `gathering.py` bổ sung
-`Verbatim`/`Verbatim*` vào `_LITERAL_ENVS`, chặn `\verb` không tràn dòng và giới hạn
-quét toán chưa đóng trước `\begin{document}`, `\end{document}`, `\begin{thebibliography}`
-và `\bibitem`; `hierarchy.py` phục hồi môi trường chưa đóng trước ranh giới tài liệu/tham
-khảo và lọc tiêu đề mục tham khảo chứa `\label{...}` hoặc dấu câu cuối.
-
-Pipeline chuyển số đếm `bib_fields_before` qua `PaperResult` kể cả khi chạy
-nhiều worker. Exporter ghi Parquet ZSTD, dictionary int8 và cột bắt buộc non-null;
-shard rỗng có 0 row groups. CLI vẫn từ chối output cũ nếu không có `--resume`;
-`src/notebooks/colab_parse.ipynb` chạy pilot rồi dùng `--resume` cho phần còn lại.
-Mỗi lô ghi marker `_export_pending.json` trước ba shard và CSV; khi khởi động
-lại, lô dở được rollback. CSV đã commit là nguồn khôi phục ID bài nếu `_done.txt`
-chưa kịp ghi. Summary và phân bố kind cộng cả cũ + mới. Bài lỗi được thử lại;
-lỗi đã giải quyết được gỡ khỏi `_errors.jsonl`, lịch sử giữ ở `parse.log`.
-Chỉ hỗ trợ một tiến trình ghi vào một output; chưa thử mất điện/hỏng filesystem.
-
-Test tích hợp dùng dữ liệu tổng hợp qua CLI → C/B/D → Parquet → validator E,
-gồm `.bib` + `.bbl`, heading tổ tiên trùng, resume, lỗi rồi retry và 2 worker.
-Trên corpus thật cục bộ (`data/papers/`, **10.000/25.000 ID** mục tiêu): chạy
-`src/run_parse.py --data-dir data --workers 12 --batch-size 500` đạt
-**10.000/10.000 bài thành công (`0` lỗi)** trong **678,06 s** (`67,81 ms/bài`,
-RAM đỉnh `1.629,2 MB`, trung bình `1.025,2 MB`, đầu vào `7.751.298.877 B` → đầu ra
-Parquet `286.068.147 B` qua `20` shard/bảng): **12.783** versions (**867** empty),
-**4.539.133** elements, **6.884.462** hierarchy, **373.776** bibtex; và
-`src/parsing/validate_m2.py --data-dir data` đạt **`PASS`** (exit `0`). Hiện còn chờ
-15.000 ID còn lại, benchmark Colab và ghép notebook/báo cáo sang `arxiv-book/m2/*`.
-Giữ nguyên phần M1 v3.14 và M3-A đã nhận từ `origin/main` (`5980068`).
+*Tài liệu kỹ thuật được rà soát, tái cấu trúc và đồng bộ hóa chính xác 100% với mã nguồn `arxiv-pipeline` ngày **27/11/2026**.*

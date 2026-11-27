@@ -31,7 +31,7 @@ Crawl LaTeX sources & metadata (**Milestone 1**) · Parse AST & deduplicate refe
 
 This repository implements the complete three-milestone pipeline under `src/`:
 
-- **Milestone 1 (`src/crawler/`, `src/run_crawl.py`):** Resumable arXiv + Semantic Scholar crawler with SQLite manifest, zero-copy streaming `.tex`/`.bib`/`.bbl` extraction, corpus validation, and Parquet/CSV export.
+- **Milestone 1 (`src/crawler/`, `src/run_crawl.py`):** Resumable arXiv + Semantic Scholar crawler (`v3.18`: HTTP/2 single-connection opt-in, cut-through extraction, S2 high-density batching) with SQLite manifest, streaming `.tex`/`.bib`/`.bbl` extraction, corpus validation, and Parquet/CSV export.
 - **Milestone 2 (`src/parsing/`, `src/run_parse.py`):** Multi-process LaTeX/BibTeX parser that resolves includes, expands macros, normalizes math, splits sentences, builds versioned containment trees, deduplicates elements & BibTeX across versions, and validates 8 invariants.
 - **Milestone 3 (`src/matching/`, `src/run_matching.py`):** Non-LLM reference matching pipeline with 21 features, Stage-1 blocking, manual/auto ground truth & Cohen's kappa, LightGBM LambdaMART + baselines & M2 AST ablation, dual-denominator `MRR@5`, 300-DPI Poster charts, and 6-table Hugging Face packaging.
 
@@ -47,7 +47,7 @@ For Milestone 1, for each assigned arXiv ID the crawler executes:
 
 Crawled and processed data live under `data/` and are **never committed** (git-ignored).
 
-**Core libraries:** `requests`, `psutil`, `pyarrow` / `pandas`, `numpy`, `rapidfuzz`, `scikit-learn`, `lightgbm`, `datasets`, `matplotlib`, plus stdlib `tarfile`, `gzip`, and `sqlite3`.
+**Core libraries:** `requests`, `httpx` (HTTP/2 single-connection opt-in), `psutil`, `pyarrow` / `pandas`, `numpy`, `rapidfuzz`, `scikit-learn`, `lightgbm`, `datasets`, `matplotlib`, plus stdlib `tarfile`, `gzip`, and `sqlite3`.
 
 ```mermaid
 flowchart TB
@@ -95,7 +95,8 @@ flowchart TB
 | [`docs/du-an-va-luong-xu-ly-hien-tai-vi.md`](docs/du-an-va-luong-xu-ly-hien-tai-vi.md) | Full M1–M3 technical architecture & processing flow (Vietnamese) |
 | [`docs/huong-dan-crawl-colab-vi.md`](docs/huong-dan-crawl-colab-vi.md) | Milestone 1 Colab walkthrough (Vietnamese) |
 | [`docs/huong-dan-chay-m2-m3-huggingface-vi.md`](docs/huong-dan-chay-m2-m3-huggingface-vi.md) | Local `.tar.gz` → M2 → M3 → Hugging Face guide (Vietnamese) |
-| [arxiv-book](https://giaaphuc.github.io/arxiv-book/) | Milestone 1–2 Jupyter Book report |
+| [`docs/noi-dung-cap-nhat-arxiv-book-vi.md`](docs/noi-dung-cap-nhat-arxiv-book-vi.md) | Checklist & chapter guide for final Jupyter Book sync (Vietnamese) |
+| [arxiv-book](https://giaaphuc.github.io/arxiv-book/) | Milestone 1–3 Jupyter Book report |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Branches, review roles, PR checklist |
 
 </details>
@@ -173,6 +174,7 @@ Assigned IDs: `src/id_ranges.csv` — **25,000** IDs in five ranges. Full corpus
 Range CSV columns: `start_month,start_id,end_month,end_id` (inclusive).
 
 ```bash
+python src/crawler/preflight.py --ranges src/id_ranges.csv --count 4 --http2
 python src/run_crawl.py --ranges src/id_ranges.csv --dry-run
 python src/run_crawl.py --ranges src/id_ranges.csv --limit 30
 python src/run_crawl.py --ranges src/id_ranges.csv --data-dir data
@@ -184,6 +186,7 @@ python src/crawler/export_data.py --data-dir data
 
 | Flag / command | Purpose |
 | --- | --- |
+| `crawler/preflight.py` | Score Fastly POP/VM routing before a long Colab session |
 | `--dry-run` | Expand ranges and print plan — no network |
 | `--limit N` | Pilot on first *N* IDs |
 | `--data-dir` | Output directory (default `./data`) |
@@ -392,6 +395,7 @@ src/
 │   ├── checkpoint.py            Atomic tar.gz backup/restore & shrink protection
 │   ├── metrics.py               Timing, diagnostics, and resource use
 │   ├── pipeline.py              Multi-threaded crawler orchestration
+│   ├── preflight.py             Fastly POP/VM scorer & HTTP/1.1 vs HTTP/2 benchmark CLI
 │   ├── export.py                Parquet/CSV tables and report stats
 │   ├── audit_corpus.py          Disk vs manifest checksum auditor CLI
 │   ├── enrich_references.py     Offline .bib/.bbl reference backfill CLI
@@ -426,7 +430,7 @@ src/
 ├── notebooks/                   Colab notebooks
 │   ├── colab_crawl.ipynb        Milestone 1 Colab crawler notebook
 │   └── colab_parse.ipynb        Milestone 2 Colab parser notebook
-└── tests/                       Offline pytest suite (765 tests; mocked HTTP/fixtures)
+└── tests/                       Offline pytest suite (816 tests; mocked HTTP/fixtures)
     ├── conftest.py              Shared archive fixtures & M3 fixture path
     ├── m1/                      Milestone 1 unit & pipeline tests
     ├── m2/                      Milestone 2 parser, dedup & validator tests
@@ -455,7 +459,7 @@ Each module docstring lists owner, reviewer, task code, and “done when” crit
 ruff check . && ruff format . && pytest
 ```
 
-- Unit tests (`765` total across `src/tests/m1/`, `src/tests/m2/`, `src/tests/m3/`) use `responses` and synthetic fixtures — **no real network** in tests.
+- Unit tests (`816` total: `319` across `src/tests/m1/`, `334` across `src/tests/m2/`, `163` across `src/tests/m3/`) use `responses` and synthetic fixtures — **no real network** in tests.
 - Never commit `data/`, `.env`, keys, `*.gz`, `*.parquet`, `*.sqlite`.
 - Branches and reviewers: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 - CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): ruff, pytest, block tracked secrets/data.
