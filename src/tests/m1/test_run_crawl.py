@@ -140,3 +140,90 @@ def test_cli_forwards_skip_s2_flag(monkeypatch, tmp_path):
     ]
     assert run_crawl.main(args) == 0
     assert seen["skip_s2"] is True
+
+
+def test_http2_and_in_flight_extract_dry_run_and_forward(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("CRAWLER_CONTACT", "test@example.com")
+    dry_args = [
+        "--ranges",
+        str(RANGES),
+        "--limit",
+        "1",
+        "--data-dir",
+        str(tmp_path / "d"),
+        "--http2",
+        "--in-flight-extract",
+        "--dry-run",
+    ]
+    assert run_crawl.main(dry_args) == 0
+    out = capsys.readouterr().out
+    assert "http2: True" in out
+    assert "in-flight extract: True" in out
+
+    captured: dict[str, bool] = {}
+
+    def fake_run(_ids, config):
+        captured["use_http2"] = config.use_http2
+        captured["in_flight_extract"] = config.in_flight_extract
+        return {"ok": 1}
+
+    monkeypatch.setattr(pipeline, "run", fake_run)
+    run_args = [
+        "--ranges",
+        str(RANGES),
+        "--limit",
+        "1",
+        "--data-dir",
+        str(tmp_path / "d2"),
+        "--http2",
+        "--in-flight-extract",
+    ]
+    assert run_crawl.main(run_args) == 0
+    assert captured == {"use_http2": True, "in_flight_extract": True}
+
+
+def test_setup_logging_quiets_httpx_and_traffic_shaping_env_toggle(tmp_path, monkeypatch):
+    from crawler.config import Config
+
+    run_crawl._setup_logging(tmp_path)
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
+
+    assert Config.from_env().traffic_shaping is True
+    monkeypatch.setenv("CRAWLER_TRAFFIC_SHAPING", "0")
+    assert Config.from_env().traffic_shaping is False
+
+
+def test_no_traffic_shaping_cli_flag_dry_run_and_forward(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("CRAWLER_CONTACT", "test@example.com")
+    dry_args = [
+        "--ranges",
+        str(RANGES),
+        "--limit",
+        "1",
+        "--data-dir",
+        str(tmp_path / "d"),
+        "--no-traffic-shaping",
+        "--dry-run",
+    ]
+    assert run_crawl.main(dry_args) == 0
+    assert "traffic shaping: False" in capsys.readouterr().out
+
+    captured: dict[str, bool] = {}
+
+    def fake_run(_ids, config):
+        captured["traffic_shaping"] = config.traffic_shaping
+        return {"ok": 1}
+
+    monkeypatch.setattr(pipeline, "run", fake_run)
+    run_args = [
+        "--ranges",
+        str(RANGES),
+        "--limit",
+        "1",
+        "--data-dir",
+        str(tmp_path / "d2"),
+        "--no-traffic-shaping",
+    ]
+    assert run_crawl.main(run_args) == 0
+    assert captured == {"traffic_shaping": False}

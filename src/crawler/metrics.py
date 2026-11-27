@@ -378,6 +378,26 @@ def merge_with_base(
         + int(s2_in.get("s2_not_indexed", 0)),
     }
     prev_arxiv = previous.get("arxiv", {})
+    sess_wire_sec = float(s2_in.get("arxiv_wire_download_seconds", 0.0))
+    sess_wait_sec = float(s2_in.get("arxiv_rate_limit_wait_seconds", 0.0))
+    sess_wire_bytes = int(s2_in.get("arxiv_wire_bytes", 0))
+    sess_reqs_ok = int(s2_in.get("arxiv_requests_ok", 0))
+    sess_edge_hits = int(s2_in.get("cdn_edge_hits", 0))
+    sess_shield_hits = int(s2_in.get("cdn_shield_hits", 0))
+    sess_origin_misses = int(s2_in.get("cdn_origin_misses", 0))
+    sess_cdn_unknown = int(s2_in.get("cdn_unknown", 0))
+    sess_hit_bytes = int(s2_in.get("cdn_hit_bytes", 0))
+    sess_hit_sec = float(s2_in.get("cdn_hit_seconds", 0.0))
+    sess_miss_bytes = int(s2_in.get("cdn_miss_bytes", 0))
+    sess_miss_sec = float(s2_in.get("cdn_miss_seconds", 0.0))
+    sess_early_rejects = int(s2_in.get("early_header_rejects", 0))
+    sess_429_queue = int(s2_in.get("arxiv_429_queue_timeout", 0))
+    sess_429_fast = int(s2_in.get("arxiv_429_edge_fast", 0))
+    sess_soft_pacing = int(s2_in.get("defensive_soft_pacing_triggers", 0))
+    sess_heavy_interleaved = int(s2_in.get("heavy_versions_interleaved", 0))
+    sess_budget_breathers = int(s2_in.get("byte_budget_breathers", 0))
+    sess_hit_recoveries = int(s2_in.get("hit_recovery_cooldowns", 0))
+    sess_inflight = int(s2_in.get("in_flight_extractions", 0))
     merged_arxiv = {
         "http_429": int(prev_arxiv.get("http_429", 0)) + int(s2_in.get("arxiv_429", 0)),
         "retry_wait_seconds": float(prev_arxiv.get("retry_wait_seconds", 0.0))
@@ -390,6 +410,32 @@ def merge_with_base(
         + float(s2_in.get("arxiv_cooldown_seconds", 0.0)),
         "range_resumes": int(prev_arxiv.get("range_resumes", 0))
         + int(s2_in.get("range_resumes", 0)),
+        "wire_download_seconds": float(prev_arxiv.get("wire_download_seconds", 0.0))
+        + sess_wire_sec,
+        "rate_limit_wait_seconds": float(prev_arxiv.get("rate_limit_wait_seconds", 0.0))
+        + sess_wait_sec,
+        "wire_bytes": int(prev_arxiv.get("wire_bytes", 0)) + sess_wire_bytes,
+        "requests_ok": int(prev_arxiv.get("requests_ok", 0)) + sess_reqs_ok,
+        "cdn_edge_hits": int(prev_arxiv.get("cdn_edge_hits", 0)) + sess_edge_hits,
+        "cdn_shield_hits": int(prev_arxiv.get("cdn_shield_hits", 0)) + sess_shield_hits,
+        "cdn_origin_misses": int(prev_arxiv.get("cdn_origin_misses", 0)) + sess_origin_misses,
+        "cdn_unknown": int(prev_arxiv.get("cdn_unknown", 0)) + sess_cdn_unknown,
+        "cdn_hit_bytes": int(prev_arxiv.get("cdn_hit_bytes", 0)) + sess_hit_bytes,
+        "cdn_hit_seconds": float(prev_arxiv.get("cdn_hit_seconds", 0.0)) + sess_hit_sec,
+        "cdn_miss_bytes": int(prev_arxiv.get("cdn_miss_bytes", 0)) + sess_miss_bytes,
+        "cdn_miss_seconds": float(prev_arxiv.get("cdn_miss_seconds", 0.0)) + sess_miss_sec,
+        "early_header_rejects": int(prev_arxiv.get("early_header_rejects", 0)) + sess_early_rejects,
+        "http_429_queue_timeout": int(prev_arxiv.get("http_429_queue_timeout", 0)) + sess_429_queue,
+        "http_429_edge_fast": int(prev_arxiv.get("http_429_edge_fast", 0)) + sess_429_fast,
+        "defensive_soft_pacing_triggers": int(prev_arxiv.get("defensive_soft_pacing_triggers", 0))
+        + sess_soft_pacing,
+        "heavy_versions_interleaved": int(prev_arxiv.get("heavy_versions_interleaved", 0))
+        + sess_heavy_interleaved,
+        "byte_budget_breathers": int(prev_arxiv.get("byte_budget_breathers", 0))
+        + sess_budget_breathers,
+        "hit_recovery_cooldowns": int(prev_arxiv.get("hit_recovery_cooldowns", 0))
+        + sess_hit_recoveries,
+        "in_flight_extractions": int(prev_arxiv.get("in_flight_extractions", 0)) + sess_inflight,
     }
     active_sec = sum(merged_stages.values())
     cooldown_retry_sec = (
@@ -415,9 +461,18 @@ def merge_with_base(
     sess_disk_peak = float(resources.get("disk_peak_bytes", 0.0))
     sess_disk_final = float(resources.get("disk_final_bytes", sess_disk_peak))
     papers_done_val = int(s2_in.get("papers_done", s2_in.get("s2_ok", 0)))
+    papers_skipped_val = int(s2_in.get("papers_skipped", 0))
     intervals_info = {
-        "arxiv_min_interval": float(os.environ.get("CRAWLER_ARXIV_MIN_INTERVAL", "3.0") or 3.0),
-        "s2_min_interval": float(os.environ.get("CRAWLER_S2_MIN_INTERVAL", "1.0") or 1.0),
+        "arxiv_min_interval": float(
+            s2_in.get("arxiv_min_interval")
+            if "arxiv_min_interval" in s2_in
+            else (os.environ.get("CRAWLER_ARXIV_MIN_INTERVAL", "3.05") or 3.05)
+        ),
+        "s2_min_interval": float(
+            s2_in.get("s2_min_interval")
+            if "s2_min_interval" in s2_in
+            else (os.environ.get("CRAWLER_S2_MIN_INTERVAL", "1.0") or 1.0)
+        ),
     }
     session_entry = {
         "run": run_number,
@@ -431,7 +486,41 @@ def merge_with_base(
         "total_profiler_sec": session_active,
         "cooldown_retry_seconds": session_cooldown,
         "stage_seconds": {k: float(stages.get(k, 0.0)) for k in STAGES},
+        "download_breakdown": {
+            "wire_download_seconds": round(sess_wire_sec, 6),
+            "rate_limit_wait_seconds": round(sess_wait_sec, 6),
+            "wire_bytes": sess_wire_bytes,
+            "requests_ok": sess_reqs_ok,
+        },
+        "transport": {
+            "http_protocol": str(s2_in.get("http_protocol") or "HTTP/1.1"),
+            "use_http2": bool(s2_in.get("use_http2", False)),
+            "in_flight_extract": bool(s2_in.get("in_flight_extract", False)),
+            "in_flight_extractions": sess_inflight,
+            "early_header_rejects": sess_early_rejects,
+            "cdn_pop": str(s2_in.get("cdn_pop") or ""),
+        },
+        "cdn_breakdown": {
+            "edge_hits": sess_edge_hits,
+            "shield_hits": sess_shield_hits,
+            "origin_misses": sess_origin_misses,
+            "unknown": sess_cdn_unknown,
+            "hit_bytes": sess_hit_bytes,
+            "hit_seconds": round(sess_hit_sec, 6),
+            "miss_bytes": sess_miss_bytes,
+            "miss_seconds": round(sess_miss_sec, 6),
+            "http_429_queue_timeout": sess_429_queue,
+            "http_429_edge_fast": sess_429_fast,
+            "defensive_soft_pacing_triggers": sess_soft_pacing,
+        },
+        "traffic_shaping": {
+            "enabled": bool(s2_in.get("traffic_shaping", False)),
+            "heavy_versions_interleaved": sess_heavy_interleaved,
+            "byte_budget_breathers": sess_budget_breathers,
+            "hit_recovery_cooldowns": sess_hit_recoveries,
+        },
         "papers_done": papers_done_val,
+        "papers_skipped": papers_skipped_val,
         "processed_attempts": papers_done_val,
         "source_code_hash": code_hash,
         "source_revision": code_hash,

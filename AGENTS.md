@@ -3,7 +3,7 @@
 ## Start here
 
 1. Read `STATUS.md` section 0 ("Đọc nhanh") first. It already compares the assignment in
-   `project requirements/` with what the repo has now (phase, gaps, blockers, next step).
+   `docs/project requirements/` with what the repo has now (phase, gaps, blockers, next step).
    Do not re-read the requirement files on every prompt. Open them only when you need the
    original wording, a code sample from the brief, or a grading detail that section 0 does not
    capture. Read the rest of `STATUS.md` when you need a decision, a task row, or a risk.

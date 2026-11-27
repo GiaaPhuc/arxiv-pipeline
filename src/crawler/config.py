@@ -6,18 +6,21 @@ Environment variables:
     CRAWLER_CONTACT  e-mail/URL put in the User-Agent (required for real crawling)
     S2_API_KEY       Semantic Scholar key (optional locally; Colab Secrets on Colab)
     CRAWLER_DATA_DIR output directory (default: ./data)
-    CRAWLER_ARXIV_MIN_INTERVAL  seconds between arXiv requests (default 3.15, min 3.0)
-    CRAWLER_ARXIV_MIN_IDLE_GAP  post-download idle floor after requests (default 3.05)
-    CRAWLER_ARXIV_SOCKET_RECYCLE_EVERY recycle arXiv TCP session every N requests (default 120)
+    CRAWLER_ARXIV_MIN_INTERVAL  seconds between arXiv requests (default 3.05, min 3.0)
+    CRAWLER_ARXIV_MIN_IDLE_GAP  post-download idle floor after requests (default 0.25)
+    CRAWLER_ARXIV_SOCKET_RECYCLE_EVERY recycle arXiv TCP session every N requests (default 500)
     CRAWLER_BACKUP_DIR          copy ``data/`` here periodically (Colab: Drive path)
     CRAWLER_BACKUP_EVERY_IDS    trigger backup every N base arXiv ids seen (default 0 = off)
     CRAWLER_AUTO_RESUME_RATE_LIMIT  1/true to defer 429-throttled ids and auto-resume after cooldown
     CRAWLER_SKIP_S2             1/true to skip S2 during crawl (backfill with --s2-only)
     CRAWLER_ENABLE_BIB_FALLBACK 1/true to fallback to local .bib/.bbl when S2 returns 404
-    CRAWLER_S2_BATCH_SIZE       batch size for S2 POST /graph/v1/paper/batch (default 25)
+    CRAWLER_S2_BATCH_SIZE       batch size for S2 POST /graph/v1/paper/batch (default 150, max 500)
     CRAWLER_ENABLE_OAI_DATES    1/true to use OAI-PMH arXivRaw for version dates
     CRAWLER_EXTRACT_WORKERS     number of parallel extract-worker threads (default 2)
     CRAWLER_EXTRACT_MAX_QUEUE_BYTES max in-memory bytes queued for extraction (default 192 MiB)
+    CRAWLER_USE_HTTP2           1/true to enable optional single-connection HTTP/2 for arXiv
+    CRAWLER_IN_FLIGHT_EXTRACT   1/true for cut-through in-flight tar.gz/gzip extraction
+    CRAWLER_TRAFFIC_SHAPING     1/true (default) for heavy interleaving & byte-budget governor
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ class Config:
     data_dir: Path = Path("data")
     contact: str = ""
     s2_api_key: str | None = field(default=None, repr=False)  # repr=False: never log the key
-    arxiv_min_interval: float = 3.15  # v3.7/v3.9.2: 3.15s Start-to-Start sweet spot on 1 connection
+    arxiv_min_interval: float = 3.05  # v3.15: 3.05s Start-to-Start (>= 3.0s arXiv floor)
     s2_min_interval: float = 1.1  # S2 key: 1 req/s; small margin for network latency
     max_retries: int = 5
     max_extract_bytes: int = 2 * 1024**3  # zip-bomb guard (uncompressed total)
@@ -49,13 +52,13 @@ class Config:
     s2_only: bool = False  # U2: skip arXiv network calls and only backfill S2 references
     skip_s2: bool = False  # Trick 3: skip S2 calls (backfill later with --s2-only)
     enable_bib_fallback: bool = False  # Dual-engine fallback: extract .bib/.bbl when S2 404
-    s2_batch_size: int = 25  # Optimal S2 batch size (10-25 prevents 413/504 errors)
+    s2_batch_size: int = 150  # High-density S2 batch size (150 ids/req ~3.9 MB, auto-bisects)
     enable_oai_dates: bool = False  # OAI-PMH arXivRaw fallback for intermediate version dates
     arxiv_min_idle_gap: float = (
-        3.05  # v3.9.4: 3.05s End-to-Start floor (3.15s Start-to-Start for <=0.10s fast packages)
+        0.25  # v3.15: 0.25s post-transfer cushion (preserves true Start-to-Start <= 2.80s)
     )
-    arxiv_socket_recycle_every: int = 120  # v3.7: recycle TCP session every 120 requests (0=off)
-    arxiv_jitter_max: float = 0.20  # v3.9.4: random Start-to-Start jitter 0..0.20s on arXiv
+    arxiv_socket_recycle_every: int = 500  # v3.15: keep TCP/TLS warm; recycle every 500 reqs
+    arxiv_jitter_max: float = 0.10  # v3.15: random Start-to-Start jitter 0..0.10s (mean ~3.10s)
     arxiv_proactive_cooldown_every_ids: int = (
         0  # v3.10: 0 disables proactive cooldown (only sleep on real 429)
     )
@@ -67,8 +70,13 @@ class Config:
     extract_workers: int = 2  # v3.4: parallel extract-worker threads for heavy archives
     extract_max_queue_bytes: int = 192 * 1024 * 1024  # v3.4: byte budget for extract_queue RAM
     max_stream_mbps: float = (
-        4.5  # v3.14: sustained stream cap in MiB/s (default 4.5, configurable to 12.0-18.0)
+        6.0  # v3.15: smooth sustained stream cap in MiB/s (hits ~7.7h/5000id without CDN burst)
     )
+    use_http2: bool = False  # v3.16: opt-in HTTP/2 via httpx (falls back to HTTP/1.1 if absent)
+    in_flight_extract: bool = (
+        False  # v3.16: opt-in cut-through stream extraction (O(1) RAM, zero temp disk I/O)
+    )
+    traffic_shaping: bool = True  # v3.17: interleaving, declustering & sliding byte-budget governor
 
     @property
     def user_agent(self) -> str:
@@ -93,7 +101,7 @@ class Config:
             or local_vars.get("CRAWLER_ARXIV_MIN_INTERVAL")
             or ""
         )
-        arxiv_min_interval = 3.15
+        arxiv_min_interval = 3.05
         if arxiv_interval_raw:
             try:
                 arxiv_min_interval = max(float(arxiv_interval_raw), 3.0)
@@ -105,7 +113,7 @@ class Config:
             or local_vars.get("CRAWLER_ARXIV_MIN_IDLE_GAP")
             or ""
         )
-        arxiv_min_idle_gap = 3.05
+        arxiv_min_idle_gap = 0.25
         if idle_gap_raw:
             try:
                 arxiv_min_idle_gap = max(float(idle_gap_raw), 0.0)
@@ -117,7 +125,7 @@ class Config:
             or local_vars.get("CRAWLER_ARXIV_SOCKET_RECYCLE_EVERY")
             or ""
         )
-        arxiv_socket_recycle_every = 120
+        arxiv_socket_recycle_every = 500
         if recycle_raw:
             try:
                 arxiv_socket_recycle_every = max(int(recycle_raw), 0)
@@ -129,7 +137,7 @@ class Config:
             or local_vars.get("CRAWLER_ARXIV_JITTER_MAX")
             or ""
         )
-        arxiv_jitter_max = 0.20
+        arxiv_jitter_max = 0.10
         if jitter_raw:
             try:
                 arxiv_jitter_max = max(float(jitter_raw), 0.0)
@@ -197,10 +205,10 @@ class Config:
         s2_batch_raw = (
             os.environ.get("CRAWLER_S2_BATCH_SIZE") or local_vars.get("CRAWLER_S2_BATCH_SIZE") or ""
         )
-        s2_batch_size = 25
+        s2_batch_size = 150
         if s2_batch_raw:
             try:
-                s2_batch_size = max(int(s2_batch_raw), 1)
+                s2_batch_size = min(max(int(s2_batch_raw), 1), 500)
             except ValueError:
                 pass
 
@@ -264,17 +272,39 @@ class Config:
             or local_vars.get("CRAWLER_MAX_STREAM_MBPS")
             or ""
         )
-        max_stream_mbps = 4.5
+        max_stream_mbps = 6.0
         if max_stream_mbps_raw:
             try:
                 max_stream_mbps = max(float(max_stream_mbps_raw), 0.1)
             except ValueError:
                 pass
 
+        use_http2_raw = (
+            os.environ.get("CRAWLER_USE_HTTP2") or local_vars.get("CRAWLER_USE_HTTP2") or ""
+        ).strip()
+        use_http2 = use_http2_raw.lower() in {"1", "true", "yes", "on"}
+
+        in_flight_raw = (
+            os.environ.get("CRAWLER_IN_FLIGHT_EXTRACT")
+            or local_vars.get("CRAWLER_IN_FLIGHT_EXTRACT")
+            or ""
+        ).strip()
+        in_flight_extract = in_flight_raw.lower() in {"1", "true", "yes", "on"}
+
+        traffic_shaping_raw = (
+            os.environ.get("CRAWLER_TRAFFIC_SHAPING")
+            or local_vars.get("CRAWLER_TRAFFIC_SHAPING")
+            or "1"
+        ).strip()
+        traffic_shaping = traffic_shaping_raw.lower() not in {"0", "false", "no", "off"}
+
+        raw_s2_key = os.environ.get("S2_API_KEY") or local_vars.get("S2_API_KEY") or ""
+        s2_api_key = raw_s2_key.strip() or None
+
         values = {
             "data_dir": Path(data_dir_raw),
             "contact": os.environ.get("CRAWLER_CONTACT") or local_vars.get("CRAWLER_CONTACT") or "",
-            "s2_api_key": os.environ.get("S2_API_KEY") or local_vars.get("S2_API_KEY") or None,
+            "s2_api_key": s2_api_key,
             "arxiv_min_interval": arxiv_min_interval,
             "arxiv_min_idle_gap": arxiv_min_idle_gap,
             "arxiv_socket_recycle_every": arxiv_socket_recycle_every,
@@ -293,6 +323,9 @@ class Config:
             "extract_workers": extract_workers,
             "extract_max_queue_bytes": extract_max_queue_bytes,
             "max_stream_mbps": max_stream_mbps,
+            "use_http2": use_http2,
+            "in_flight_extract": in_flight_extract,
+            "traffic_shaping": traffic_shaping,
         }
         values.update(overrides)
         return cls(**values)

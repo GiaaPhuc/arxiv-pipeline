@@ -571,3 +571,486 @@ def test_host_client_recycle_session_and_thermal_sensor():
     client._session.get = MagicMock(side_effect=make_resp(200, 0.05))  # noqa: SLF001
     client.get("/api/query?id_list=5")
     assert sleeps == [3.0]
+
+
+def test_v315_start_to_start_keeps_small_idle_gap_on_429_and_tracks_wait_seconds():
+    now = [0.0]
+    sleeps: list[float] = []
+    starts: list[float] = []
+
+    def clock() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(round(seconds, 4))
+        now[0] += seconds
+
+    limiter = RateLimiter(3.05, clock=clock, sleep=fake_sleep, min_idle_gap=0.25)
+
+    # Fast transfer (1.50s <= 2.80s): waits 1.55s -> starts at 3.05s (true Start-to-Start)
+    limiter.wait()
+    starts.append(round(now[0], 4))
+    now[0] += 1.50
+    limiter.done()
+
+    # Heavy transfer (4.00s): ends at 7.05s -> waits only 0.25s cushion -> starts at 7.30s
+    limiter.wait()
+    starts.append(round(now[0], 4))
+    now[0] += 4.00
+    limiter.done()
+
+    limiter.wait()
+    starts.append(round(now[0], 4))
+    limiter.done()
+
+    assert sleeps == [1.55, 0.25]
+    assert starts == [0.0, 3.05, 7.30]
+    assert round(limiter.total_wait_seconds, 4) == 1.80
+
+    # A 429 widens Start-to-Start _min_interval without flipping _min_idle_gap to End-to-Start:
+    limiter.note_429()
+    assert limiter._min_interval == 3.55  # noqa: SLF001
+    assert limiter._min_idle_gap == 0.25  # noqa: SLF001
+    for _ in range(2):
+        limiter.note_success()
+    assert limiter._min_interval == 3.05  # noqa: SLF001
+    assert limiter._min_idle_gap == 0.25  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# HTTP/2 adapter, CDN header parser, and HostClient metadata (v3.16.0)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_cdn_headers_variants_and_magicmock_safety() -> None:
+    from crawler.http import parse_cdn_headers
+
+    assert parse_cdn_headers(
+        {"X-Cache": "HIT", "X-Served-By": "cache-sin-wsat188", "Age": "42"}
+    ) == (
+        "HIT",
+        "cache-sin-wsat188",
+        42,
+    )
+    assert parse_cdn_headers({"x-cache": "HIT, HIT", "x-served-by": "cache-iad, cache-sin"}) == (
+        "HIT",
+        "cache-sin",
+        None,
+    )
+    assert parse_cdn_headers({"X-Cache": "MISS, HIT", "Age": "not-an-int"}) == (
+        "HIT",
+        "",
+        None,
+    )
+    assert parse_cdn_headers({"X-Cache": "HIT, MISS", "X-Served-By": "cache-iad, cache-sin"}) == (
+        "SHIELD_HIT",
+        "cache-sin",
+        None,
+    )
+    assert parse_cdn_headers({"X-Cache": "MISS"}) == ("MISS", "", None)
+    assert parse_cdn_headers({"X-Cache": "MISS, MISS"}) == ("MISS", "", None)
+    assert parse_cdn_headers({}) == ("UNKNOWN", "", None)
+    # MagicMock responses from legacy unit tests must not crash or leak mocks:
+    assert parse_cdn_headers(MagicMock()) == ("UNKNOWN", "", None)
+
+
+def test_host_client_tracks_cdn_metadata_on_get(monkeypatch) -> None:
+    cfg = Config(arxiv_min_interval=0.0, arxiv_min_idle_gap=0.0)
+    client = HostClient("https://export.arxiv.org", RateLimiter(0.0), cfg)
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.headers = {
+        "X-Cache": "HIT",
+        "X-Served-By": "cache-sin1880025-SIN",
+        "Age": "17",
+    }
+    resp.http_version = "HTTP/1.1"
+    monkeypatch.setattr(client._session, "get", MagicMock(return_value=resp))  # noqa: SLF001
+
+    got = client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
+    try:
+        assert got.status_code == 200
+        assert client.last_cache_status == "HIT"
+        assert client.last_served_by == "cache-sin1880025-SIN"
+        assert client.last_cache_age == 17
+        assert client.last_http_version == "HTTP/1.1"
+    finally:
+        got.close()
+
+
+def test_host_client_http2_fallback_logs_warning_once_across_recycle(monkeypatch, caplog) -> None:
+    from crawler import http as crawler_http
+
+    monkeypatch.setattr(crawler_http, "_import_httpx_http2", lambda: None)
+    cfg = Config(use_http2=True, arxiv_min_interval=0.0, arxiv_min_idle_gap=0.0)
+    with caplog.at_level(logging.WARNING, logger="crawler.http"):
+        client = HostClient("https://export.arxiv.org", RateLimiter(0.0), cfg)
+        assert client.using_http2 is False
+        client.recycle_session()
+        assert client.using_http2 is False
+
+    warnings = [r for r in caplog.records if "HTTP/2" in r.message or "httpx" in r.message]
+    assert len(warnings) == 1
+
+
+def test_host_client_http2_single_connection_rst_stream_and_error_mapping(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import pytest
+
+    from crawler import http as crawler_http
+
+    created_clients: list[dict[str, object]] = []
+    client_closed_count = 0
+    stream_exit_count = 0
+
+    class FakeHTTPStatusError(Exception):
+        pass
+
+    class FakeTransportError(Exception):
+        pass
+
+    class FakeTimeoutException(FakeTransportError):
+        pass
+
+    class FakeRemoteProtocolError(FakeTransportError):
+        pass
+
+    class FakeReadError(FakeTransportError):
+        pass
+
+    class FakeStreamError(FakeTransportError):
+        pass
+
+    class FakeRequestError(Exception):
+        pass
+
+    class FakeLimits:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class FakeTimeout:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class FakeStreamResponse:
+        def __init__(
+            self,
+            *,
+            status_code: int = 200,
+            raise_status: bool = False,
+            iter_exc: Exception | None = None,
+        ) -> None:
+            self.status_code = status_code
+            self._raise_status = raise_status
+            self._iter_exc = iter_exc
+            self.headers = {"X-Cache": "HIT", "X-Served-By": "cache-sin", "Age": "5"}
+            self.http_version = "HTTP/2"
+            self.reason_phrase = "OK"
+            self.url = "https://export.arxiv.org/src/2408.06481v1"
+
+        def raise_for_status(self) -> None:
+            if self._raise_status:
+                raise FakeHTTPStatusError("status error")
+
+        def iter_raw(self, chunk_size: int = 8192):
+            yield b"abc"
+            if self._iter_exc is not None:
+                raise self._iter_exc
+            yield b"def"
+
+        def read(self) -> bytes:
+            return b"abcdef"
+
+    class FakeStreamCM:
+        def __init__(self, resp: FakeStreamResponse) -> None:
+            self._resp = resp
+
+        def __enter__(self) -> FakeStreamResponse:
+            return self._resp
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            nonlocal stream_exit_count
+            stream_exit_count += 1
+
+    stream_behavior: list[object] = [FakeStreamCM(FakeStreamResponse())]
+
+    class FakeHttpxClient:
+        def __init__(self, **kwargs: object) -> None:
+            created_clients.append(kwargs)
+
+        def stream(self, method: str, url: str, headers=None, timeout=None):
+            action = stream_behavior.pop(0)
+            if isinstance(action, Exception):
+                raise action
+            return action
+
+        def get(self, url: str, headers=None, timeout=None):
+            return FakeStreamResponse()
+
+        def close(self) -> None:
+            nonlocal client_closed_count
+            client_closed_count += 1
+
+    fake_httpx = SimpleNamespace(
+        Limits=FakeLimits,
+        Timeout=FakeTimeout,
+        Client=FakeHttpxClient,
+        HTTPStatusError=FakeHTTPStatusError,
+        TransportError=FakeTransportError,
+        TimeoutException=FakeTimeoutException,
+        RemoteProtocolError=FakeRemoteProtocolError,
+        ReadError=FakeReadError,
+        StreamError=FakeStreamError,
+        RequestError=FakeRequestError,
+    )
+    monkeypatch.setattr(crawler_http, "_import_httpx_http2", lambda: fake_httpx)
+
+    cfg = Config(
+        use_http2=True,
+        arxiv_min_interval=0.0,
+        arxiv_min_idle_gap=0.0,
+        max_retries=0,
+    )
+    client = HostClient("https://export.arxiv.org", RateLimiter(0.0), cfg)
+    assert client.using_http2 is True
+    assert len(created_clients) == 1
+    assert created_clients[0]["http2"] is True
+    limits = created_clients[0]["limits"]
+    assert isinstance(limits, FakeLimits)
+    assert limits.kwargs["max_connections"] == 1
+    assert limits.kwargs["max_keepalive_connections"] == 1
+
+    # Streaming GET over HTTP/2 consumed to EOF keeps TCP/TLS client warm (0 recycles)
+    resp = client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
+    assert client.last_http_version == "HTTP/2"
+    assert client.last_cache_status == "HIT"
+    chunks = list(resp.iter_content(chunk_size=1024))
+    assert chunks == [b"abc", b"def"]
+    resp.close()
+    assert stream_exit_count == 1
+    assert client.session_recycles == 0
+    assert client_closed_count == 0
+
+    # Early-aborted HTTP/2 stream (0 chunks read) auto-recycles session to avoid httpcore stall
+    stream_behavior.append(FakeStreamCM(FakeStreamResponse()))
+    resp_abort = client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
+    resp_abort.close()
+    assert stream_exit_count == 2
+    assert client.session_recycles == 1
+    assert client_closed_count == 1
+
+    # Manual recycle_session() before closing an early-aborted stream must NOT double-recycle
+    stream_behavior.append(FakeStreamCM(FakeStreamResponse()))
+    resp_manual = client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
+    next(resp_manual.iter_content(chunk_size=1024))
+    client.recycle_session()
+    assert client.session_recycles == 2
+    assert client_closed_count == 2
+    resp_manual.close()
+    assert client.session_recycles == 2
+    assert client_closed_count == 2
+
+    # Exception mapping parity with requests:
+    # 1) HTTPStatusError via raise_for_status -> requests.HTTPError
+    stream_behavior.append(FakeStreamCM(FakeStreamResponse(status_code=404, raise_status=True)))
+    resp_err = client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
+    with pytest.raises(requests.HTTPError):
+        resp_err.raise_for_status()
+    resp_err.close()
+    assert client.session_recycles == 3
+    assert client_closed_count == 3
+
+    # 2) RemoteProtocolError mid-stream -> ChunkedEncodingError (+ auto-recycle)
+    stream_behavior.append(
+        FakeStreamCM(FakeStreamResponse(iter_exc=FakeRemoteProtocolError("rst stream")))
+    )
+    resp_drop = client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
+    with pytest.raises(requests.exceptions.ChunkedEncodingError):
+        list(resp_drop.iter_content(chunk_size=1024))
+    resp_drop.close()
+    assert client.session_recycles == 4
+    assert client_closed_count == 4
+
+    # 3) TimeoutException on connect/stream -> requests.Timeout
+    stream_behavior.append(FakeTimeoutException("timed out"))
+    with pytest.raises(requests.Timeout):
+        client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
+
+    # 4) TransportError on connect/stream -> requests.ConnectionError
+    stream_behavior.append(FakeTransportError("conn reset"))
+    with pytest.raises(requests.ConnectionError):
+        client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
+
+    client._session.close()  # noqa: SLF001
+    assert client_closed_count == 5
+
+
+def test_host_client_http2_recycles_on_5xx_and_timeout_retry(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from crawler import http as crawler_http
+
+    client_closed_count = 0
+
+    class FakeHTTPStatusError(Exception):
+        pass
+
+    class FakeTransportError(Exception):
+        pass
+
+    class FakeTimeoutException(FakeTransportError):
+        pass
+
+    class FakeRemoteProtocolError(FakeTransportError):
+        pass
+
+    class FakeReadError(FakeTransportError):
+        pass
+
+    class FakeStreamError(FakeTransportError):
+        pass
+
+    class FakeLimits:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class FakeTimeout:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class FakeResp:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+            self.headers = {"X-Cache": "MISS", "X-Served-By": "cache-sin"}
+            self.http_version = "HTTP/2"
+
+        def iter_raw(self, chunk_size: int = 8192):
+            yield b"ok"
+
+    class FakeStreamCM:
+        def __init__(self, resp: FakeResp) -> None:
+            self._resp = resp
+
+        def __enter__(self) -> FakeResp:
+            return self._resp
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            pass
+
+    stream_actions: list[object] = [
+        FakeStreamCM(FakeResp(503)),
+        FakeStreamCM(FakeResp(200)),
+        FakeTimeoutException("timed out"),
+        FakeStreamCM(FakeResp(200)),
+    ]
+
+    class FakeHttpxClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def stream(self, _method: str, _url: str, **_kwargs: object):
+            action = stream_actions.pop(0)
+            if isinstance(action, Exception):
+                raise action
+            return action
+
+        def close(self) -> None:
+            nonlocal client_closed_count
+            client_closed_count += 1
+
+    fake_httpx = SimpleNamespace(
+        Limits=FakeLimits,
+        Timeout=FakeTimeout,
+        Client=FakeHttpxClient,
+        HTTPStatusError=FakeHTTPStatusError,
+        TransportError=FakeTransportError,
+        TimeoutException=FakeTimeoutException,
+        RemoteProtocolError=FakeRemoteProtocolError,
+        ReadError=FakeReadError,
+        StreamError=FakeStreamError,
+    )
+    monkeypatch.setattr(crawler_http, "_import_httpx_http2", lambda: fake_httpx)
+
+    sleeps: list[float] = []
+    cfg = Config(
+        use_http2=True,
+        arxiv_min_interval=0.0,
+        arxiv_min_idle_gap=0.0,
+        max_retries=1,
+    )
+    client = HostClient(
+        "https://export.arxiv.org",
+        RateLimiter(0.0, sleep=sleeps.append),
+        cfg,
+    )
+
+    resp_after_5xx = client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
+    assert resp_after_5xx.status_code == 200
+    assert list(resp_after_5xx.iter_content(chunk_size=1024)) == [b"ok"]
+    resp_after_5xx.close()
+    assert client.session_recycles == 1
+    assert client_closed_count == 1
+
+    resp_after_timeout = client.get("https://export.arxiv.org/src/2408.06481v1", stream=True)
+    assert resp_after_timeout.status_code == 200
+    assert list(resp_after_timeout.iter_content(chunk_size=1024)) == [b"ok"]
+    resp_after_timeout.close()
+    assert client.session_recycles == 2
+    assert client_closed_count == 2
+    client._session.close()  # noqa: SLF001
+    assert client_closed_count == 3
+
+
+def test_adaptive_s2_limiter_aimd_step_and_fast_recovery() -> None:
+    from crawler.http import AdaptiveRateLimiter
+
+    now = [0.0]
+    sleeps: list[float] = []
+    limiter = AdaptiveRateLimiter(
+        1.1,
+        max_interval=3.0,
+        success_streak_to_recover=5,
+        clock=lambda: now[0],
+        sleep=lambda s: sleeps.append(round(s, 4)) or now.__setitem__(0, now[0] + s),
+    )
+    limiter.note_429()
+    assert limiter._min_interval == 1.5  # noqa: SLF001
+    limiter.note_429()
+    assert limiter._min_interval == 1.9  # noqa: SLF001
+    for _ in range(5):
+        limiter.note_429()
+    assert limiter._min_interval == 3.0  # capped cleanly at max_interval  # noqa: SLF001
+
+    for _ in range(5):
+        limiter.note_success()
+    assert limiter._min_interval == 2.75  # noqa: SLF001
+    for _ in range(35):
+        limiter.note_success()
+    assert limiter._min_interval == 1.1  # recovers back to base_interval  # noqa: SLF001
+
+    zero_limiter = AdaptiveRateLimiter(0.0, clock=lambda: 0.0, sleep=lambda _s: None)
+    zero_limiter.note_429()
+    assert zero_limiter._min_interval == 0.0  # test-mode 0s limiter stays at 0  # noqa: SLF001
+
+
+def test_s2_api_key_stripped_and_batch_size_defaults_to_150_capped_500(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("S2_API_KEY", "  my-key-123 \n")
+    monkeypatch.setenv("CRAWLER_S2_BATCH_SIZE", "999")
+    cfg = Config.from_env()
+    assert cfg.s2_api_key == "my-key-123"
+    assert cfg.s2_batch_size == 500
+
+    monkeypatch.delenv("CRAWLER_S2_BATCH_SIZE")
+    assert Config.from_env().s2_batch_size == 150
+
+    client = make_s2_client(Config(s2_api_key="  padded-key \t"))
+    assert client._session.headers["x-api-key"] == "padded-key"  # noqa: SLF001
+    assert client.limiter._max_interval == 3.0  # noqa: SLF001
+
+    anon = make_s2_client(Config(s2_api_key="   \n"))
+    assert "x-api-key" not in anon._session.headers  # noqa: SLF001
+    assert anon.limiter._max_interval == 8.0  # noqa: SLF001

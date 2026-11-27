@@ -1079,8 +1079,9 @@ def test_download_source_paced_streaming_caps_bandwidth_above_512kib(tmp_path: P
     # The tail 2.5 MiB (above 512 KiB) was paced via sleep_fn:
     assert len(sleeps) > 0
     total_paced = sum(sleeps)
-    # 2.5 MiB / 4.5 MiB/s = ~0.556s:
-    assert 0.50 <= total_paced <= 0.65
+    # 2.5 MiB / 6.0 MiB/s = ~0.417s (v3.15 default):
+    assert 0.36 <= total_paced <= 0.48
+    assert res.download_seconds == pytest.approx(total_paced, abs=0.05)
 
 
 def test_download_source_dynamic_stream_bps_via_config(tmp_path: Path) -> None:
@@ -1138,3 +1139,241 @@ def test_download_source_dynamic_stream_bps_via_config(tmp_path: Path) -> None:
     total_paced = sum(sleeps)
     # 2.5 MiB / 10.0 MiB/s = 0.25s:
     assert 0.20 <= total_paced <= 0.30
+
+
+# ---------------------------------------------------------------------------
+# Zero-body Content-Type early-reject & cut-through streaming (v3.16.0)
+# ---------------------------------------------------------------------------
+
+
+def test_download_source_early_rejects_pdf_header_without_reading_body(tmp_path) -> None:
+    chunks_read = 0
+    closed = False
+    stream_breaks = 0
+
+    class PdfStreamResponse:
+        status_code = 200
+        http_version = "HTTP/2"
+        headers = {
+            "Content-Type": "application/pdf",
+            "Content-Length": "4194304",
+            "X-Cache": "HIT",
+            "X-Served-By": "cache-sin1880025-SIN",
+        }
+
+        def iter_content(self, chunk_size: int = 65536):
+            nonlocal chunks_read
+            chunks_read += 1
+            yield b"%PDF-1.5 fake body that must never be read"
+
+        def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    cfg = Config(arxiv_min_interval=0.0, arxiv_min_idle_gap=0.0)
+
+    class DummyClient:
+        using_http2 = True
+        last_http_version = "HTTP/2"
+        last_cache_status = "HIT"
+        last_served_by = "cache-sin1880025-SIN"
+        last_cache_age = 10
+        config = cfg
+        _config = cfg
+
+        def get(self, url: str, headers=None, stream: bool = True):
+            return PdfStreamResponse()
+
+        def note_stream_break(self) -> None:
+            nonlocal stream_breaks
+            stream_breaks += 1
+
+    tmp_dir = tmp_path / ".tmp"
+    client = DummyClient()
+    res = download_source(
+        client,  # type: ignore[arg-type]
+        "2408.06481",
+        1,
+        tmp_dir,
+        spool_max_bytes=16 * 1024 * 1024,
+    )
+    assert res.http_status == 200
+    assert res.early_rejected_by_header is True
+    assert res.wire_bytes == 0
+    assert res.raw_archive_bytes == 4194304
+    assert res.cache_status == "HIT"
+    assert res.served_by == "cache-sin1880025-SIN"
+    assert res.http_version == "HTTP/2"
+    assert chunks_read == 0
+    assert closed is True
+    # HTTP/2 skips TCP connection teardown via note_stream_break (uses RST_STREAM instead)
+    assert stream_breaks == 0
+
+    assert res.data is not None
+    ex = extract_tex_bib(
+        res.data,
+        tmp_path / "out",
+        cfg,
+        arxiv_id="2408.06481",
+        version=1,
+        raw_archive_bytes=res.raw_archive_bytes,
+    )
+    assert ex.status is Status.NO_SOURCE
+    assert ex.raw_archive_bytes == 4194304
+
+
+def test_download_and_extract_source_early_rejects_pdf_header(tmp_path) -> None:
+    chunks_read = 0
+    closed = False
+
+    class PdfStreamResponse:
+        status_code = 200
+        http_version = "HTTP/2"
+        headers = {
+            "Content-Type": "application/pdf; charset=binary",
+            "Content-Length": "2048000",
+            "X-Cache": "HIT, MISS",
+            "X-Served-By": "cache-iad, cache-sin",
+        }
+
+        def iter_content(self, chunk_size: int = 65536):
+            nonlocal chunks_read
+            chunks_read += 1
+            yield b"%PDF-1.7 should not read"
+
+        def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    cfg = Config(arxiv_min_interval=0.0, arxiv_min_idle_gap=0.0)
+
+    class DummyClient:
+        using_http2 = True
+        last_http_version = "HTTP/2"
+        last_cache_status = "SHIELD_HIT"
+        last_served_by = "cache-sin"
+        last_cache_age = None
+        config = cfg
+        _config = cfg
+
+        def get(self, url: str, headers=None, stream: bool = True):
+            return PdfStreamResponse()
+
+        def note_stream_break(self) -> None:
+            pass
+
+    dest_dir = tmp_path / "extracted"
+    res = download_and_extract_source(
+        DummyClient(),  # type: ignore[arg-type]
+        "2408.06481",
+        1,
+        dest_dir,
+        cfg,
+    )
+    assert res.meta is not None
+    assert res.meta.status is Status.NO_SOURCE
+    assert res.meta.raw_archive_bytes == 2048000
+    assert res.http_status == 200
+    assert res.early_rejected_by_header is True
+    assert res.wire_bytes == 0
+    assert res.cache_status == "SHIELD_HIT"
+    assert res.served_by == "cache-sin"
+    assert res.http_version == "HTTP/2"
+    assert chunks_read == 0
+    assert closed is True
+    assert not dest_dir.exists()
+
+
+def test_download_and_extract_source_pacing_and_cdn_headers(tmp_path, monkeypatch) -> None:
+    import base64
+    import io
+    import os
+    import tarfile
+    from types import SimpleNamespace
+
+    from crawler import source as crawler_source
+
+    raw_ascii = b"\\section{Data}\n% " + base64.b64encode(os.urandom(1024 * 1024)) + b"\n"
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        info = tarfile.TarInfo(name="main.tex")
+        info.size = len(raw_ascii)
+        tf.addfile(info, io.BytesIO(raw_ascii))
+    archive_bytes = buf.getvalue()
+    assert len(archive_bytes) > 768 * 1024
+
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def fake_monotonic() -> float:
+        return now[0]
+
+    def fake_sleep(seconds: float) -> None:
+        if seconds > 0:
+            sleeps.append(seconds)
+            now[0] += seconds
+
+    monkeypatch.setattr(
+        crawler_source,
+        "time",
+        SimpleNamespace(monotonic=fake_monotonic, perf_counter=fake_monotonic, sleep=fake_sleep),
+    )
+
+    class PacedResponse:
+        status_code = 200
+        http_version = "HTTP/2"
+        headers = {
+            "Content-Type": "application/x-eprint-tar",
+            "Content-Length": str(len(archive_bytes)),
+            "X-Cache": "HIT, MISS",
+            "X-Served-By": "cache-iad, cache-sin",
+        }
+
+        def iter_content(self, chunk_size: int = 65536):
+            for idx in range(0, len(archive_bytes), 65536):
+                yield archive_bytes[idx : idx + 65536]
+
+        def close(self) -> None:
+            pass
+
+    cfg = Config(
+        max_stream_mbps=2.0,
+        arxiv_min_interval=3.05,
+        arxiv_min_idle_gap=0.25,
+    )
+
+    class DummyClient:
+        using_http2 = True
+        last_http_version = "HTTP/2"
+        last_cache_status = "SHIELD_HIT"
+        last_served_by = "cache-sin"
+        last_cache_age = 3
+        config = cfg
+        _config = cfg
+        limiter = SimpleNamespace(
+            _base_floor=3.05,
+            _clock=fake_monotonic,
+            _sleep=fake_sleep,
+        )
+
+        def get(self, url: str, headers=None, stream: bool = True):
+            return PacedResponse()
+
+    dest_dir = tmp_path / "extracted"
+    res = download_and_extract_source(
+        DummyClient(),  # type: ignore[arg-type]
+        "2408.06481",
+        1,
+        dest_dir,
+        cfg,
+    )
+    assert res.meta is not None
+    assert res.meta.status is Status.OK
+    assert res.http_status == 200
+    assert res.wire_bytes == len(archive_bytes)
+    assert res.cache_status == "SHIELD_HIT"
+    assert res.served_by == "cache-sin"
+    assert res.http_version == "HTTP/2"
+    assert (dest_dir / "main.tex").exists()
+    assert len(sleeps) > 0
+    assert sum(sleeps) > 0.1

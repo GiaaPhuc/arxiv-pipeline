@@ -1,13 +1,13 @@
 # arxiv-pipeline — Kiến trúc Kỹ thuật & Luồng Xử lý Toàn diện (Milestone 1, 2 & 3)
 
-> **Mục đích tài liệu:** Trình bày toàn diện kiến trúc, nguyên lý vận hành, luồng xử lý end-to-end, hợp đồng dữ liệu và cơ chế kiểm toán của hệ thống **`arxiv-pipeline`**, phản ánh **chính xác 100% theo mã nguồn đang chạy trên `main`** (M1 `v3.14.0`, M2 Parser sạch 10.000 bài thật, M3 Matching + HF hợp nhất đủ 5 vai A–E).
+> **Mục đích tài liệu:** Trình bày toàn diện kiến trúc, nguyên lý vận hành, luồng xử lý end-to-end, hợp đồng dữ liệu và cơ chế kiểm toán của hệ thống **`arxiv-pipeline`**, phản ánh **chính xác 100% theo mã nguồn đang chạy trên nhánh hiện tại** (M1 `v3.18`, M2 Parser sạch 10.000 bài thật, M3 Matching + HF hợp nhất đủ 5 vai A–E).
 > Tài liệu gồm ba cấu phần liên hoàn: **Phần I (Milestone 1 — Thu thập Dữ liệu)**, **Phần II (Milestone 2 — Phân tích Cú pháp & Chuẩn hóa)** và **Phần III (Milestone 3 — Khớp Tài liệu Tham khảo & Đóng gói Hugging Face)**.
 
 ---
 
 ## Mục lục điều hướng
 
-- [Phần I: Milestone 1 — Thu thập Dữ liệu arXiv & Trích dẫn (Crawler v3.13)](#phần-i-milestone-1--thu-thập-dữ-liệu-arxiv--trích-dẫn-crawler-v313)
+- [Phần I: Milestone 1 — Thu thập Dữ liệu arXiv & Trích dẫn (Crawler v3.18)](#phần-i-milestone-1--thu-thập-dữ-liệu-arxiv--trích-dẫn-crawler-v318)
   - [1.1. Tổng quan & Phạm vi](#11-tổng-quan--phạm-vi)
   - [1.2. Chính sách Lịch sự Mạng & Kiểm soát Lưu lượng](#12-chính-sách-lịch-sự-mạng--kiểm-soát-lưu-lượng)
   - [1.3. Kiến trúc Đa luồng Producer–Consumer (5 nhóm luồng)](#13-kiến-trúc-đa-luồng-producerconsumer-5-nhóm-luồng)
@@ -29,12 +29,12 @@
   - [3.0.4. Đặc trưng AST M2, Đánh giá `MRR@5` & Biểu đồ Poster (`hierarchy_features.py`, `evaluation.py`, `plots.py`)](#304-đặc-trưng-ast-m2-đánh-giá-mrr5--biểu-đồ-poster-hierarchy_featurespy-evaluationpy-plotspy)
 - [Phần Chung: Đồng bộ hóa, Ma trận Trách nhiệm & Báo cáo](#phần-chung-đồng-bộ-hóa-ma-trận-trách-nhiệm--báo-cáo)
   - [3.1. Ma trận Phân công Vai trò (A–E)](#31-ma-trận-phân-công-vai-trò-ae)
-  - [3.2. Bộ Kiểm thử Chất lượng Toàn diện (765/765 Passed)](#32-bộ-kiểm-thử-chất-lượng-toàn-diện-765765-passed)
+  - [3.2. Bộ Kiểm thử Chất lượng Toàn diện (816/816 Passed)](#32-bộ-kiểm-thử-chất-lượng-toàn-diện-816816-passed)
   - [3.3. Điểm nhấn Kỹ thuật cho Báo cáo Jupyter Book](#33-điểm-nhấn-kỹ-thuật-cho-báo-cáo-jupyter-book)
 
 ---
 
-# Phần I: Milestone 1 — Thu thập Dữ liệu arXiv & Trích dẫn (Crawler v3.13)
+# Phần I: Milestone 1 — Thu thập Dữ liệu arXiv & Trích dẫn (Crawler v3.18)
 
 ### 1.1. Tổng quan & Phạm vi
 
@@ -43,7 +43,10 @@
 | **Mục tiêu dự án** | Thu thập toàn bộ các phiên bản (`v1..vN`) của các bài báo trong dải ID được giao; chỉ trích xuất và lưu giữ mã nguồn `.tex`, `.bib` và `.bbl`; thu thập metadata arXiv và trích dẫn Semantic Scholar (S2); xuất dữ liệu chuẩn hóa phục vụ M2 và M3. |
 | **Quy mô dữ liệu** | `src/id_ranges.csv`: **5 dải × 5.000 = 25.000 ID** gốc (tháng 06–08/2024), tính cả hai đầu (`inclusive`). |
 | **Mô hình vận hành** | Vận hành tập trung trên **một máy** qua `src/run_crawl.py` (theo khuyến nghị giảng viên); resume an toàn qua SQLite manifest; khóa tệp hệ điều hành (`_acquire_workspace_lock`) ngăn chặn chạy trùng lặp. |
-| **Đột phá v3.14** | **Xử lý Dứt điểm Tại chỗ & Hồi phục Băng thông Tỷ lệ thuận (In-Place Resolution & Proportional Breather):**<br>• *In-Place Resolution:* Loại bỏ hoàn toàn việc dồn bài nặng về cuối (nguyên nhân gây bão 429 dồn toa); bài nặng được kéo và giải nén dứt điểm ngay tại vị trí của nó.<br>• *Proportional Bandwidth Breather:* Sau mỗi gói $\ge 2\text{ MiB}$, tự động cấp khoảng nghỉ hồi phục Token Bucket $S / 4.0\text{ MiB/s}$ (sàn $\ge 3.05\text{s}$, trần 12.0s, tự động xoay session TCP khi gói $\ge 30\text{ MiB}$), đảm bảo nạp đầy 100% Token Bucket Fastly trước request tiếp theo.<br>• *Wire-Speed Streaming:* Hỗ trợ tham số CLI `--max-stream-mbps` và env `CRAWLER_MAX_STREAM_MBPS` cho phép kéo 12.0–18.0 MiB/s trên Colab/Cloud, rút ngắn 65–75% thời gian download bài nặng mà không bao giờ bị phạt. |
+| **Đột phá v3.15** | **True Start-to-Start Pacing, Deficit Breather & Smooth 6.0 MiB/s Streaming (~7,5–8,0 h / 5.000 ID):**<br>• *Start-to-Start chuẩn:* Khôi phục nhịp `arxiv_min_interval = 3.05 s + jitter 0..0.10 s` với đệm hậu tải `arxiv_min_idle_gap = 0.25 s` (thay cho End-to-Start `3.05–3.25 s` gây tốn oan ~2,13 h / 5.000 ID) và giữ nguyên `0.25 s` khi `note_429()` nới `min_interval`.<br>• *Proportional Deficit Breather:* Gỡ bỏ van ngủ cứng `50 MiB -> 12 s` và sửa `_compute_proportional_breather` trừ đi thời gian thực tải (`header + download_seconds`), mục tiêu bền vững `6.0 MiB/s` (trần `6.0 s`): gói ≤ 18 MiB hoặc mạng chậm sẵn ngủ thêm `0 s` (tiết kiệm ~2,37 h / 5.000 ID).<br>• *Smooth Streaming & Warm Keep-Alive:* Mặc định `--max-stream-mbps 6.0`, chỉ xoay vòng TCP sau mỗi `500` request, gói $\ge 50\text{ MiB}$, lỗi stream/429 hoặc `TTFB >= 5.0 s`.<br>• *Fix `--skip-s2` Resume & Telemetry:* `_arxiv_id_needs_no_work()` bỏ kiểm tra S2 khi `--skip-s2` bật (tránh backup thừa lúc resume), sửa `papers_done` chỉ đếm bài mới, tách bạch `wire_download_seconds` vs `rate_limit_wait_seconds` trong `metrics.json` và cảnh báo tốc độ trượt mỗi 100 request khi wire `< 3.5 MiB/s`. |
+| **Đột phá v3.16** | **HTTP/2 kết nối đơn an toàn flow-control, Zero-Body Early-Reject, Fastly CDN-Aware Self-Healing & Cut-Through `O(1)` RAM (mặc định opt-in giữ 100% tương thích HTTP/1.1):**<br>• *Transport HTTP/2 & Header Early-Reject:* Hỗ trợ tùy chọn `--http2` (`CRAWLER_USE_HTTP2=1`, `httpx[http2]`) khóa nghiêm ngặt `Limits(max_connections=1, max_keepalive_connections=1)` và tự fallback về HTTP/1.1 nếu thiếu thư viện; ngắt sớm gói PDF/ZIP ngay từ `Content-Type` + `Content-Length` trước khi đọc chunk thân bài (`wire_bytes=0`, Status `NO_SOURCE`); tự `recycle_session()` nếu stream HTTP/2 đóng dở (tránh kẹt flow-control window `httpcore`), còn lượt đọc đủ `EOF` vẫn giữ ấm kết nối 500 request.<br>• *CDN-Aware Observability, Preflight POP & Self-Healing:* Phân tích header Fastly `X-Cache`/`X-Served-By`/`Age` (`HIT`/`SHIELD_HIT`/`MISS`) và xuất `transport`/`cdn_breakdown` vào `metrics.json`; phân loại 429 (`>= 9,0 s` queue timeout vs edge fast); chỉ kích *Defensive Soft-Pacing* (`enter_ramp_up` `3,80–4,50 s`) khi chính Fastly edge `HIT` suy giảm (`< 3,0 MiB/s` trên `>= 20 MiB`); kèm `crawler/preflight.py` dùng `Range: bytes=0-{byte_cap-1}` + timeout `(10s, 20s)` (bắt `RequestException` an toàn) chấm POP/VM (`Grade A/B/C`) và A/B Benchmark trên ID tách rời `[0::2]` vs `[1::2]`.<br>• *Cut-Through Streaming `O(1)` RAM:* Kích hoạt qua `--in-flight-extract` (`CRAWLER_IN_FLIGHT_EXTRACT=1`), nối `download_and_extract_source()` giải nén `gzip`+`tar` trực tiếp trên luồng socket không qua `.tmp/`, vẫn áp dụng `max_stream_mbps`, và tự lùi về `download_source()` (`HTTP 206 Range`) ở lượt deferred khi đứt luồng (kèm đồng bộ `stage_seconds["download"]` gồm cả `RateLimiter.wait()`). |
+| **Đột phá v3.17** | **Traffic-Shaping Interleaver, Leaky Byte-Budget Governor & HIT Auto-Recovery Cooldown (`v3.17.0` + vá `v3.17.1`, bật mặc định qua `traffic_shaping=True` / `CRAWLER_TRAFFIC_SHAPING=1`, tắt qua `--no-traffic-shaping`):**<br>• *Bẻ gãy chuỗi bài nặng, giữ dây tải `4–6 MiB/s`:* (1) **Heavy-Version Interleaving**: ngay khi phiên bản bất kỳ đạt $\ge 25\text{ MiB}$, đẩy các phiên bản còn lại (`v2..vN`) vào `heavy_interleave_queue` (trần `32`, tối đa rút dưới áp lực cách tối thiểu `3` version nhẹ và dưới trần đỏ `360 MiB`, reset gap khi 429/defer, rải round-robin theo bài khi xả cuối pass) để xen tối thiểu `15` version nhẹ trước khi rút từng phiên bản nặng; (2) **Block-Stride De-clustering**: hoán vị cụm bài nặng cùng ngày trong từng chunk $\ge 16$ bài theo bước nhảy tỷ lệ vàng nguyên tố cùng nhau (`0.618...`); (3) **Leaky Sliding-Window Byte-Budget Governor (`180 s`)**: giữ nguyên dây tải tức thời `max_stream_mbps = 6.0 MiB/s` nhưng theo dõi cửa sổ trượt `180 s` (trần vàng `220 MiB` tạm giữ `heavy_interleave_queue`; trần đỏ `360 MiB` chỉ xét request $\ge 1\text{ MiB}$, xoay session tối đa 1 lần/request, ngủ `10–60 s` **sau** `_enqueue_extract_job()` và khấu trừ `breather * 2.0 MiB/s` khỏi các mẫu cũ nhất).<br>• *Phục hồi bóp mềm & Log gọn:* Tách log (`HIT=... | SHIELD=...`) và ngưỡng `HIT` thuần khỏi `SHIELD_HIT`, giữ soft-pacing `3,80–4,50 s` trong `50` request khi `HIT < 3,0 MiB/s`, tự ngủ `300 s` (tối đa `3` lần/phiên, không đếm đúp `arxiv_thermal_cooldowns`) chỉ khi `HIT < 2,0 MiB/s` qua `2` cửa sổ 100-req liên tiếp, xuất `traffic_shaping` (gồm `enabled`) trong `metrics.json`, và giữ logger `httpx`/`httpcore` ở mức `WARNING`. |
+| **Đột phá v3.18** | **S2 High-Density Batching (`150`), Save-First Isolation, Diệt False-Positive `/references` & Fast S2 Backoff/AIMD (`s2.py`, `http.py`, `pipeline.py`, `config.py`, `colab_crawl.ipynb`):**<br>• *High-Density Batching & Auto-Bisection:* Nâng `s2_batch_size` mặc định từ `25` lên **`150`** (kẹp `[1, 500]`, ~`3,9 MB`/response trên trần `10 MB` -> giảm `6×` số HTTP request); mở rộng Batch Bisection cho cả `HTTP 400` size-limit và tự cắt đuôi re-batch khi tổng batch đạt `>= 9.500` refs.<br>• *Loại bỏ False-Positive `/references` & Save-First Isolation:* Chỉ gọi `GET /references` khi `references` không phải list, `len == 0`, `len >= 500`, hoặc thiếu `< 50%` khi `referenceCount >= 10` (diệt lỗi `referenceCount > len(refs)` giả do mục `citedPaper` `null`); lưu đĩa ngay từng bài `200 OK` (`on_result` + `defer_truncated`) và cô lập phần bị cắt hoặc nửa bisection lỗi để không bao giờ ném bỏ lô đã tải.<br>• *Fast S2 Backoff, AIMD & `--s2-only` Resilient Loop:* Tách `_s2_retry_after` (`2→4→8→15 s + jitter 0,2..1,0 s`, tôn trọng `Retry-After` `1..120 s`), chuyển `AdaptiveRateLimiter` sang AIMD (`+0,4 s` tối đa `3,0 s` có key / `8,0 s` ẩn danh, hồi `-0,25 s` sau `5` lần `200`), `.strip()` `S2_API_KEY`, log snippet `429` có che key, cùng `2` vòng deferred retry + log tiến độ + auto-checkpoint định kỳ trong `--s2-only`. |
 | **Bảo toàn dữ liệu** | Bảo toàn 100% hợp đồng dữ liệu `src/crawler/models.py` (`SCHEMA_VERSION = 1`); tương thích ngược hoàn toàn với dữ liệu, manifest và checkpoint đã thu thập trước đó. |
 
 ---
@@ -54,19 +57,20 @@ Hệ thống quản lý 2 kênh kết nối mạng độc lập, tuân thủ tuy
 
 #### A. Kênh arXiv (`export.arxiv.org`)
 - **Điểm truy cập duy nhất:** Chỉ sử dụng `export.arxiv.org`, tuyệt đối không gọi máy chủ giao diện web `arxiv.org`.
-- **Kết nối đơn (Connection Pooling):** Giữ đúng 1 kết nối duy nhất qua `_SingleConnAdapter(pool_connections=1, pool_maxsize=1)` với cờ `TCP_NODELAY = 1`, giữ ấm HTTP Keep-Alive và bảo toàn cơ chế tự động mở rộng cửa sổ nhận của Linux (`tcp_moderate_rcvbuf`, `tcp_rmem` lên tới 6 MiB).
+- **Kết nối đơn (Connection Pooling):** Mặc định giữ đúng 1 kết nối HTTP/1.1 qua `_SingleConnAdapter(pool_connections=1, pool_maxsize=1)` với cờ `TCP_NODELAY = 1`, giữ ấm HTTP Keep-Alive và bảo toàn cơ chế tự động mở rộng cửa sổ nhận của Linux (`tcp_moderate_rcvbuf`, `tcp_rmem` lên tới 6 MiB). Khi bật `--http2` (`CRAWLER_USE_HTTP2=1`), sử dụng `_HttpxSessionAdapter` khóa `Limits(max_connections=1, max_keepalive_connections=1)` dùng `iter_raw` (và tự fallback về HTTP/1.1 kèm cảnh báo một lần nếu thiếu `httpx`/`h2`).
 - **Bộ điều phối nhịp độ (`RateLimiter`):**
-  - **Nhịp khởi đầu (Start-to-Start):** `arxiv_min_interval = 3.15s` kết hợp jitter ngẫu nhiên `0..0.20s` (xóa bỏ xung nhịp bot cố định).
-  - **Sàn nghỉ socket (End-to-Start):** `arxiv_min_idle_gap = 3.05s`. Bất kể gói trước tải nhanh hay chậm, crawler **luôn đảm bảo socket nghỉ tối thiểu 3.05s** từ thời điểm đóng socket request trước đến khi mở request tiếp theo. Do $3.05\text{ s} > 3.00\text{ s}$, crawler không bao giờ vi phạm quy định $\ge 3\text{ s}$ của arXiv.
-  - **Xoay vòng phiên kết nối:** Tự động gọi `recycle_session()` sau mỗi 120 request hoặc ngay khi gặp sự cố đứt luồng socket để làm mới trạng thái TCP.
-  - **Tản nhiệt chủ động:** Đặt mặc định `arxiv_proactive_cooldown_every_ids = 0` (tắt tự động ngủ 60s định kỳ; crawler chỉ ngủ khi arXiv thực sự trả về HTTP 429), tiết kiệm hơn 40 phút thời gian chết lãng phí.
+  - **Nhịp khởi đầu (Start-to-Start):** `arxiv_min_interval = 3.05s` kết hợp jitter ngẫu nhiên `0..0.10s` (trung bình ~3,10 s Start-to-Start, luôn $\ge 3.00\text{ s}$ theo đúng chuẩn arXiv & `arxiv.py`).
+  - **Đệm hậu tải (Post-Transfer Cushion):** `arxiv_min_idle_gap = 0.25s`. Với mọi gói tải xong trong $\le 2.80\text{ s}$, khoảng chờ hoàn toàn tuân theo Start-to-Start (0 s overhead End-to-Start); với gói tải lâu $> 2.80\text{ s}$, socket nghỉ thêm `0.25 s` trước request kế tiếp thay vì ép End-to-Start `3.05–3.25 s`.
+  - **Xoay vòng phiên kết nối:** Tự động gọi `recycle_session()` (gom tối đa 1 lần/request) sau mỗi `500` request, khi gói $\ge 50\text{ MiB}$, khi `TTFB >= 5.0 s`, khi vượt trần byte trượt `360 MiB / 180 s`, hoặc ngay khi gặp lỗi đứt luồng/429/`HIT` bị bóp (giữ ấm TCP/TLS Keep-Alive và tránh TCP Slow Start). Khi phát hiện suy giảm trên chính `HIT` thuần của Fastly (`< 3.0 MiB/s` trên $\ge 20\text{ MiB}$ trong cửa sổ 100 request), vòng lặp tự phục hồi gọi `enter_ramp_up()` (`3.80–4.50 s`) và giữ trong `50` request; chỉ tự ngủ hồi phục `300 s` (tối đa `3` lần/phiên) nếu `HIT` thuần `< 2.0 MiB/s` kéo dài `2` cửa sổ liên tiếp.
+  - **Định hình lưu lượng chống bóp chuỗi bài nặng (`v3.17`–`v3.17.1`):** Mặc định bật `traffic_shaping = True` (`CRAWLER_TRAFFIC_SHAPING=1`, tắt qua `--no-traffic-shaping`) gồm hoán vị cụm bài cùng chunk theo tỷ lệ vàng (`>= 16` bài), xen kẽ `v2..vN` của bài $\ge 25\text{ MiB}$ cách nhau $\ge 15$ version nhẹ (trần hàng đợi `32`, áp lực cao giữ tối thiểu `3` version dưới trần đỏ `360 MiB`, tạm giữ khi cửa sổ 3 phút $\ge 220\text{ MiB}$, rải round-robin theo bài khi xả cuối pass), và kiểm soát leaky-bucket trượt `360 MiB / 180 s` (bỏ qua request `< 1 MiB`, ngủ sau `_enqueue_extract_job()` rồi khấu trừ byte hồi phục) trong khi vẫn duy trì dây tải `max_stream_mbps = 6.0 MiB/s`.
+  - **Tản nhiệt chủ động:** Đặt mặc định `arxiv_proactive_cooldown_every_ids = 0` (tắt tự động ngủ 60s định kỳ; crawler chỉ ngủ khi arXiv trả về HTTP 429, vượt trần byte trượt `360 MiB / 180 s` trên gói $\ge 1\text{ MiB}$, hoặc `HIT` thuần `< 2.0 MiB/s` kéo dài 2 cửa sổ).
 
 #### B. Kênh Semantic Scholar (`api.semanticscholar.org`)
-- **Tần suất yêu cầu:** Giới hạn tối thiểu **1.1 giây / request** (End-to-Start) qua `AdaptiveRateLimiter`.
-- **Gom lô thông minh:** Sử dụng API `POST /graph/v1/paper/batch` (mặc định 25 ID/lô, cấu hình qua `--s2-batch-size`) để gom nhiều bài báo vào một truy vấn duy nhất, giảm tới 98% số lượng request qua mạng.
-- **Thuật toán chia đôi lô đệ quy (Batch Bisection):** Khi gặp mã lỗi `HTTP 413 Payload Too Large` hoặc `5xx` trên mẻ có từ 2 bài trở lên, hệ thống tự động chia đôi danh sách ($N/2$) và gửi đệ quy nhằm cô lập các bài chứa danh sách trích dẫn quá lớn mà không làm thất bại các bài khác trong lô.
+- **Tần suất yêu cầu & AIMD (`AdaptiveRateLimiter` — v3.18):** Giữ tối thiểu **1,1 giây / request** (End-to-Start); khi gặp `429` chỉ tăng tuyến tính `+0,4 s` (trần `3,0 s` khi có key / `8,0 s` khi ẩn danh) và hồi `-0,25 s` sau mỗi `5` request `200` liên tiếp. Backoff `429` của S2 dùng thang riêng `_s2_retry_after` (`2 → 4 → 8 → 15 s + jitter 0,2..1,0 s`, tôn trọng `Retry-After` `1..120 s`, có ghi log snippet `429` đã che khóa).
+- **Gom lô mật độ cao & Save-First Isolation:** Sử dụng `POST /graph/v1/paper/batch` (mặc định **150 ID/lô**, kẹp `[1, 500]` qua `--s2-batch-size`), lưu đĩa ngay từng bài hoàn tất (`on_result`) trước khi phân trang các bài bị cắt (`defer_truncated`) để không mất tiến độ cả lô nếu 1 bài phụ gặp `429`.
+- **Thuật toán chia đôi lô & lọc cắt ngắn (Batch Bisection + 10k-Ref Guard):** Tự động chia đôi đệ quy ($N/2$) khi gặp `HTTP 400` vượt trần `10 MB`, `HTTP 413` hoặc `5xx` trên lô `>= 2` bài, đồng thời re-batch riêng các bài cuối lô nếu tổng nhúng vượt `>= 9.500` refs; `_references_truncated` bỏ qua sai lệch nhỏ do mục `null`, chỉ fallback `GET /references` khi thực sự thiếu nặng (`len == 0`, `len >= 500`, không phải list, hoặc `< 50%` với `referenceCount >= 10`).
 - **Dự phòng trích dẫn hai tầng (Dual-Engine Reference Fallback):** Khi Semantic Scholar chưa lập chỉ mục bài báo (`HTTP 404`), crawler tự động bóc tách trích dẫn từ các tệp `.bib` và `.bbl` có sẵn trong thư mục mã nguồn bài viết khi kích hoạt cờ `--enable-bib-fallback`.
-- **Bảo mật khóa API:** Tự động đính kèm `x-api-key` (từ biến `S2_API_KEY`); toàn bộ nhật ký ghi log đều được lọc qua `SecretRedactingFilter` để che giấu khóa API.
+- **Bảo mật khóa API:** Tự động `.strip()` `S2_API_KEY` trước khi đính kèm header `x-api-key`; toàn bộ nhật ký log và `diagnostics.jsonl` đều lọc che khóa qua `SecretRedactingFilter` / `_s2_response_snippet`.
 
 #### C. Khám phá Ngoại tuyến Kaggle Snapshot (v3.13)
 - **Phân loại cấu trúc phiên bản:** Khảo sát thực nghiệm trên 25.000 ID cho thấy $\approx 74\%$ số bài chỉ tồn tại duy nhất 1 phiên bản ($v1$), chỉ $\approx 26\%$ là bài đa phiên bản ($v2..vN$).
@@ -104,7 +108,7 @@ Crawler được thiết kế theo mô hình **Producer–Consumer** phi tập t
 | :--- | :--- | :--- |
 | **1. `MainThread`** *(arXiv Producer)* | Phân chia chunk ID; khám phá siêu dữ liệu (Kaggle snapshot hoặc Atom API lô 250); tải gói `/src/{id}vK` trực tiếp vào RAM; điều tiết nhịp độ và xử lý phản hồi 429/lỗi mạng; đẩy gói hoàn tất vào `extract_queue`. | Chỉ giao tiếp với `export.arxiv.org`; không giải nén file, không gọi S2. |
 | **2. Pool `extract-worker`** *(Consumer - 2 luồng)* | Lấy gói từ `extract_queue`; giải nén 1-pass trong bộ nhớ (`_FastGzipStream`); lọc giữ `.tex`, `.bib`, `.bbl`; tính hash SHA-256; hoán đổi tệp nguyên tử; ghi `manifest.sqlite`; kiểm tra bộ đếm phiên bản nguyên tử để đẩy sang `s2_queue`. | Thuần xử lý CPU & Disk I/O; chạy song song 100% với việc tải mạng của bài tiếp theo. |
-| **3. `s2-worker`** *(Metadata Worker)* | Gom các bài đã xử lý xong từ `s2_queue`; gửi `POST /graph/v1/paper/batch` tới Semantic Scholar (mặc định 25 bài/lô); tự chia đôi lô (Bisection) nếu gặp 413/5xx; fallback phân trang nếu trích dẫn bị cắt hoặc bóc tách `.bib/.bbl` nếu S2 404 (khi bật bib fallback); lưu `references.json` vào mọi phiên bản và ghi marker `s2_references.raw.json.gz`. | Chỉ giao tiếp với Semantic Scholar; chạy hoàn toàn độc lập với arXiv; tự động bỏ qua khi bật `--skip-s2`. |
+| **3. `s2-worker`** *(Metadata Worker)* | Gom các bài từ `s2_queue`; gửi `POST /graph/v1/paper/batch` (mặc định `150` bài/lô); tự chia đôi lô (`400` size-limit/`413`/`5xx`/ngưỡng `9.500` refs); lưu Save-First từng bài hoàn tất rồi mới fallback `GET /references` hoặc `.bib/.bbl` (nếu `404` & bật bib fallback); ở chế độ `--s2-only` có thêm tối đa `2` lượt deferred retry (`30 s` cooldown), log tiến độ & kích `checkpoint-worker` định kỳ; ghi `references.json` và `s2_references.raw.json.gz`. | Chỉ giao tiếp với Semantic Scholar; chạy hoàn toàn độc lập với arXiv; tự động bỏ qua khi bật `--skip-s2`. |
 | **4. `checkpoint-worker`** *(Backup Worker)* | Chụp snapshot SQLite qua `sqlite3.backup`; đóng gói dữ liệu sang `arxiv-data.tar.gz` kèm cơ chế chống tụt lùi dữ liệu (`shrink protection`); tự động bỏ qua nếu dữ liệu không đổi (`skip_if_unchanged=True`). | Chạy nền song song khi ngủ cooldown hoặc định kỳ; không làm gián đoạn tải mạng. |
 | **5. `resource-sampler`** *(Telemetry Daemon)* | Lấy mẫu tài nguyên định kỳ (RAM mỗi 5s, đĩa mỗi 300s); cung cấp dữ liệu tức thì $O(1)$ cho hệ thống đo đạc mà không tốn chi phí quét tiến trình. | Luồng daemon nền nhẹ. |
 
@@ -133,17 +137,20 @@ flowchart TB
   end
 
   subgraph Download["2. Tải gói nguồn (/src/) — MainThread"]
-    SnSave --> DL1["Duyệt các cặp (arxiv_id, version) chưa xong"]
-    DL1 --> DL2["Đọc 512 byte đầu: ngắt sớm nếu là PDF hoặc ZIP (no_source)"]
-    DL2 --> DL3["Tải trực tiếp vào bytearray RAM (<= 96 MiB) qua Paced Stream 4.5 MiB/s"]
-    DL3 --> DL4["Đo thời gian truyền socket thuần túy (download_seconds)"]
+    SnSave --> DL1["Hoán vị tỷ lệ vàng (>=16 ID) & xen kẽ v2..vN >=25 MiB (heavy_interleave_queue)"]
+    DL1 --> DL2["Zero-Body Content-Type / 512B magic: ngắt sớm PDF/ZIP (RST_STREAM HTTP/2, no_source)"]
+    DL2 --> DL3{"--in-flight-extract & lần thử đầu?"}
+    DL3 -->|Có| DLIN["Cut-Through: giải nén thẳng luồng socket -> .vK.part (O(1) RAM, 6.0 MiB/s)"]
+    DL3 -->|Không / Deferred Range| DLBUF["Tải vào RAM <= 96 MiB (hoặc .part HTTP 206 Range) qua Paced Stream 6.0 MiB/s"]
+    DLIN --> DL4["Đo download_seconds, parse X-Cache/X-Served-By & telemetry 100 req (HIT<3 MiB/s)"]
+    DLBUF --> DL4
     DL4 --> DL5{"Mã phản hồi HTTP?"}
-    DL5 -->|200 OK / 206 OK| OK["Nghỉ nhịp cơ sở (2MB -> 3.15s, nạp hồi 50MB -> 12.0s)"]
+    DL5 -->|200 OK / 206 OK| OK["Start-to-Start 3.05s + Deficit Breather + Sliding Byte-Budget 360 MiB/180s"]
     DL5 -->|Đứt luồng socket| RETRY["Thử lại Range tại chỗ (HTTP 206, session mới & nghỉ >= 12s-14s)"]
     RETRY -->|Hoàn tất| OK
-    RETRY -->|Hết lượt thử| STASH["Bảo toàn .part, defer về cuối dải (0s chờ phạt)"]
-    DL5 -->|429 Rate Limit| CD["Bảo toàn .part, defer ngay, ngủ Cooldown 120s -> 180s -> 240s"]
-    OK --> EQ[("extract_queue (maxsize = 8, trần 192 MiB)")]
+    RETRY -->|Hết lượt thử| STASH["Bảo toàn .part (hoặc xóa staging cut-through), defer cuối dải"]
+    DL5 -->|429 Rate Limit| CD["Phân loại >=9s queue-timeout vs edge-fast, bảo toàn .part, Cooldown 120->180->240s"]
+    OK --> EQ[("extract_queue (hoặc prefilled_meta -> manifest ngay)")]
   end
 
   subgraph Extract["3. Giải nén & Xác minh — Pool extract-worker"]
@@ -157,16 +164,17 @@ flowchart TB
   subgraph Enrichment["4. Làm giàu trích dẫn — s2-worker / Offline Tools"]
     EX5 -->|"Đúng & không bật --skip-s2"| SQ[("s2_queue")]
     EX5 -->|"Bật --skip-s2"| SKIP["Bỏ qua S2, kết thúc Stage 1"]
-    SQ --> S2_1["Gom lô cấu hình (mặc định 25 bài)"]
-    S2_1 --> S2_2["POST /graph/v1/paper/batch"]
-    S2_2 -->|"Lỗi 413/5xx & >= 2 bài"| S2_BI["Chia đôi lô (Bisection) đệ quy"]
-    S2_BI --> S2_3{"Trạng thái kết quả?"}
+    SQ --> S2_1["Gom lô cấu hình (mặc định 150 bài, flush 0.35s nếu --s2-only)"]
+    S2_1 --> S2_2["POST /graph/v1/paper/batch (backoff S2 2->4->8->15s + AIMD)"]
+    S2_2 -->|"400 size / 413 / 5xx / >=9500 refs"| S2_BI["Chia đôi lô (Bisection) hoặc re-batch đuôi"]
+    S2_BI --> S2_3{"Lưu Save-First từng bài xong"}
     S2_2 --> S2_3
     S2_3 -->|"404 & bật bib fallback"| S2_BIB["Bóc tách trích dẫn .bib/.bbl cục bộ"]
-    S2_3 -->|"Bị cắt ngắn"| S2_4["Fallback GET /references phân trang"]
-    S2_3 -->|"Thành công"| S2_5["Ghi references.json vào vK/ & s2_references.raw.json.gz"]
+    S2_3 -->|"Thiếu nghiêm trọng (<50% / >=500 / 0)"| S2_4["Cô lập retry GET /references phân trang"]
+    S2_3 -->|"Đủ ngay trong batch"| S2_5["Ghi references.json vào vK/ & s2_references.raw.json.gz"]
     S2_BIB --> S2_5
     S2_4 --> S2_5
+    S2_5 -.->|"--s2-only: vét tối đa 2 lượt & checkpoint định kỳ"| SQ
     SKIP -.->|"Stage 2: --s2-only hoặc crawler/enrich_references.py"| S2_1
   end
 
@@ -180,25 +188,36 @@ flowchart TB
 
 ### 1.5. Cơ chế Phòng ngừa & Phục hồi Sự cố Mạng
 
-1. **Phân cấp đệm nghỉ theo dung lượng (Proportional Bandwidth Breather - v3.14):**
-   - *Gói thông thường (< 2 MiB, ~85% kho):* Nhịp cơ sở Start-to-Start 3.15s, sàn nghỉ socket 3.05s.
-   - *Phản ứng trễ mạng (TTFB Clean Lean Turbo):* Khi `last_header_elapsed >= 3.5s`, crawler xoay vòng session để làm mới kết nối TCP tránh nghẽn socket, **tuyệt đối không gọi `note_429()`** trên mã `200 OK`.
-   - *Gói trung bình & lớn ($\ge 2\text{ MiB}$):* Tự động kích hoạt cơ chế `_compute_proportional_breather` tính thời gian nghỉ nạp hồi Token Bucket theo tỷ lệ thực tế $S / 4.0\text{ MiB/s}$ (sàn $\ge 3.05\text{s}$, trần 12.0s). Khi gói $\ge 30\text{ MiB}$, crawler tự động xoay session TCP để làm sạch socket trước khi sang bài tiếp theo.
-   - *Nạp hồi băng thông trượt (Mỗi 50 MiB):* Sau mỗi 50 MiB dữ liệu tải thực qua mạng, crawler tự động xoay vòng socket và nghỉ `12.0s` làm van an toàn thứ 2 để duy trì burst limit của CDN.
-2. **Điều tiết lưu lượng tải động (Dynamic Wire-Speed Streaming - v3.14):**
-   - Hỗ trợ tham số `--max-stream-mbps` và biến môi trường `CRAWLER_MAX_STREAM_MBPS`. Mặc định 4.5 MiB/s trên mạng nội địa, tự động mở rộng lên **12.0 – 18.0 MiB/s** khi chạy trên Google Colab / Cloud.
-   - Với các gói nhỏ $\le 512\text{ KiB}$, đọc trực tiếp với tốc độ tối đa không độ trễ.
-   - Khi dung lượng vượt $512\text{ KiB}$, tốc độ đọc socket được điều tiết theo `max_stream_mbps`. Bài 40 MB hoàn tất trong ~2.5s (thay vì 15s), vừa giảm 80% nguy cơ đứt socket vừa bứt phá chỉ số benchmark `download_seconds`.
-3. **Nối tiếp tại chỗ cho tệp lớn (In-Place Multi-Slice Range Resume):**
+1. **Transport HTTP/2 kết nối đơn & Zero-Body `Content-Type` Header Early-Reject (v3.16):**
+   - Hỗ trợ `--http2` (`CRAWLER_USE_HTTP2=1`, mặc định `False`) qua `httpx[http2]` khóa `Limits(max_connections=1, max_keepalive_connections=1)`, đọc luồng wire thô qua `iter_raw`, và tự fallback HTTP/1.1 (log cảnh báo 1 lần) nếu chưa cài `httpx`/`h2`.
+   - Khi header trả về `Content-Type: application/pdf` hoặc `application/zip` kèm `Content-Length`, crawler ngắt bỏ ngay trước khi đọc chunk thân bài (`wire_bytes=0`, `early_rejected_by_header=True`, `Status.NO_SOURCE`). Trên HTTP/2, `.close()` phát khung `RST_STREAM` đóng riêng stream đó mà không làm sập kết nối TCP/TLS Keep-Alive.
+2. **Cảm biến Fastly CDN, Preflight POP Scorer & Self-Healing Soft-Pacing (v3.16):**
+   - Phân tích header `X-Cache` (`HIT` / `SHIELD_HIT` / `MISS` / `UNKNOWN`), `X-Served-By` và `Age`; ghi tách biệt `HIT` vs `MISS` mỗi 100 request trong log và lưu vào `metrics.json` (`transport`, `cdn_breakdown`, `arxiv`).
+   - Tự phân loại `HTTP 429` theo độ trễ header: `TTFB >= 9,0 s` đánh dấu `arxiv_429_queue_timeout` (nghẽn tại hàng đợi origin), ngược lại là `arxiv_429_edge_fast` (edge Fastly).
+   - **Defensive Soft-Pacing & Auto-Recovery (`v3.17`–`v3.17.1`):** Chỉ gọi `limiter.enter_ramp_up(start_interval=3.80..4.50s)` (giữ nhịp mềm trong `50` request trước khi `note_success()` hạ lại `3,05 s`) và `recycle_session()` khi chính tốc độ **`HIT` thuần** của Fastly (tách khỏi `SHIELD_HIT`) giảm `< 3,0 MiB/s` trên `>= 20 MiB` trong cửa sổ 100 request; chỉ tự động ngủ hồi phục `300 s` (tối đa `3` lần/phiên qua nhánh `recovery_seconds` riêng, không đếm đúp `arxiv_thermal_cooldowns`) nếu `HIT` thuần `< 2,0 MiB/s` kéo dài `2` cửa sổ liên tiếp và bật `--auto-resume-rate-limit`. Tuyệt đối không hạ nhịp oan khi nguyên nhân là `Cache MISS` phía origin.
+   - **Traffic-Shaping Interleaver & Leaky Byte-Budget Governor (`v3.17`–`v3.17.1`):** Khi `traffic_shaping=True` (`CRAWLER_TRAFFIC_SHAPING=1`, tắt qua `--no-traffic-shaping`), giữ dây tải ở `4–6 MiB/s` nhưng hoán vị theo bước nhảy tỷ lệ vàng trong các chunk $\ge 16$ bài để tách cụm bài nặng, đẩy `v2..vN` của bài $\ge 25\text{ MiB}$ vào hàng đợi xen kẽ cách nhau `15` version nhẹ (trần `32`, vẫn giữ `min_gap=3` dưới trần đỏ `360 MiB`, tạm giữ khi cửa sổ `180 s` đạt `220 MiB`, rải round-robin theo bài khi xả cuối pass), và nếu lưu lượng trượt `180 s` vượt `360 MiB` trên request $\ge 1\text{ MiB}$ sẽ xoay session 1 lần, ngủ `10–60 s` **sau** `_enqueue_extract_job()` và khấu trừ `breather * 2.0 MiB/s` theo mô hình leaky-bucket.
+   - `src/crawler/preflight.py`: Cho phép kiểm tra nhanh 4 ID lạnh để chấm điểm VM/POP (`Grade A/B/C`, dự báo giờ cho 5.000 ID) hoặc chạy A/B Benchmark HTTP/1.1 vs HTTP/2 trên tập ID tách rời `[0::2]` vs `[1::2]`.
+3. **Cut-Through In-Flight Extraction `O(1)` RAM (v3.16):**
+   - Với cờ `--in-flight-extract` (`CRAWLER_IN_FLIGHT_EXTRACT=1`, mặc định `False`), lần thử chính sử dụng `download_and_extract_source()` giải nén `gzip` + `tar` trực tiếp trên luồng socket vào `.vK.part/tex/`, giữ nguyên `max_stream_mbps`, bỏ qua bước đệm `.tar.gz` RAM 96 MiB lẫn I/O `.tmp/`.
+   - Nếu cắt dòng giữa chừng (`ChunkedEncodingError`) trên phiên bản chưa có file `.part`, bài được defer và tự động chuyển về `download_source(..., keep_partial_on_retryable=True)` để nối `HTTP 206 Range` ở pass deferred.
+4. **Điều tiết Start-to-Start & Deficit Breather (v3.15):**
+   - *Gói thông thường & trung bình ($S / 6.0\text{ MiB/s} \le 3.05\text{ s}$, tức $\le 18\text{ MiB}$):* Chạy thuần nhịp Start-to-Start `3.05 s + jitter 0..0.10 s` với đệm hậu tải `0.25 s`, không phạt thêm breather.
+   - *Phản ứng trễ mạng (`TTFB >= 5.0 s`):* Khi `last_header_elapsed >= 5.0 s`, crawler xoay vòng session để làm mới kết nối TCP tránh nghẽn socket, **tuyệt đối không gọi `note_429()`** và không cộng thêm hình phạt End-to-Start trên mã `200 OK`.
+   - *Gói khổng lồ tải quá nhanh:* `_compute_proportional_breather` tính phần thiếu hụt $\max(0, S / 6.0\text{ MiB/s} - (\text{TTFB} + \text{download\_seconds}))$ (trần `6.0 s`). Nếu đường truyền đã chậm sẵn ($\le 6.0\text{ MiB/s}$), thời gian nghỉ thêm bằng `0 s`. Gói $\ge 50\text{ MiB}$ tự động xoay vòng TCP sau khi tải xong.
+   - *Giám sát tốc độ trượt (Rolling Telemetry):* Mỗi 100 request `2xx`, crawler ghi log `wire MiB/s`, `ttfb_p50`, `avg s/req`, `est_5000id` và phát cảnh báo sớm nếu băng thông wire tụt dưới `3.5 MiB/s` (cần $\ge 5.0\text{ MiB/s}$ để đạt `~8 h / 5.000 ID`).
+5. **Điều tiết lưu lượng tải mượt (Smooth Wire-Speed Streaming - v3.15):**
+   - Hỗ trợ tham số `--max-stream-mbps` và biến môi trường `CRAWLER_MAX_STREAM_MBPS`, mặc định **`6.0 MiB/s`** (thời gian cào ~7,7 h / 5.000 ID khi đường truyền ổn định, chỉ chậm hơn 16 MiB/s khoảng 22 phút nhưng giảm 2,7× đỉnh burst lên Fastly CDN).
+   - Với các gói nhỏ $\le 512\text{ KiB}$, đọc trực tiếp không độ trễ; trên $512\text{ KiB}$ điều tiết mượt theo `max_stream_mbps`.
+6. **Nối tiếp tại chỗ cho tệp lớn (In-Place Multi-Slice Range Resume):**
    - Khi gặp đứt stream trên file lớn ($\ge 1\text{ MiB}$), crawler tự động xoay vòng session mới (`recycle_session()`), áp dụng đệm nghỉ an toàn $\ge \mathbf{12,0\text{ s} - 14,0\text{ s}}$ (`_HEAVY_STREAM_BREAK_BONUS = 9.0s`) để token bucket Fastly CDN sạc đầy, sau đó gửi ngay `Range: bytes={written}-` (`HTTP 206 Partial Content`).
    - File 20–40 MB hoàn tất sau 2 slice ngay tại chỗ trong ~13.5s mà không bị Fastly trả 429 và không bao giờ dồn toa sang cuối dải.
-4. **Tách biệt đứt stream khỏi chuỗi phạt HTTP 429 & Cooldown leo thang có giới hạn:**
+7. **Tách biệt đứt stream khỏi chuỗi phạt HTTP 429 & Cooldown leo thang có giới hạn:**
    - Đứt luồng do socket Fastly ngắt kết nối (`ChunkedEncodingError`) được lưu an toàn vào `.part` và **defer bài báo về cuối dải (0s chờ phạt)**, tiếp tục cào ngay bài tiếp theo (`need_cd = False`).
    - Nếu request Range dở dang gặp mã 429, hệ thống nhận diện `is_stream_break` để cách ly: chỉ ngủ breather cố định 60s, **tuyệt đối không tăng `arxiv_429_streak` leo thang**.
    - Khi gặp HTTP 429 thật từ endpoint: Đẩy bài vào `deferred_ids`, đóng kết nối cũ, và ngủ **Cooldown leo thang có giới hạn:** `120s → 180s → 240s` (khóa trần tối đa 240 giây). Sau 6 bài liên tiếp tải thành công (200 OK), mức streak được hạ 1 bậc.
-5. **Bảo toàn 100% byte tải dở (Zero-Loss Partial Resume):**
+8. **Bảo toàn 100% byte tải dở (Zero-Loss Partial Resume):**
    - Toàn bộ byte tải được lưu an toàn trong `.resume-{id}-v{version}.part` để nối tiếp qua `HTTP 206 Range`. **Tuyệt đối không xóa `.part` khi gặp HTTP 429**; chỉ xóa `.part` khi nhận mã 403 (cấm truy cập) hoặc 416 (dải byte không hợp lệ).
-6. **Sao lưu định kỳ song song, chống tụt lùi dữ liệu & Khóa tiến trình OS Mutex:**
+9. **Sao lưu định kỳ song song, chống tụt lùi dữ liệu & Khóa tiến trình OS Mutex:**
    - `checkpoint-worker` đóng gói `data/` thành `arxiv-data.tar.gz` trong nền trong lúc luồng chính đang ngủ cooldown hoặc định kỳ mỗi 1.000 ID.
    - Bỏ qua khi không có dữ liệu mới (`skip_if_unchanged=True`): so sánh chữ ký tiến độ `(final_pairs, s2_done)` trước khi nén; nếu không có bài mới, thời gian sao lưu = 0 giây.
    - Chống tụt lùi dữ liệu (`Shrink Protection`): kèm file `.meta.json` kiểm soát số lượng bài; bản sao lưu mới không bao giờ ghi đè nếu có số cặp phiên bản ít hơn bản cũ.
@@ -248,10 +267,13 @@ data/
 
 ```bash
 # ==============================================================================
-# QUY TRÌNH 2 GIAI ĐOẠN CHUẨN (Khuyến nghị cho Colab / Máy chính)
+# QUY TRÌNH 2 GIAI ĐOẠN CHUẨN + PREFLIGHT v3.16 (Khuyến nghị cho Colab / Máy chính)
 # ==============================================================================
 
-# Giai đoạn 1: Cào nguồn TeX siêu tốc (Zero 429, không nghẽn S2)
+# 0. Chấm điểm POP/VM nhanh (~15s trên 4 ID lạnh; tùy chọn --mode ab-benchmark)
+python src/crawler/preflight.py --ranges src/id_ranges.csv --offset 12000 --count 4 --http2
+
+# Giai đoạn 1: Cào nguồn TeX siêu tốc (thêm --http2 --in-flight-extract khi chạy v3.16)
 # (A) Nếu dùng snapshot tải từ Kaggle (nhanh nhất, 0s Atom API):
 python src/run_crawl.py \
   --ranges src/id_ranges.csv \
@@ -260,7 +282,9 @@ python src/run_crawl.py \
   --backup-dir /content/drive/MyDrive/arxiv-data.tar.gz \
   --backup-every-ids 1000 \
   --auto-resume-rate-limit \
-  --skip-s2
+  --skip-s2 \
+  --http2 \
+  --in-flight-extract
 
 # (B) Nếu không có snapshot (khám phá online qua Atom API + OAI-PMH):
 python src/run_crawl.py \
@@ -272,13 +296,14 @@ python src/run_crawl.py \
   --skip-s2 \
   --enable-oai-dates
 
-# Giai đoạn 2: Làm giàu trích dẫn Semantic Scholar độc lập (Batch 25 + Fallback)
+# Giai đoạn 2: Làm giàu trích dẫn Semantic Scholar độc lập (v3.18 Batch 150 + Save-First + Fallback)
+# (Nếu mới cào xong 15.000 ID đầu, thêm --limit 15000 để chưa gọi S2 cho 10.000 ID chưa có TeX)
 python src/run_crawl.py \
   --ranges src/id_ranges.csv \
   --data-dir data \
   --s2-only \
   --enable-bib-fallback \
-  --s2-batch-size 25
+  --s2-batch-size 150
 
 # Bù trích dẫn ngoại tuyến từ file .bib/.bbl có sẵn (100% offline, vài giây)
 python src/crawler/enrich_references.py --data-dir data
@@ -489,6 +514,11 @@ Bộ công cụ kiểm toán `src/parsing/validate_m2.py` (Owner: E | Task: M2-E
 | **7** | **Citation Consistency** | Không chứa khóa trích dẫn trùng lặp bên trong các lệnh `\cite{...}`; mọi trích dẫn đều phải trỏ tới `citationkey` hợp lệ trong `bibtex`. |
 | **8** | **Version Coverage** | Số lượng phiên bản có cây trong `hierarchy` phải khớp chính xác với số phiên bản có TeX trong `Corpus` M1; các phiên bản rỗng/PDF (`no_source`) phải có 0 phần tử. |
 
+#### Kết quả Tích hợp, Xử lý Edge-Case & Kiểm định Thực nghiệm (10.000 bài thật)
+- **Tối ưu & khôi phục dữ liệu thật:** `Corpus.tex_files()` đọc cả `.bib` và `.bbl` (ưu tiên `.bib` khi trùng khóa cùng phiên bản), lọc `.bib` theo citation key xuất hiện trong `.tex`/`.bbl` (không phân biệt hoa/thường; giữ đủ khi có `\nocite{*}`), bật `strict=False` cứu hộ từng entry trên file `.bib` lỗi cục bộ, và chia nhóm cùng năm quá lớn theo ký tự đầu trong `dedup` để tránh suy biến $O(n^2)$. Ở tầng LaTeX, `_math_body()` giữ khoảng trắng sau `\` cuối thân toán (`\ `), `gathering.py` bổ sung `Verbatim`/`Verbatim*` và giới hạn quét toán/`\verb`, còn `hierarchy.py` phục hồi môi trường chưa đóng trước ranh giới tài liệu/tham khảo và lọc tiêu đề mục tham khảo có `\label{...}` hoặc dấu câu cuối.
+- **Độ tin cậy xuất lô & Resume:** Mỗi lô ghi marker `_export_pending.json` trước khi flush 3 bảng và CSV (tự rollback lô dở nếu khởi động lại), dùng CSV đã commit để đồng bộ `_done.txt`, và tự gỡ bài đã sửa khỏi `_errors.jsonl` khi retry thành công.
+- **Số đo thực nghiệm trên 10.000 bài cục bộ (`data/papers/`):** `python src/run_parse.py --data-dir data --workers 12 --batch-size 500` đạt **10.000/10.000 bài thành công (`0` lỗi)** trong **678,06 s** (`67,81 ms/bài`, RAM đỉnh `1.629,2 MB`, trung bình `1.025,2 MB`, đầu vào `7.751.298.877 B` → đầu ra Parquet `286.068.147 B` qua `20` shard/bảng): **12.783** versions (**867** empty), **4.539.133** elements, **6.884.462** hierarchy, **373.776** bibtex; `src/parsing/validate_m2.py --data-dir data` đạt **`PASS`** (exit `0`).
+
 ---
 
 ### 2.6. Hướng dẫn Lệnh Vận hành Milestone 2
@@ -691,15 +721,15 @@ Quy định phân công theo `CONTRIBUTING.md` và tiến độ thực tế qua 
 
 | Vai | Thành viên | Trách nhiệm chính M1 | Trách nhiệm chính M2 | Trách nhiệm chính M3 | Reviewer | Trạng thái |
 | :---: | :--- | :--- | :--- | :--- | :---: | :---: |
-| **A** | **Võ Gia Phúc (Leader)** | Điều phối pipeline, mạng HTTP, manifest, metrics, crawler operator. | Khóa hợp đồng `models.py`, điều phối `pipeline.py`, CLI `run_parse.py`, profiler. | Khóa `matching/models.py`, `features.py`, `pipeline.py`, `run_matching.py`, `export_hf.py`, `matching_fixtures.py`, `README.md`. | **E** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Mã & tích hợp A (`M3-A0..A3`) |
-| **B** | **Trần Thanh Sơn** | Xử lý dải ID, khám phá Atom API, tích hợp Semantic Scholar. | Làm sạch văn bản (`cleaner.py`), chuẩn hóa toán (`math_normalizer.py`), tách câu (`sentence_splitter.py`). | Tiền xử lý (`cleaner.py`), 15 đặc trưng lexical + TF-IDF (`lexical_features.py`). | **C** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Đã merge PR #37 & #38 lên `main` |
-| **C** | **Phạm Trường Quỳnh** | Fixture tổng hợp, tải và giải nén source TeX/bib/bbl. | Gom nguồn (`gathering.py`), dựng cây cấp bậc (`hierarchy.py`). | CLI gán nhãn & splits (`labelling.py`), Auto-matcher + audit (`auto_matcher.py`). | **B** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Đã merge PR #36 & #39 lên `main` |
-| **D** | **Trần Nguyễn Lâm Gia Thụ** | Xuất dữ liệu Parquet/CSV, đối soát corpus, notebook số liệu. | Trích tham khảo (`bib_extractor.py`), khử trùng lặp (`dedup.py`), xuất Parquet (`export_m2.py`). | Mô hình xếp hạng (`ranker.py`), huấn luyện có trọng số & ablation (`train_ranker.py`). | **E** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Đã merge PR #35 lên `main` |
-| **E** | **Thân Nguyễn Quang Triệu** | Xác thực corpus (`crawler/validate_corpus.py`), xây dựng Jupyter Book. | Kiểm toán 8 bất biến (`parsing/validate_m2.py`), viết notebook thống kê M2 trên sách. | Đặc trưng AST (`hierarchy_features.py`), đánh giá `MRR@5` (`evaluation.py`), hình poster (`plots.py`). | **D / A** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Đã merge PR #34 lên `main` |
+| **A** | **Võ Gia Phúc (Leader)** | Điều phối pipeline, mạng HTTP, manifest, metrics, crawler operator. | Khóa hợp đồng `models.py`, điều phối `pipeline.py`, CLI `run_parse.py`, profiler. | Khóa `matching/models.py`, `features.py`, `pipeline.py`, `run_matching.py`, `export_hf.py`, `matching_fixtures.py`, `README.md`. | **E** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Hoàn tất |
+| **B** | **Trần Thanh Sơn** | Xử lý dải ID, khám phá Atom API, tích hợp Semantic Scholar. | Làm sạch văn bản (`cleaner.py`), chuẩn hóa toán (`math_normalizer.py`), tách câu (`sentence_splitter.py`). | Tiền xử lý (`cleaner.py`), 15 đặc trưng lexical + TF-IDF (`lexical_features.py`). | **C** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Hoàn tất |
+| **C** | **Phạm Trường Quỳnh** | Fixture tổng hợp, tải và giải nén source TeX/bib/bbl. | Gom nguồn (`gathering.py`), dựng cây cấp bậc (`hierarchy.py`). | CLI gán nhãn & splits (`labelling.py`), Auto-matcher + audit (`auto_matcher.py`). | **B** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Hoàn tất |
+| **D** | **Trần Nguyễn Lâm Gia Thụ** | Xuất dữ liệu Parquet/CSV, đối soát corpus, notebook số liệu. | Trích tham khảo (`bib_extractor.py`), khử trùng lặp (`dedup.py`), xuất Parquet (`export_m2.py`). | Mô hình xếp hạng (`ranker.py`), huấn luyện có trọng số & ablation (`train_ranker.py`). | **E** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Hoàn tất |
+| **E** | **Thân Nguyễn Quang Triệu** | Xác thực corpus (`crawler/validate_corpus.py`), xây dựng Jupyter Book. | Kiểm toán 8 bất biến (`parsing/validate_m2.py`), viết notebook thống kê M2 trên sách. | Đặc trưng AST (`hierarchy_features.py`), đánh giá `MRR@5` (`evaluation.py`), hình poster (`plots.py`). | **D / A** (M3) | ✅ M1 Hoàn tất<br>✅ M2 Hoàn tất<br>✅ M3 Hoàn tất |
 
 ---
 
-### 3.2. Bộ Kiểm thử Chất lượng Toàn diện (765/765 Passed)
+### 3.2. Bộ Kiểm thử Chất lượng Toàn diện (816/816 Passed)
 
 Toàn bộ kho mã nguồn tuân thủ nguyên tắc cách ly mạng tuyệt đối: **100% unit tests chạy trên fixture tổng hợp hoặc mock `responses`, không bao giờ gọi mạng thật**.
 
@@ -708,9 +738,9 @@ Toàn bộ kho mã nguồn tuân thủ nguyên tắc cách ly mạng tuyệt đ�
 ruff check . && ruff format --check . && pytest -q
 ```
 
-- **Kết quả kiểm thử trên `main` (16/11):** **765 passed**, 0 failed/skipped (kèm cảnh báo `LGBMDeprecationWarning` về `eval_set` để giữ tương thích LightGBM `>=4.3`). Đây là kiểm thử tổng hợp, không thay cho đo chất lượng nhãn/corpus thật ở Phase 3A.
-  - Bao phủ toàn bộ **M1** (crawler/discovery/source/s2/export/checkpoint), **M2** (`gathering`, `hierarchy`, `cleaner`, `math_normalizer`, `sentence_splitter`, `bib_extractor`, `dedup`, `export_m2`, `pipeline`, `validate_m2` và kiểm thử tích hợp E2E), và **163 tests M3**: **phần A** (`src/tests/m3/test_matching_pipeline.py` **9** tests, `src/tests/m3/test_export_hf.py` **4** tests: contract 21 cột, Stage-1 blocking & 3 query-relative features, E2E CLI `--export-hf --verify-hf --plot-figures`, export đa shard ZSTD), **phần B** (`src/tests/m3/test_matching_cleaner.py`, `src/tests/m3/test_lexical_features.py`: **47 passed**), **phần C** (`src/tests/m3/test_labelling.py`: **36 passed** cho manual/auto/audit/kappa/splits/CLI và tích hợp thực 5 module `default_matching_stages()`), **phần D** (`src/tests/m3/test_ranker.py`: **52 passed** gồm unit/validation, `ranker_factory` và E2E với `evaluate_mrr5`/`plots`), và **phần E** (`src/tests/m3/test_hierarchy_features.py` **9** tests, `src/tests/m3/test_evaluation.py` **6** tests).
-- **Kiểm tra chuẩn phong cách mã:** `ruff check .` sạch (`All checks passed!`); `ruff format --check .` báo **108 files already formatted**. Windows dùng `HF_HOME` trong `.venv/hf`, `TEMP`/`TMP` và basetemp ngắn trong `.venv/m2c-temp/` để tránh quyền cache và giới hạn độ dài đường dẫn.
+- **Kết quả kiểm thử trên nhánh hiện tại (23/11):** **816 passed**, 0 failed/skipped (`319` M1 + `334` M2 + `163` M3, kèm 19 cảnh báo `LGBMDeprecationWarning` về `eval_set` để giữ tương thích LightGBM `>=4.3`). Đây là kiểm thử tổng hợp offline, không thay cho đo chất lượng nhãn/corpus thật ở Phase 3A.
+  - Bao phủ toàn bộ **M1** (**319 tests**: `http`/HTTP/2 adapter, auto-recycle stream ngắt dở/retry & CDN header parser, `AdaptiveRateLimiter` AIMD & strip `S2_API_KEY`, `discovery`, `source`/Zero-Body Content-Type Early-Reject & cut-through streaming, `preflight`/POP Grade A/B/C, bounded Range, timeout handling, direct CLI script guard & disjoint A/B `[0::2]`/`[1::2]`, `pipeline`/Defensive Soft-Pacing & log tách riêng `HIT` thuần vs `SHIELD` giữ `50` req + recovery trần `3` lần, Traffic-Shaping Interleaver round-robin/áp lực cao, Leaky Byte-Budget `360 MiB / 180s` ngủ sau enqueue, 429 classification & đồng bộ `stage_seconds` in-flight, S2 Save-First Isolation, `--s2-only` deferred retry & periodic checkpoint, `s2`/batch `150` + bisection `400`/10k-ref & lọc false-positive truncation, `export`, `checkpoint`, `metrics`/`traffic_shaping.enabled`, `run_crawl`/`--no-traffic-shaping`/quiet `httpx`), **M2** (**334 tests**: `gathering`, `hierarchy`, `cleaner`, `math_normalizer`, `sentence_splitter`, `bib_extractor`, `dedup`, `export_m2`, `pipeline`, `validate_m2` và kiểm thử tích hợp E2E), và **163 tests M3**: **phần A** (`src/tests/m3/test_matching_pipeline.py` **9** tests, `src/tests/m3/test_export_hf.py` **4** tests: contract 21 cột, Stage-1 blocking & 3 query-relative features, E2E CLI `--export-hf --verify-hf --plot-figures`, export đa shard ZSTD), **phần B** (`src/tests/m3/test_matching_cleaner.py`, `src/tests/m3/test_lexical_features.py`: **47 passed**), **phần C** (`src/tests/m3/test_labelling.py`: **36 passed** cho manual/auto/audit/kappa/splits/CLI và tích hợp thực 5 module `default_matching_stages()`), **phần D** (`src/tests/m3/test_ranker.py`: **52 passed** gồm unit/validation, `ranker_factory` và E2E với `evaluate_mrr5`/`plots`), và **phần E** (`src/tests/m3/test_hierarchy_features.py` **9** tests, `src/tests/m3/test_evaluation.py` **6** tests).
+- **Kiểm tra chuẩn phong cách mã:** `ruff check .` và `ruff format --check .` sạch 100%. Windows dùng `HF_HOME` trong `.venv/hf`, `TEMP`/`TMP` và basetemp ngắn trong `.venv/m2c-temp/` để tránh quyền cache và giới hạn độ dài đường dẫn.
 
 ---
 
@@ -718,59 +748,21 @@ ruff check . && ruff format --check . && pytest -q
 
 Khi tổng hợp dữ liệu đưa vào báo cáo và poster, nhóm tập trung làm nổi bật các luận điểm kỹ thuật then chốt:
 
-1. **Chuẩn lịch sự tuyệt đối đi cùng hiệu năng trần vật lý:**
-   - Bảo đảm nghiêm ngặt sàn socket End-to-Start $\ge 3.05\text{ s}$ và kết nối đơn tới `export.arxiv.org`.
-   - Vẫn đưa thời gian cào 5.000 ID về mức tối ưu **~5,8 – 6,5 giờ** nhờ kiến trúc **Producer–Consumer đa luồng**, đệm RAM Zero-Copy **96 MiB**, giải nén **1-pass 512 KiB**, và cơ chế **Paced Streaming 4.5 MiB/s**.
-2. **Kaggle Snapshot Metadata Discovery:**
+1. **Chuẩn lịch sự tuyệt đối đi cùng hiệu năng mục tiêu ~8 h / 5.000 ID (`v3.15` + `v3.16`):**
+   - Bảo đảm nghiêm ngặt nhịp Start-to-Start $\ge 3.05\text{ s}$ (đệm hậu tải `0.25 s`) và kết nối đơn tới `export.arxiv.org` (hỗ trợ cả HTTP/1.1 lẫn tùy chọn `--http2` single-connection `max_connections=1`).
+   - Đạt mục tiêu **~7,5 – 8,0 giờ / 5.000 ID** (khi tốc độ đường truyền wire $\ge 5.0\text{ MiB/s}$) nhờ kiến trúc **Producer–Consumer đa luồng**, **Zero-Body `Content-Type` Early-Reject** (`RST_STREAM` trên HTTP/2), tùy chọn **Cut-Through In-Flight Extraction `O(1)` RAM**, **Smooth Paced Streaming 6.0 MiB/s**, **Deficit Breather** không phạt kép và giữ ấm TCP Keep-Alive.
+2. **Fastly CDN-Aware Telemetry, Traffic-Shaping Interleaver & Self-Healing (`v3.16`–`v3.17.1`):**
+   - Tách riêng hiệu năng `HIT` thuần tại Fastly Edge vs `SHIELD_HIT`/`MISS` về Origin để không tự hạ nhịp oan khi origin chậm; kích *Defensive Soft-Pacing* giữ `50` request khi `HIT < 3.0 MiB/s` và chỉ tự ngủ `300 s` (tối đa `3` lần/phiên) khi `HIT < 2.0 MiB/s` kéo dài 2 cửa sổ; đo kiểm POP/VM trước crawl và so sánh HTTP/1.1 vs HTTP/2 bằng cặp ID lạnh tách rời `[0::2]` / `[1::2]`.
+   - Khi bật `traffic_shaping=True` (mặc định `v3.17`), giữ dây tải `4–6 MiB/s` đồng thời bẻ gãy chuỗi bài nặng bằng hoán vị tỷ lệ vàng trong chunk, xen kẽ `v2..vN` bài $\ge 25\text{ MiB}$ sau tối thiểu `15` version nhẹ (hoặc `3` version dưới trần đỏ, rải round-robin cuối pass), và kiểm soát leaky-bucket trượt `360 MiB / 180 s` ngủ sau `_enqueue_extract_job()`.
+3. **Kaggle Snapshot Metadata Discovery:**
    - Bước đột phá vận dụng hộp công cụ đề bài cho phép tải trước metadata 25.000 bài trong < 60s, loại bỏ 100% thời gian chờ và rủi ro rate limit trên Atom API.
-3. **Chịu lỗi mạng đa tầng (In-Place Range Resume & Stream Failure Isolation):**
-   - Khắc phục triệt để hiện tượng đứt luồng trên CDN Fastly cho các file khổng lồ bằng cơ chế nối `HTTP 206 Range` tại chỗ với đệm làm nguội $\ge 12\text{s}$–$14\text{s}$, cách ly đứt socket khỏi chuỗi phạt 429 leo thang.
-4. **Hai tầng trích dẫn linh hoạt (Dual-Engine Reference Fallback):**
-   - Tự động bóc tách `.bib/.bbl` khi Semantic Scholar chưa lập chỉ mục, nâng độ phủ trích dẫn lên mức tối đa.
-5. **Độ trung thực của cấu trúc cú pháp M2:**
+4. **Chịu lỗi mạng đa tầng (In-Place Range Resume & Stream Failure Isolation):**
+   - Khắc phục triệt để hiện tượng đứt luồng trên CDN Fastly cho các file khổng lồ bằng cơ chế nối `HTTP 206 Range` tại chỗ với đệm làm nguội $\ge 12\text{s}$–$14\text{s}$, cách ly đứt socket khỏi chuỗi phạt 429 leo thang, và tự fallback từ chế độ cut-through sang `Range` tại pass deferred.
+5. **Hai tầng trích dẫn linh hoạt & S2 High-Density Resilient Engine (`v3.18`):**
+   - Nâng lô S2 mặc định lên `150` bài/request (giảm `6×` số HTTP request), tự chia đôi trên `400` size-limit/`413`/`5xx`/ngưỡng `9.500` refs, diệt false-positive `/references`, lưu đĩa ngay từng bài (Save-First Isolation), dùng backoff S2 riêng `2→4→8→15 s` + AIMD hồi phục nhanh, và tự động bóc tách `.bib/.bbl` khi Semantic Scholar chưa lập chỉ mục.
+6. **Độ trung thực của cấu trúc cú pháp M2:**
    - Bảo toàn cấu trúc ngữ nghĩa của bài báo, tách rời tham khảo khỏi nội dung cây, và khử trùng lặp 2 cấp xuyên phiên bản giúp tối ưu hóa dung lượng lưu trữ Parquet mà không mất mát thông tin.
 
 ---
 
-*Tài liệu kỹ thuật được rà soát, tái cấu trúc và đồng bộ hóa chính xác 100% với mã nguồn `arxiv-pipeline` ngày **16/11/2026**.*
-
-
-## Tích hợp M2, Tối ưu & Kiểm định Corpus Thật (14/11/2026)
-
-`default_stages()` nối C gathering/hierarchy, B cleaner/math/split và D bib/dedup.
-`Corpus.tex_files()` đọc cả `.bbl`; khóa trùng cùng phiên bản ưu tiên `.bib`,
-giữ khai báo đầu khi cùng nguồn và ghi cảnh báo. Pipeline trích các citation key
-từ `.tex`/`.bbl` để lọc `.bib` (không phân biệt hoa/thường; bỏ lọc nếu có `\nocite{*}`)
-và bật `strict=False` để cứu hộ từng entry trên các file `.bib` lỗi cục bộ (chỉ báo
-lỗi khi không đọc được entry nào); `dedup` chia nhóm cùng năm quá lớn theo ký tự đầu để
-tránh suy biến $O(n^2)$. Pool nội dung bỏ cạnh gây chu trình, giữ nội dung con và các
-invariant DAG/duy nhất `(kind, content)`.
-
-Về biên phân tích LaTeX trên dữ liệu thật: `_math_body()` giữ khoảng trắng sau dấu
-`\` cuối thân toán (`\ `) để không escape ký tự đóng kế tiếp; `gathering.py` bổ sung
-`Verbatim`/`Verbatim*` vào `_LITERAL_ENVS`, chặn `\verb` không tràn dòng và giới hạn
-quét toán chưa đóng trước `\begin{document}`, `\end{document}`, `\begin{thebibliography}`
-và `\bibitem`; `hierarchy.py` phục hồi môi trường chưa đóng trước ranh giới tài liệu/tham
-khảo và lọc tiêu đề mục tham khảo chứa `\label{...}` hoặc dấu câu cuối.
-
-Pipeline chuyển số đếm `bib_fields_before` qua `PaperResult` kể cả khi chạy
-nhiều worker. Exporter ghi Parquet ZSTD, dictionary int8 và cột bắt buộc non-null;
-shard rỗng có 0 row groups. CLI vẫn từ chối output cũ nếu không có `--resume`;
-`src/notebooks/colab_parse.ipynb` chạy pilot rồi dùng `--resume` cho phần còn lại.
-Mỗi lô ghi marker `_export_pending.json` trước ba shard và CSV; khi khởi động
-lại, lô dở được rollback. CSV đã commit là nguồn khôi phục ID bài nếu `_done.txt`
-chưa kịp ghi. Summary và phân bố kind cộng cả cũ + mới. Bài lỗi được thử lại;
-lỗi đã giải quyết được gỡ khỏi `_errors.jsonl`, lịch sử giữ ở `parse.log`.
-Chỉ hỗ trợ một tiến trình ghi vào một output; chưa thử mất điện/hỏng filesystem.
-
-Test tích hợp dùng dữ liệu tổng hợp qua CLI → C/B/D → Parquet → validator E,
-gồm `.bib` + `.bbl`, heading tổ tiên trùng, resume, lỗi rồi retry và 2 worker.
-Trên corpus thật cục bộ (`data/papers/`, **10.000/25.000 ID** mục tiêu): chạy
-`src/run_parse.py --data-dir data --workers 12 --batch-size 500` đạt
-**10.000/10.000 bài thành công (`0` lỗi)** trong **678,06 s** (`67,81 ms/bài`,
-RAM đỉnh `1.629,2 MB`, trung bình `1.025,2 MB`, đầu vào `7.751.298.877 B` → đầu ra
-Parquet `286.068.147 B` qua `20` shard/bảng): **12.783** versions (**867** empty),
-**4.539.133** elements, **6.884.462** hierarchy, **373.776** bibtex; và
-`src/parsing/validate_m2.py --data-dir data` đạt **`PASS`** (exit `0`). Hiện còn chờ
-15.000 ID còn lại, benchmark Colab và ghép notebook/báo cáo sang `arxiv-book/m2/*`.
-Giữ nguyên phần M1 v3.14 và M3-A đã nhận từ `origin/main` (`5980068`).
+*Tài liệu kỹ thuật được rà soát, tái cấu trúc và đồng bộ hóa chính xác 100% với mã nguồn `arxiv-pipeline` ngày **27/11/2026**.*

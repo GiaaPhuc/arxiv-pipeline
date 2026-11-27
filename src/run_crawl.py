@@ -79,7 +79,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         metavar="N",
-        help="batch size for S2 POST /graph/v1/paper/batch (default 25)",
+        help="batch size for S2 POST /graph/v1/paper/batch (default 150, max 500)",
     )
     p.add_argument(
         "--enable-oai-dates",
@@ -96,7 +96,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--max-stream-mbps",
         type=float,
         default=None,
-        help="max sustained streaming download speed in MiB/s (default 4.5, recommended 12.0-18.0)",
+        help="max sustained streaming download speed in MiB/s (default 6.0, recommended 5.5-8.0)",
+    )
+    p.add_argument(
+        "--http2",
+        action="store_true",
+        help="enable optional single-connection HTTP/2 (RST_STREAM early abort via httpx)",
+    )
+    p.add_argument(
+        "--in-flight-extract",
+        action="store_true",
+        help="extract tar.gz/gzip streams in-flight directly to .vK.part/tex (O(1) RAM)",
+    )
+    p.add_argument(
+        "--no-traffic-shaping",
+        action="store_true",
+        help="disable v3.17 heavy interleaving & byte-budget governor",
     )
     return p.parse_args(argv)
 
@@ -116,6 +131,8 @@ def _setup_logging(data_dir: Path, s2_api_key: str | None = None) -> None:
         handlers=handlers,
         force=True,
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def _expand(ranges_path: Path, limit: int | None) -> Iterator[str]:
@@ -141,11 +158,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.enable_bib_fallback:
         overrides["enable_bib_fallback"] = True
     if args.s2_batch_size is not None:
-        overrides["s2_batch_size"] = args.s2_batch_size
+        overrides["s2_batch_size"] = min(max(args.s2_batch_size, 1), 500)
     if args.enable_oai_dates:
         overrides["enable_oai_dates"] = True
     if args.max_stream_mbps is not None:
         overrides["max_stream_mbps"] = args.max_stream_mbps
+    if args.http2:
+        overrides["use_http2"] = True
+    if args.in_flight_extract:
+        overrides["in_flight_extract"] = True
+    if args.no_traffic_shaping:
+        overrides["traffic_shaping"] = False
     config = Config.from_env(**overrides)
     try:
         all_ids = list(_expand(args.ranges, args.limit))
@@ -160,7 +183,9 @@ def main(argv: list[str] | None = None) -> int:
             f"contact set: {bool(config.contact)}; S2 key set: {bool(config.s2_api_key)}; "
             f"backup: every {config.backup_every_ids} ids -> {config.backup_dir or '-'}; "
             f"bib fallback: {config.enable_bib_fallback}; S2 batch size: {config.s2_batch_size}; "
-            f"OAI dates: {config.enable_oai_dates}; max stream mbps: {config.max_stream_mbps}"
+            f"OAI dates: {config.enable_oai_dates}; max stream mbps: {config.max_stream_mbps}; "
+            f"http2: {config.use_http2}; in-flight extract: {config.in_flight_extract}; "
+            f"traffic shaping: {config.traffic_shaping}"
         )
         return 0
     if not config.contact:
